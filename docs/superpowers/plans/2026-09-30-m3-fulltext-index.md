@@ -403,7 +403,7 @@ git commit -m "fix: 库层迁移改为一版本一事务，失败不再留下半
 - Test: `src-tauri/src/tokenize.rs` 的 `#[cfg(test)] mod tests`
 
 **Interfaces:**
-- Consumes: `jieba_rs` 0.11（`cut` → `Seg.word`，`cut_for_search` → `Token.word`）、`crate::db::open_in_memory`
+- Consumes: `jieba_rs` 0.11（`cut` 与 `cut_for_search` 都返回 `Vec<Token>`，取 `.word`；见事实 4）、`crate::db::open_in_memory`
 - Produces:
   - `pub fn index_text(text: &str) -> String`
   - `pub fn query_expression(query: &str, prefix: bool) -> Option<String>`
@@ -460,6 +460,11 @@ mod tests {
         assert_eq!(rows(&conn, "验收", false), vec![1]);
         assert_eq!(rows(&conn, "验收指标", false), vec![1], "查询侧切出来的词必须能和库里的对上");
         assert!(rows(&conn, "根本没写过", false).is_empty());
+        // 入库侧必须保留标点：`body_tokens` 就是 snippet() 拿来渲染的那一列，
+        // 谁在这里把标点过滤掉，摘要会变成「甲方要求验收指标」这种没气口的串，
+        // 而查询侧（:47 丢弃纯标点词）永远不会因此变红，所以只能在这一侧钉住。
+        assert!(index_text("合同，报价。").contains('，'), "入库侧不许过滤标点");
+        assert_eq!(index_text(""), "", "空串不该产出一个空格");
     }
 
     /// 事实 5：cut_for_search 会把「付款条件」再切成 付款/条件，所以分开的词也命得中。
@@ -515,7 +520,7 @@ mod tests {
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `cd src-tauri && cargo test --lib tokenize`
-Expected: 编译失败 `cannot find module or crate tokenize`（或 `unresolved module`）
+Expected: 编译失败 `cannot find function index_text` / `query_expression` / `clean_snippet`（`E0425`）。测试与实现同在一个新文件里，`mod tokenize;` 还没往 `lib.rs` 挂，所以报的是「函数找不到」而不是「模块找不到」。
 
 - [ ] **Step 3: 写实现**
 
