@@ -806,9 +806,15 @@ git commit -m "feat: M3 纯文本抽取走 chardetng 探测，UTF-16 靠 decode 
   - `pub fn sheet_text(path: &Path) -> AppResult<String>`
   - 私有的 `fn xml_texts(xml: &str, tag: &[u8]) -> AppResult<Vec<String>>`
 
+  两条收尾动作，都是 Task 3 已经踩过的形状（Task 3 的实现者实测出：带 `#[allow(dead_code)]` 的函数会被 rustc 当**额外的可达根**，所以它下游的私有函数不会被连带报）：
+  1. **删掉 `fail` 上面那条 `#[allow(dead_code)]`**（`extract.rs` 里注释写着「第一个 caller 在 Task 4 的 Office 分支」那一行）。本任务的 `xml_texts` / `office_text` / `sheet_text` 就是它的 caller，豁免留在原地就变成永久豁免。
+  2. `office_text` 与 `sheet_text` 自己要到 **Task 5** 的 `extract_one` 分派才有 caller，`mod extract` 是私有模块、`pub` 救不了 `dead_code`，所以这两条各带一点名 Task 5 的 `#[allow(dead_code)]`，**Task 5 落地时删掉**。`xml_texts` 只被 `office_text` 调用，按上面第 1 条实测出的规律不会单独被报；真被报了才加，并在报告里点名。
+
 - [ ] **Step 1: 写失败测试（4 条）**
 
-先在 tests 里放两个「造真文件」的 helper（`a3`/`a5` 探针验证过的写法，照抄）：
+测试模块顶部除了 `use super::*;` 还需要**两行**，本任务才编译得过（Task 3 之后 `extract.rs` 顶层只有 `use std::io::Read;` 和 `use std::path::Path;`，`use super::*` 带不进这两个）：`use std::io::Write;`（`ZipWriter::write_all` 是 `Write` 的方法，缺它会报 E0599 method not found）和 `use std::path::PathBuf;`（`make_office` 的返回类型，缺它是 E0412/E0425）。这两行是测试专用，别提到模块顶层 —— 和 Task 1 的 `params`、Task 2 的 `rusqlite::params` 同一个理由：`cargo clippy --lib` 不带 test cfg，顶层引入会被判 unused。
+
+先在 tests 里放一个「造真 zip 部件」的 helper（`a3`/`a5` 探针验证过的写法，照抄）；pptx 与 xlsx 两条测试各按自己的形状直接落文件，不复用它（pptx 要写三个 slide 部件，xlsx 得用 `rust_xlsxwriter`）：
 
 ```rust
     /// docx/pptx 本质是 zip + xml，测试里自己拼一个，省掉二进制 fixture。
@@ -947,6 +953,7 @@ fn xml_texts(xml: &str, tag: &[u8]) -> AppResult<Vec<String>> {
 }
 
 /// `slides = false` 走 docx（word/document.xml + `<w:t>`），true 走 pptx（ppt/slides/slideN.xml + `<a:t>`）。
+#[allow(dead_code)] // caller 是 Task 5 的 extract_one 分派，落地时删掉本行
 pub fn office_text(path: &Path, slides: bool) -> AppResult<String> {
     let file = std::fs::File::open(path).map_err(|e| AppError::io(path, &e))?;
     let mut zip = zip::ZipArchive::new(file)
@@ -993,6 +1000,7 @@ pub fn office_text(path: &Path, slides: bool) -> AppResult<String> {
 
 /// xlsx/xls 走 calamine。`open_workbook_auto` 后必须 `use calamine::Reader as _`，
 /// 且 `worksheet_range` 直接返回 `Result<Range, Error>`（不是双层 Result）。
+#[allow(dead_code)] // caller 是 Task 5 的 extract_one 分派，落地时删掉本行
 pub fn sheet_text(path: &Path) -> AppResult<String> {
     use calamine::Reader as _;
 
@@ -1022,7 +1030,12 @@ pub fn sheet_text(path: &Path) -> AppResult<String> {
 Run: `cd src-tauri && cargo test --lib extract`
 Expected: `8 passed`（Task 3 的 4 条 + 本任务 4 条）；全量 → `58 passed; 0 failed`
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: clippy + 提交**
+
+```bash
+cd src-tauri && cargo clippy --lib -- -D warnings && cargo clippy --lib --all-targets -- -D warnings
+```
+Expected: 两道都零告警。第一道专查上面两条新豁免够不够（`fail` 的那条删掉后不能反而变红）；第二道专查测试模块里的 helper 与断言。
 
 ```bash
 git add src-tauri/src/extract.rs
