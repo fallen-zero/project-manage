@@ -41,9 +41,9 @@
 | 1 | FTS5 虚表在本项目 bundled 构建里可用；`snippet()` / `bm25()` / `MATCH` / `DELETE WHERE rowid` 全部工作正常 | 探针 `a4`、`b3`：两列表 `fts5(name_tokens, body_tokens, tokenize='unicode61')` 上 `snippet(…, 1, '[', ']', '⋯', 12)` 返回字符串、`bm25` 返回负浮点 |
 | 2 | **rowid 对齐可行且必要**：`index_docs` 用 `doc_rowid INTEGER PRIMARY KEY AUTOINCREMENT` 承载关系，FTS 用同一个 rowid 写入/删除；`id TEXT UNIQUE` 继续做业务主键 | 探针 `b3`：`INSERT INTO index_docs_fts (rowid, …)` + `JOIN … ON d.doc_rowid = f.rowid` 命中；按 `doc_id` 列删是**全表扫**，故不用 `doc_id` 方案 |
 | 3 | 删 `index_docs` 行**不会**连带删 FTS 行（虚表无 FK），必须同一事务两点删 | 探针 `b3`：`DELETE FROM index_docs` 后 `SELECT count(*) FROM index_docs_fts` = 1 |
-| 4 | jieba：`Jieba::new()` 可作为 `OnceLock` 的初始化闭包；`cut()` 返回 `Vec<Seg>`（`.word`），`cut_for_search()` 返回 `Vec<Token>`（`.word`） | 探针 `a2`、`a14` |
+| 4 | jieba：`Jieba::new()` 可作为 `OnceLock` 的初始化闭包；`cut()` 与 `cut_for_search()` **都返回 `Vec<Token<'a>>`**，取 `.word`；0.11.0 里没有 `Seg` 这个类型（`jieba-rs-0.11.0/src/lib.rs:1018` 与 `:328`） | 探针 `a2`、`a14` + 读包源码 |
 | 5 | **`cut_for_search` 是 `cut` 的超集但不万能**：`付款条件` → 同时产出 `付款/条件/付款条件`；而 `维保期` 不被再切，仍是单个词 | 探针 `a16` 打印 `这 是 另 一份 报价 价单 报价单 … 付款 条件 付款条件 …` |
-| 6 | **两段查询是必需的**：`"维保"` 精确 0 命中、`"维保"*` 前缀 1 命中；前缀的 `*` 必须写在**引号外面** | 探针 `a15`、`a16` |
+| 6 | **两段查询是必需的**：`"维保"` 精确 0 命中、`"维保"*` 前缀 1 命中；前缀的 `*` 必须写在**引号外面**。**夹具限制（Task 2/8 实测踩过）**：造这条场景时文件名不能写 `维保说明.docx` —— 入库侧 `cut_for_search(text, true)` 的 HMM 会把「维保说明」切成 `维保 说明`，`name_tokens` 里就有了独立的 `维保`，精确段直接命中，「精确 0 命中」的前提当场失效。两处统一写 `维保期说明.docx`（切出 `维保期 说明`） | 探针 `a15`、`a16` + Task 2 实测 |
 | 7 | 引号包裹后 FTS5 语法无法从查询串注入：`NEAR(合同 报价)` → `"NEAR" AND "合同" AND "报价"`，`合同*` → `"合同"`，`-合同` → `"合同"`，`"合同"` → `"合同"`；内部双引号用 `""` 转义 | 探针 `a11` |
 | 8 | 纯标点词必须从**查询侧**丢弃（unicode61 只把字母/数字/符号当字符，标点天然是分隔符、永不进索引），留着只会让整条查询变 0 命中；**入库侧保留标点**，snippet 才可读 | 探针 `a13`：`q="验收，"` → `"验收"` 命中 1；`q="，"` → 无表达式 |
 | 9 | `snippet` 出来的词之间带我们插入的空格；清洗规则「空格相邻任一侧是 CJK 就删」得到可读摘要，且 Latin-Latin 之间的空格不被吃掉 | 探针 `a12`、`a13`：`甲方 要求 ， 响应 时间 不 超过 800 毫秒 。 [验收] 指标 见 合同⋯` → `甲方要求，响应时间不超过800毫秒。[验收]指标见合同⋯` |
@@ -408,7 +408,8 @@ git commit -m "fix: 库层迁移改为一版本一事务，失败不再留下半
   - `pub fn index_text(text: &str) -> String`
   - `pub fn query_expression(query: &str, prefix: bool) -> Option<String>`
   - `pub fn clean_snippet(raw: &str) -> String`
-  - `pub fn is_cjk(c: char) -> bool`（`pub(crate)` 即可）
+  - `pub(crate) fn is_cjk(c: char) -> bool`
+  - 三条 `pub fn` 各带一条 `#[allow(dead_code)]`：生产调用点要到 Task 7/8 才出现，本模块挂上时没有 caller，而 Step 5 的闸是 `cargo clippy --lib -- -D warnings`（`--lib` 不编译测试模块，测试里的调用救不了它）。这与 `db.rs:30` 既有写法同形。**Task 7/8 落地时必须删掉对应那行 `allow`**，否则就是永久豁免。
 
 - [ ] **Step 1: 写失败测试（5 条）**
 
@@ -474,7 +475,7 @@ mod tests {
     #[test]
     fn prefix_stage_rescues_queries_shorter_than_the_indexed_word() {
         let conn = fts();
-        put(&conn, 1, "维保说明.docx", "维保期为十二个月");
+        put(&conn, 1, "维保期说明.docx", "维保期为十二个月");
         assert!(rows(&conn, "维保", false).is_empty(), "先证明精确段确实够不着");
         assert_eq!(rows(&conn, "维保", true), vec![1], "前缀段把它救回来");
     }
@@ -505,7 +506,7 @@ mod tests {
             clean_snippet("the [quick] brown fox 与 中文 混排"),
             "the [quick] brown fox与中文混排"
         );
-        assert_eq!(clean_snippet("报价 单 2026 年"), "报价单2026 年");
+        assert_eq!(clean_snippet("报价 单 2026 年"), "报价单2026年");
         assert_eq!(clean_snippet(""), "");
     }
 }
@@ -577,7 +578,7 @@ pub fn query_expression(query: &str, prefix: bool) -> Option<String> {
     (!terms.is_empty()).then(|| terms.join(" AND "))
 }
 
-fn is_cjk(c: char) -> bool {
+pub(crate) fn is_cjk(c: char) -> bool {
     matches!(c as u32,
         0x3000..=0x303F   // CJK 符号与标点
         | 0x3400..=0x4DBF // 扩展 A
@@ -612,7 +613,7 @@ pub fn clean_snippet(raw: &str) -> String {
 Run: `cd src-tauri && cargo test --lib tokenize`
 Expected: `5 passed`；再跑全量 `cargo test --lib` → `50 passed; 0 failed`
 
-如果 `clean_snippet` 的第三条断言（`报价 单 2026 年`）不成立，先打印实际输出再判断：「单 2026」之间左邻是 CJK、右邻是数字，按规则会删空格，得到 `报价单2026 年`。以这个为准，不要为了过测试放宽规则。
+第三条断言按规则就是全删：`报价|单` 两侧都 CJK，`单|2026` 左邻 CJK，`2026|年` 右邻 CJK —— 规则只看「任一侧是不是 CJK」，不看另一侧是数字还是拉丁字母，所以得到 `报价单2026年`。要验「Latin-Latin 空格保留」请看上一条断言（`the [quick] brown fox 与 中文 混排`）。不要为了迁就某个期望值去给数字加例外分支。
 
 - [ ] **Step 5: clippy + 提交**
 
@@ -1860,7 +1861,7 @@ git commit -m "feat: M3 索引写入层：两点写、同路径复用 rowid、�
         let c = conn();
         seed_project(&c, "p1");
         write_doc(&c, "p1", &file("C:/x/合同验收说明.docx"), DocOutcome::Ok("甲方要求验收指标见合同附件".into())).unwrap();
-        write_doc(&c, "p1", &file("C:/x/维保说明.docx"), DocOutcome::Ok("维保期为十二个月".into())).unwrap();
+        write_doc(&c, "p1", &file("C:/x/维保期说明.docx"), DocOutcome::Ok("维保期为十二个月".into())).unwrap();
         write_doc(&c, "p1", &file("C:/x/报价单.xlsx"), DocOutcome::Ok("里面只有付款条件与验收流程".into())).unwrap();
         c
     }
@@ -1893,7 +1894,7 @@ git commit -m "feat: M3 索引写入层：两点写、同路径复用 rowid、�
         let got = hits(&c, "维保");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].matched_by, "prefix", "放宽过的命中要能说清：{:?}", got[0]);
-        assert!(got[0].path.contains("维保说明"));
+        assert!(got[0].path.contains("维保期说明"), "夹具名见事实 6 的夹具限制");
     }
 
     #[test]
