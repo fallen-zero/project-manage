@@ -4,6 +4,18 @@
   "description": "主窗口的默认权限（M0 只需 IPC，插件权限随里程碑追加）",
   "windows": ["main"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "dialog:default",
+    "opener:default",
+    "clipboard-manager:allow-write-text",
+    {
+      "identifier": "opener:allow-reveal-item-in-dir",
+      "description": "打开用户登记的任意本地项目目录：登记行为本身由用户发起，路径范围无法预先枚举",
+      "allow": [{ "path": "**" }]
+    },
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [{ "path": "**" }]
+    }
   ]
 }

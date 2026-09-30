@@ -81,7 +81,9 @@ fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
     })
 }
 
-/// 线性版本迁移。M0 只建立版本表本身，业务表随里程碑追加。
+/// 线性版本迁移：一个版本一段 DDL，只追加不改历史，便于备份包跨版本恢复。
+const TARGET_VERSION: i64 = 2;
+
 fn migrate(conn: &Connection) -> AppResult<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_meta (
@@ -98,20 +100,65 @@ fn migrate(conn: &Connection) -> AppResult<()> {
         )
         .unwrap_or(0);
 
-    if current < 1 {
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS settings (
-                 key   TEXT PRIMARY KEY,
-                 value TEXT NOT NULL
-             );",
-        )?;
+    for target in (current + 1)..=TARGET_VERSION {
+        conn.execute_batch(match target {
+            1 => V1,
+            2 => V2,
+            _ => "",
+        })?;
         conn.execute(
-            "INSERT INTO schema_meta (version, applied_at) VALUES (1, datetime('now'))",
-            [],
+            "INSERT INTO schema_meta (version, applied_at) VALUES (?1, datetime('now'))",
+            [target],
         )?;
     }
     Ok(())
 }
+
+const V1: &str = "CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);";
+
+const V2: &str = "
+CREATE TABLE projects (
+    id                TEXT PRIMARY KEY,
+    name              TEXT NOT NULL,
+    code              TEXT,
+    manager           TEXT,
+    customer          TEXT,
+    contact_name      TEXT,
+    contact_phone     TEXT,
+    contract_no       TEXT,
+    contract_period   TEXT,
+    delivery_deadline TEXT,
+    status            TEXT NOT NULL DEFAULT '立项'
+                      CHECK (status IN ('立项','需求','开发','测试','预发','上线','运维','归档')),
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at        TEXT
+);
+
+CREATE TABLE project_tags (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    tag        TEXT NOT NULL,
+    UNIQUE (project_id, tag)
+);
+
+CREATE TABLE project_dirs (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL CHECK (kind IN ('root','entry')),
+    path       TEXT NOT NULL,
+    label      TEXT,
+    sort       INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (project_id, path)
+);
+
+-- 一个项目只有一个主根目录，这是索引器「一个根一个扫描任务」的前提
+CREATE UNIQUE INDEX ux_project_root ON project_dirs(project_id) WHERE kind = 'root';
+";
 
 #[cfg(test)]
 mod tests {
