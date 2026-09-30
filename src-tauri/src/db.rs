@@ -82,7 +82,7 @@ fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
 }
 
 /// 线性版本迁移：一个版本一段 DDL，只追加不改历史，便于备份包跨版本恢复。
-const TARGET_VERSION: i64 = 3;
+const TARGET_VERSION: i64 = 4;
 
 fn migrate(conn: &Connection) -> AppResult<()> {
     conn.execute_batch(
@@ -105,6 +105,7 @@ fn migrate(conn: &Connection) -> AppResult<()> {
             1 => V1,
             2 => V2,
             3 => V3,
+            4 => V4,
             _ => "",
         })?;
         conn.execute(
@@ -255,9 +256,159 @@ CREATE INDEX ix_ledger_link_project ON ledger_links(project_id);
 CREATE INDEX ix_ledger_note_project ON ledger_notes(project_id);
 ";
 
+/// v4：全文索引。三处设计与 spec 有意不同，都是为了实测结果让路：
+/// 1. `doc_rowid` 是对齐锚。FTS5 的 rowid 只能是整数，而业务主键是 TEXT uuid，所以主表额外
+///    带一个 AUTOINCREMENT 整数列给虚表当 rowid；按 `doc_id` 列删虚表是全表扫，按 rowid 是点删。
+/// 2. 虚表不带 `content=`，是独立存储。正文不另存一份原文：磁盘上本来就有一份。
+/// 3. `missing` 现在就进 CHECK。CHECK 约束无法 ALTER，M5 的启动对账要它就得重建整张表。
+const V4: &str = "
+CREATE TABLE index_docs (
+    doc_rowid    INTEGER PRIMARY KEY AUTOINCREMENT,
+    id           TEXT    NOT NULL UNIQUE,
+    project_id   TEXT    NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    path         TEXT    NOT NULL,
+    ext          TEXT    NOT NULL,
+    size         INTEGER NOT NULL DEFAULT 0,
+    mtime        INTEGER NOT NULL DEFAULT 0,
+    index_status TEXT    NOT NULL DEFAULT 'pending'
+                 CHECK (index_status IN ('pending','ok','skipped','failed','missing')),
+    skip_reason  TEXT,
+    error_msg    TEXT,
+    indexed_at   TEXT,
+    created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (project_id, path)
+);
+
+CREATE INDEX ix_index_docs_project ON index_docs(project_id);
+CREATE INDEX ix_index_docs_status  ON index_docs(index_status);
+
+CREATE VIRTUAL TABLE index_docs_fts USING fts5(
+    name_tokens,
+    body_tokens,
+    tokenize = 'unicode61'
+);
+
+INSERT OR IGNORE INTO settings (key, value) VALUES
+    ('index_exclude_dirs', 'node_modules,dist,build,target,__pycache__,.git'),
+    ('index_max_file_bytes', '20971520'),
+    ('index_max_files_per_project', '50000');
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::params;
+
+    /// v4 建表必须真的成功：FTS5 虚表在 bundled 构建里不是「假设可用」，这里直接建一次。
+    #[test]
+    fn v4_creates_index_tables_and_fts_is_writable() {
+        let conn = open_in_memory().unwrap();
+        // index_docs.project_id 带外键，父行必须先存在。
+        conn.execute(
+            "INSERT INTO projects (id, name) VALUES ('p-1', '索引测试项目')",
+            [],
+        )
+        .unwrap();
+        // 表存在
+        let names: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                  WHERE name IN ('index_docs', 'index_docs_fts') ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(names, vec!["index_docs", "index_docs_fts"]);
+
+        // rowid 对齐：先插主表拿 rowid，再用同一个 rowid 插 FTS，JOIN 必须回得来
+        conn.execute(
+            "INSERT INTO index_docs (id, project_id, path, ext, index_status)
+             VALUES ('u-1', 'p-1', 'C:/x/合同验收.docx', 'docx', 'ok')",
+            [],
+        )
+        .unwrap();
+        let rowid = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO index_docs_fts (rowid, name_tokens, body_tokens) VALUES (?1, ?2, ?3)",
+            params![rowid, "合同 验收", "甲方 要求 验收 指标"],
+        )
+        .unwrap();
+        let hit: String = conn
+            .prepare(
+                "SELECT d.id FROM index_docs_fts f
+                   JOIN index_docs d ON d.doc_rowid = f.rowid
+                  WHERE index_docs_fts MATCH ?1",
+            )
+            .unwrap()
+            .query_row(params!["\"验收\""], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hit, "u-1");
+    }
+
+    /// status 是 CHECK 约束，写错值必须在库层就挡住，而不是靠每个调用方自觉；
+    /// `missing` 也要现在就进枚举——CHECK 改不动，M5 的对账再补就得重建整张表。
+    #[test]
+    fn index_status_check_accepts_the_five_documented_states() {
+        let conn = open_in_memory().unwrap();
+        // index_docs.project_id 有 REFERENCES projects(id) 外键，而 after_open 里
+        // PRAGMA foreign_keys=ON，所以必须先落一行父项目，插入才走得通。
+        conn.execute(
+            "INSERT INTO projects (id, name) VALUES ('p-1', '索引测试项目')",
+            [],
+        )
+        .unwrap();
+        for (i, status) in ["pending", "ok", "skipped", "failed", "missing"]
+            .iter()
+            .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO index_docs (id, project_id, path, ext, index_status)
+                 VALUES (?1, ?2, ?3, 'txt', ?4)",
+                params![format!("u-{i}"), "p-1", format!("C:/x/{i}.txt"), status],
+            )
+            .unwrap_or_else(|e| panic!("{status} 应该在枚举内：{e}"));
+        }
+        let e = conn
+            .execute(
+                "INSERT INTO index_docs (id, project_id, path, ext, index_status)
+                 VALUES ('u-x', 'p-1', 'C:/x/xx.txt', 'txt', 'done')",
+                [],
+            )
+            .unwrap_err();
+        assert!(
+            e.to_string().contains("CHECK"),
+            "未登记的状态必须被 CHECK 约束拒绝，实际：{e}"
+        );
+    }
+
+    /// 上限与排除规则要能被 UI 改，所以 v4 必须落种子值；否则 Task 6 的 load() 拿到空字符串，
+    /// 会把「没有排除目录」当成默认行为，把 node_modules 全灌进索引。
+    #[test]
+    fn v4_seeds_index_settings_with_the_documented_limits() {
+        let conn = open_in_memory().unwrap();
+        let read = |key: &str| -> String {
+            conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(
+            read("index_exclude_dirs"),
+            "node_modules,dist,build,target,__pycache__,.git"
+        );
+        assert_eq!(read("index_max_file_bytes"), "20971520", "spec 定的单文件 20 MB");
+        assert_eq!(read("index_max_files_per_project"), "50000");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COALESCE(MAX(version),0) FROM schema_meta",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            4
+        );
+    }
 
     #[test]
     fn durable_open_really_runs_in_wal() {
