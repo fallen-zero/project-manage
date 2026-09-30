@@ -3,6 +3,7 @@ mod error;
 mod ledger;
 mod project;
 mod search;
+mod tokenize;
 mod vault;
 
 use std::path::PathBuf;
