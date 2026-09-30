@@ -462,7 +462,7 @@ mod tests {
         assert!(rows(&conn, "根本没写过", false).is_empty());
         // 入库侧必须保留标点：`body_tokens` 就是 snippet() 拿来渲染的那一列，
         // 谁在这里把标点过滤掉，摘要会变成「甲方要求验收指标」这种没气口的串，
-        // 而查询侧（:47 丢弃纯标点词）永远不会因此变红，所以只能在这一侧钉住。
+        // 而查询侧（`query_expression` 里丢弃非字母数字词的那个 filter）永远不会因此变红，所以只能在这一侧钉住。
         assert!(index_text("合同，报价。").contains('，'), "入库侧不许过滤标点");
         assert_eq!(index_text(""), "", "空串不该产出一个空格");
     }
