@@ -62,6 +62,7 @@
 | 22 | `settings` 读回缺失键时 `query_row(...).ok()` 得到 `None`，逗号分隔值按 `trim` + 去空处理可用；值里允许出现空格（`目标 目录`） | 探针 `b2` |
 | 23 | `tauri::Emitter::emit<S: Serialize + Clone>(&self, event, payload)` 在 2.12.0 存在（`tauri-2.12.0/src/lib.rs:961`），`AppHandle` 可 move 进线程 | 读 tauri 源码 |
 | 24 | `after_open` 里 `PRAGMA foreign_keys=ON` 是生效的，所以 **插 `index_docs` 必须先有对应 `projects` 行**，否则 `FOREIGN KEY constraint failed`；Task 1 的两条建表测试因此各带一行 `INSERT INTO projects`（Task 7/8/9 的测试用 `seed_project()` 满足同一约束）。另一半：FTS5 虚表没有 FK，**不受 `ON DELETE CASCADE` 连带**——软删/硬删项目只会带走 `index_docs` 行，虚表留下孤儿行，只能由写入侧按 rowid 显式清（Task 7 的 `clear_project`/`delete_doc`），检索侧靠 `JOIN index_docs` 天然过滤 | 探针 `a18`（Task 1 落地时实测） |
+| 25 | **`read_event` 对畸形 Office XML 不报错，只是不发收口信号**：`IllFormedError::MissingEndTag` 的文档明写「This error is returned from `Reader::read_to_end`」，逐事件读不会拿到，缺闭标签的输入一路走到 `Event::Eof`。且 `check_end_names = false` 时 End 事件**不被改写**、带的是那个不匹配闭标签自己的名字（`<w:t>abc</w:p>` 的 End 是 `p`），所以「End 名字等于 tag 才收口」在这类输入上永远收不了口。`escape::unescape` 只解析 5 个预定义实体与 `&#…;` 数字引用，其它命名实体回 `UnrecognizedEntity` | 读 `quick-xml-0.41.0`：`errors.rs:117-121`、`reader/mod.rs:111-113`（同处注明 Default 为 `true`，我们是显式关掉的）、`escape.rs:222` 与 `:47-49`。Task 4 评审据此重写状态机：三个收口时机（End / 新 Start / EOF）统一走 `close_run` |
 
 **这些是 spec 第 127 行的更正**：spec 写「`content_rowid` 对齐 `index_docs.id`」，但 `id` 是 TEXT uuid，SQLite 的 rowid 必须是整数。实际采用**事实 2** 的形状：`index_docs` 加一列 `doc_rowid INTEGER PRIMARY KEY AUTOINCREMENT` 作为对齐锚，`id TEXT UNIQUE` 保留给业务与 IPC。Task 12 会把 spec 这句改过来。
 
@@ -849,15 +850,28 @@ git commit -m "feat: M3 纯文本抽取走 chardetng 探测，UTF-16 靠 decode 
         assert!(!text.contains("&apos;") && !text.contains("apos"), "正文里不许残留实体片段：{text:?}");
     }
 
-    /// <w:instrText> 是域代码（HYPERLINK 之类），不是正文；只认 <w:t> 就自动跳过。
+    /// `<w:instrText>` 是域代码（HYPERLINK 之类），不是正文；只认 `<w:t>` 就自动跳过。
+    /// 名字里的两件事都得有断言撑着：Task 8 的摘要可读性依赖「每个 run 独立成段、段间用 `\n`
+    /// 拼接」这个形状，而畸形输入上的「跳过域代码」只在状态机肯收口才成立。
     #[test]
     fn docx_skips_field_codes_and_keeps_paragraph_breaks() {
         let dir = tempfile::tempdir().unwrap();
         let xml = r#"<w:document xmlns:w="http://x"><w:body><w:p><w:r><w:t>正文一</w:t><w:br/><w:t>正文二</w:t></w:r></w:p><w:p><w:r><w:instrText>HYPERLINK</w:instrText><w:t>正文三</w:t></w:r></w:p></w:body></w:document>"#;
         let p = make_office(dir.path(), "f.docx", "word/document.xml", xml);
         let text = office_text(&p, false).unwrap();
-        assert!(text.contains('一') && text.contains('二') && text.contains('三'), "{text:?}");
+        assert_eq!(text, "正文一\n正文二\n正文三", "run 边界就是换行，域代码那一串不许混进来");
+
+        // 畸形一：`<w:t>` 没闭合就开新标签。没有 Start 收口，HYPERLINK 会被并进正文。
+        let open_run = r#"<w:document xmlns:w="http://x"><w:body><w:p><w:r><w:t>半截正文<w:instrText>HYPERLINK</w:instrText></w:t></w:r></w:p></w:body></w:document>"#;
+        let text = office_text(&make_office(dir.path(), "open.docx", "word/document.xml", open_run), false).unwrap();
+        assert!(text.contains("半截正文"), "上一个 run 该在开新标签时收口，不能丢字：{text:?}");
         assert!(!text.contains("HYPERLINK"), "域代码不该进索引：{text:?}");
+
+        // 畸形二：文件在半句正文上到底。quick-xml 不报错，只回 Eof；
+        // 没有 EOF 收口，这半句就静默消失。
+        let truncated = r#"<w:document xmlns:w="http://x"><w:body><w:p><w:r><w:t>尾巴正文"#;
+        let text = office_text(&make_office(dir.path(), "trunc.docx", "word/document.xml", truncated), false).unwrap();
+        assert!(text.contains("尾巴正文"), "截断处已攒到的正文必须收口，不能静默丢：{text:?}");
     }
 
     /// pptx 的正文在 ppt/slides/slideN.xml 里，逐个 slide 按序号读，文本节点是 <a:t>。
@@ -915,8 +929,8 @@ Expected: `cannot find function office_text` / `sheet_text`
 /// 事实 12：docx 的正文节点是 `<w:t>`、pptx 是 `<a:t>`，`local_name` 都是 `t`。
 /// 所以两种格式共用一个循环：**区分范围靠读哪个部件**（`word/document.xml` vs
 /// `ppt/slides/slideN.xml`），传进来的 tag 两边都是 `b"t"`，别误读成它在筛命名空间。
-/// `check_end_names = false` 是因为
-/// Office 的命名前缀只在文档内部一致，关掉能避免严格校验把整份文件判死。
+/// `check_end_names = false` 是因为 Office 的命名前缀只在文档内部一致，
+/// 关掉能避免严格校验把整份文件判死。
 fn xml_texts(xml: &str, tag: &[u8]) -> AppResult<Vec<String>> {
     use quick_xml::events::Event;
 
@@ -930,8 +944,23 @@ fn xml_texts(xml: &str, tag: &[u8]) -> AppResult<Vec<String>> {
             .read_event()
             .map_err(|e| fail("extract_failed", &format!("XML 解析失败：{e}"), "文件可能已损坏或是加密的 Office 文档"))?
         {
-            Event::Eof => break,
-            Event::Start(e) if e.local_name().as_ref() == tag => inside = true,
+            Event::Eof => {
+                // 半截文件：quick-xml 把剩余内容当 UpToEof 发出来之后就回 Eof，**不报错**
+                // （`IllFormedError::MissingEndTag` 只有 `read_to_end` 才会给）。这里不收口，
+                // 最后一段正文就静默消失 —— 正是「不报错、只是搜不到」那一类。
+                if inside {
+                    close_run(&mut cur, &mut out, &mut inside);
+                }
+                break;
+            }
+            Event::Start(e) => {
+                // `<w:t>` 在 OOXML 里不嵌套：run 没闭合就又开一个标签，说明上一个 run 到此为止。
+                // 不关掉，紧随其后的 `<w:instrText>` 域代码就会被并进正文、进索引、进摘要。
+                if inside {
+                    close_run(&mut cur, &mut out, &mut inside);
+                }
+                inside = e.local_name().as_ref() == tag;
+            }
             Event::Text(t) if inside => {
                 let s = t
                     .xml10_content()
@@ -941,21 +970,38 @@ fn xml_texts(xml: &str, tag: &[u8]) -> AppResult<Vec<String>> {
             Event::GeneralRef(r) if inside => {
                 // 载荷是裸片段（"apos" / "#39"），补回 & 和 ; 才能交给 unescape。
                 let frag = String::from_utf8_lossy(r.as_ref()).into_owned();
-                if let Ok(s) = quick_xml::escape::unescape(&format!("&{frag};")) {
-                    cur.push_str(&s);
+                match quick_xml::escape::unescape(&format!("&{frag};")) {
+                    Ok(s) => cur.push_str(&s),
+                    // `unescape` 只认 5 个预定义实体和 `&#…;` 数字引用（它用
+                    // `resolve_predefined_entity`），其它命名实体回 Err。这里保留 `&片段;` 原文
+                    // 而不是丢弃：少一个字符是静默的，留原文至多让那一个词命中差一点。
+                    Err(_) => {
+                        cur.push('&');
+                        cur.push_str(&frag);
+                        cur.push(';');
+                    }
                 }
             }
-            Event::End(e) if inside && e.local_name().as_ref() == tag => {
-                if !cur.trim().is_empty() {
-                    out.push(std::mem::take(&mut cur));
-                }
-                cur.clear();
-                inside = false;
+            Event::End(_) if inside => {
+                // 不匹配的闭标签同样收口，且不能要求它等于 tag：`check_end_names = false` 时
+                // quick-xml 原样带回它自己的名字（`<w:t>abc</w:p>` 的 End 是 "p"），
+                // 真去比名字，这类输入就永远收不了口。
+                close_run(&mut cur, &mut out, &mut inside);
             }
             _ => {}
         }
     }
     Ok(out)
+}
+
+/// 攒到的正文只在 run 结束时进 `out`。三个收口时机（End、新的 Start、EOF）都走这一条，
+/// 少一个就是一种静默失效。`<w:t>` 不嵌套，所以不需要深度计数。
+fn close_run(cur: &mut String, out: &mut Vec<String>, inside: &mut bool) {
+    if !cur.trim().is_empty() {
+        out.push(std::mem::take(cur));
+    }
+    cur.clear();
+    *inside = false;
 }
 
 /// `slides = false` 走 docx（word/document.xml + `<w:t>`），true 走 pptx（ppt/slides/slideN.xml + `<a:t>`）。
