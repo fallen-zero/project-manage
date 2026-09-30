@@ -637,7 +637,7 @@ git commit -m "feat: M3 分词模块用单一 jieba 词典包住入库与查询�
 **Files:**
 - Create: `src-tauri/src/extract.rs`（本任务只写文本分支 + 骨架）
 - Modify: `src-tauri/src/lib.rs`（`mod extract;`）
-- Test: `src-tauri/src/extract.rs` 的 `mod tests`（本任务四条全部喂字节串，**不碰文件系统**，所以不用 `tempfile`；落盘路径由 Task 5 的 `extract_one` 分派测试覆盖）
+- Test: `src-tauri/src/extract.rs` 的 `mod tests`（本任务四条全部喂字节串，**不碰文件系统**，所以不用 `tempfile`；落盘路径由 Task 5 的 `extract_text` 分派测试覆盖）
 
 **Interfaces:**
 - Consumes: `chardetng::EncodingDetector::new(Iso2022JpDetection::Deny)` + `guess(None, Utf8Detection::Deny)`、`encoding_rs`、`crate::error::{AppError, AppResult}`（`AppError::io(path, &e)` 已存在，`src-tauri/src/error.rs:21`，错误码 `fs_failed`）
@@ -646,7 +646,7 @@ git commit -m "feat: M3 分词模块用单一 jieba 词典包住入库与查询�
   - `fn decode_text_bytes(bytes: &[u8]) -> String`（**不是 `AppResult`**：探测解不出时用替换字符照样入库，这条函数没有失败分支；包成 `Result` 会被 `cargo clippy -- -D warnings` 的 `unnecessary_wraps` 拦下）
   - `fn read_text_file(path: &Path) -> AppResult<String>`
 
-  `fail` 与 `read_text_file` 在本任务**没有 caller**（前者第一次被 Task 4 的 Office 分支调用，后者被 Task 5 的 `extract_one` 调用），而 `mod extract;` 是私有模块，`pub` 也救不了 `dead_code`，`cargo clippy --lib -- -D warnings` 会当场红。两处各带一条 `#[allow(dead_code)]` 并在注释里写明是哪个任务接上，**Task 4/5 落地时必须删掉对应那行**（与 Task 2 的三条 `pub fn` 同形，那三条的删除责任已经记在 Task 7/8）。若 rustc 把不可达链条往下传、连 `decode_text_bytes` 也报 `never used`，就同样加一条 allow 并在报告里点名 —— 它的删除责任跟 `read_text_file` 一起走 Task 5，别顺手豁免到永久。
+  `fail` 与 `read_text_file` 在本任务**没有 caller**（前者第一次被 Task 4 的 Office 分支调用，后者被 Task 5 的 `extract_text` 调用），而 `mod extract;` 是私有模块，`pub` 也救不了 `dead_code`，`cargo clippy --lib -- -D warnings` 会当场红。两处各带一条 `#[allow(dead_code)]` 并在注释里写明是哪个任务接上，**Task 4/5 落地时必须删掉对应那行**（与 Task 2 的三条 `pub fn` 同形，那三条的删除责任已经记在 Task 7/8）。若 rustc 把不可达链条往下传、连 `decode_text_bytes` 也报 `never used`，就同样加一条 allow 并在报告里点名 —— 它的删除责任跟 `read_text_file` 一起走 Task 5，别顺手豁免到永久。
 
 - [ ] **Step 1: 写失败测试（4 条）**
 
@@ -763,7 +763,7 @@ fn decode_text_bytes(bytes: &[u8]) -> String {
     decoded.into_owned()
 }
 
-#[allow(dead_code)] // caller 是 Task 5 的 extract_one 分派，落地时删掉本行（decode_text_bytes 若一起被报，同批删）
+#[allow(dead_code)] // caller 是 Task 5 的 extract_text 分派，落地时删掉本行（decode_text_bytes 若一起被报，同批删）
 fn read_text_file(path: &Path) -> AppResult<String> {
     let mut buf = Vec::new();
     std::fs::File::open(path)
@@ -809,7 +809,7 @@ git commit -m "feat: M3 纯文本抽取走 chardetng 探测，UTF-16 靠 decode 
 
   两条收尾动作，都是 Task 3 已经踩过的形状（Task 3 的实现者实测出：带 `#[allow(dead_code)]` 的函数会被 rustc 当**额外的可达根**，所以它下游的私有函数不会被连带报）：
   1. **删掉 `fail` 上面那条 `#[allow(dead_code)]`**（`extract.rs` 里注释写着「第一个 caller 在 Task 4 的 Office 分支」那一行）。本任务的 `xml_texts` / `office_text` / `sheet_text` 就是它的 caller，豁免留在原地就变成永久豁免。
-  2. `office_text` 与 `sheet_text` 自己要到 **Task 5** 的 `extract_one` 分派才有 caller，`mod extract` 是私有模块、`pub` 救不了 `dead_code`，所以这两条各带一点名 Task 5 的 `#[allow(dead_code)]`，**Task 5 落地时删掉**。`xml_texts` 只被 `office_text` 调用，按上面第 1 条实测出的规律不会单独被报；真被报了才加，并在报告里点名。
+  2. `office_text` 与 `sheet_text` 自己要到 **Task 5** 的 `extract_text` 分派才有 caller，`mod extract` 是私有模块、`pub` 救不了 `dead_code`，所以这两条各带一点名 Task 5 的 `#[allow(dead_code)]`，**Task 5 落地时删掉**。`xml_texts` 只被 `office_text` 调用，按上面第 1 条实测出的规律不会单独被报；真被报了才加，并在报告里点名。
 
 - [ ] **Step 1: 写失败测试（4 条）**
 
@@ -1005,7 +1005,7 @@ fn close_run(cur: &mut String, out: &mut Vec<String>, inside: &mut bool) {
 }
 
 /// `slides = false` 走 docx（word/document.xml + `<w:t>`），true 走 pptx（ppt/slides/slideN.xml + `<a:t>`）。
-#[allow(dead_code)] // caller 是 Task 5 的 extract_one 分派，落地时删掉本行
+#[allow(dead_code)] // caller 是 Task 5 的 extract_text 分派，落地时删掉本行
 pub fn office_text(path: &Path, slides: bool) -> AppResult<String> {
     let file = std::fs::File::open(path).map_err(|e| AppError::io(path, &e))?;
     let mut zip = zip::ZipArchive::new(file)
@@ -1052,7 +1052,7 @@ pub fn office_text(path: &Path, slides: bool) -> AppResult<String> {
 
 /// xlsx/xls 走 calamine。`open_workbook_auto` 后必须 `use calamine::Reader as _`，
 /// 且 `worksheet_range` 直接返回 `Result<Range, Error>`（不是双层 Result）。
-#[allow(dead_code)] // caller 是 Task 5 的 extract_one 分派，落地时删掉本行
+#[allow(dead_code)] // caller 是 Task 5 的 extract_text 分派，落地时删掉本行
 pub fn sheet_text(path: &Path) -> AppResult<String> {
     use calamine::Reader as _;
 
@@ -1109,6 +1109,20 @@ git commit -m "feat: M3 Office 抽取：docx/pptx 共用事件循环并还原实
   - `pub fn kind_of(ext: &str) -> Option<DocKind>`（大小写不敏感）
   - `pub fn supported_exts() -> &'static [&'static str]`
   - `pub fn extract_text(path: &Path) -> AppResult<String>`（`Ok(空串)` = 无正文，`Err` = 抽不出）
+
+**派发前必须做的死代码账（本任务是把这条链收口的那个任务）：**
+
+- **删掉三条豁免**：`read_text_file`、`office_text`、`sheet_text` 上各带一条 `#[allow(dead_code)] // ... Task 5 ...`，本任务的 `extract_text` 就是它们的第一处调用点，三条都必须删干净（注释里点名过这个责任）。
+- **新增两条豁免**：`cargo clippy --lib` 不带 `--all-targets`，不编译 `#[cfg(test)]`，所以本任务新写的 `extract_text` 与 `supported_exts` 在**只有测试调用**它们的构建里就是死的。各加一条 `#[allow(dead_code)]`，`extract_text` 注明「caller 在 Task 9 的 `index_job`」、`supported_exts` 注明「caller 在 Task 10 的 IPC」，落地时删掉本行。
+  `kind_of`、`pdf_text`、`DocKind`、`TEXT_EXTS`、`SUPPORTED` 不用加：rustc 把带 `allow` 的函数当**额外的可达根**（Task 3 实测确认），前两者由 `extract_text` 抵达，`SUPPORTED` 由 `supported_exts` 抵达。若闸上报出别的函数名，同批加豁免并在报告里点名。
+
+**本机已实测的 pdf-extract 行为（事实 18 的一手证据，控制方 2026-09-30 用一次性探针跑过，探针未提交）：**
+
+- `sample-cn.pdf` → `Ok`，**86 个字符**，同时含「验收」与「维保」。`> 40` 的门槛留了一倍余量，别把它改成贴着 86 的数。
+- 假头 `%PDF-1.4 not a real pdf body` → `Err`（`failed parsing cross reference table: invalid start value`）。
+- 截断到 1/3 → 同一个 `Err`。空文件 → `Err`（`couldn't parse input: invalid file header`）。
+- 四种输入**都没 panic**，所以 `catch_unwind` 的 `Err(_)` 分支在本机仍不可构造 —— 实现里那句「已知缺口，不要当成已证」的注释要保持这个口径，别写成「已验证能兜住 panic」。
+- 签名已核：`pub fn extract_text<P: AsRef<Path>>(path: P) -> Result<String, OutputError>`（`pdf-extract-0.12.1/src/lib.rs:2219`），`OutputError` 有 `Display`(:43) 与 `Error`(:54)，所以 `format!("PDF 抽取失败：{e}")` 直接可用，不需要 `to_string()`。
 
 - [ ] **Step 1: 写失败测试（4 条）**
 
@@ -1208,6 +1222,7 @@ const SUPPORTED: &[&str] = &[
     "py", "js", "ts", "bat", "sh", "docx", "pptx", "xlsx", "xls", "pdf",
 ];
 
+#[allow(dead_code)] // caller 在 Task 10 的 IPC（UI 要念这张表），落地时删掉本行
 pub fn supported_exts() -> &'static [&'static str] {
     SUPPORTED
 }
@@ -1249,6 +1264,7 @@ fn pdf_text(path: &Path) -> AppResult<String> {
 }
 
 /// 入口：只按扩展名分派，不做大小校验（上限归 Task 6 的扫描器），不做状态标记（归 Task 7）。
+#[allow(dead_code)] // caller 在 Task 9 的 index_job，落地时删掉本行
 pub fn extract_text(path: &Path) -> AppResult<String> {
     let ext = path
         .extension()
@@ -1276,7 +1292,26 @@ pub fn extract_text(path: &Path) -> AppResult<String> {
 Run: `cd src-tauri && cargo test --lib extract`
 Expected: `12 passed`；全量 → `62 passed; 0 failed`
 
-- [ ] **Step 5: 提交（含 fixture）**
+计数已由控制方当场数过（`grep -c "#\[test\]" src/extract.rs` = 8，`grep -rc "#\[test\]" src --include=*.rs` 求和 = 58），所以 12/62 是实数、不是估计。**不要为了让数字对上而增删 `#[test]`**；若出现不匹配，说明测试没按本任务写的四条落地，回去核对。
+
+- [ ] **Step 5: 跑两道 clippy 闸**
+
+```bash
+cd src-tauri && cargo clippy --lib -- -D warnings && cargo clippy --lib --all-targets -- -D warnings
+```
+
+Expected: 两道都 exit 0。这一道闸专门用来验证「删三条豁免 + 加两条豁免」的账算对了：`--lib` 会当场暴露漏加豁免的 `extract_text`/`supported_exts`，也会暴露漏删的旧豁免（旧豁免不会红，但会让 Task 9/10 的调用点落地后变成永久豁免，所以必须删）。
+
+- [ ] **Step 6: 提交（含 fixture）**
+
+```bash
+git add src-tauri/src/extract.rs src-tauri/tests/fixtures/pdf-source.html src-tauri/tests/fixtures/sample-cn.pdf
+git commit -m "feat: M3 PDF 抽取与扩展名分派入口，附真中文 PDF fixture"
+```
+
+**这条 `git add` 之前不能省一步核对**：本机 `core.autocrlf=true` 且仓库里没有 `.gitattributes`，把一个 150 KB 的 PDF 交给 git 是有被换行转换改坏的风险的（改坏的 PDF 表现是「 fixture 在别人机器上抽不出正文」，而不是提交时报错）。控制方已实测：该文件前 8000 字节里有 NUL，git 的二进制探测据此判它不是文本，`autocrlf` 不会动它。落地后用 `git ls-files --eol src-tauri/tests/fixtures/sample-cn.pdf` 复核一次，期望看到 `i/-text`（二进制）；若是 `i/lf` 或 `i/crlf` 说明判成了文本，**停下来报告**，不要自己加 `.gitattributes`（那属于仓库级配置，需另行裁定）。
+
+`git add` 只列这三个文件，**不要用 `git add -A`**：`src-tauri/tests/` 目前是未跟踪目录，整目录加会把无关文件一起带进来。
 
 ```bash
 git add src-tauri/src/extract.rs src-tauri/tests/fixtures/pdf-source.html src-tauri/tests/fixtures/sample-cn.pdf
@@ -1293,7 +1328,7 @@ git commit -m "feat: M3 PDF 抽取与扩展名分派入口，附真中文 PDF fi
 - Test: 同文件 `mod tests`
 
 **Interfaces:**
-- Consumes: `walkdir::WalkDir`（**没有 `WalkBuilder`**，事实 20）、`crate::extract::{kind_of, supported_exts}`、`rusqlite::Connection`（读 `settings`）
+- Consumes: `walkdir::WalkDir`（**没有 `WalkBuilder`**，事实 20）、`crate::extract::kind_of`、`rusqlite::Connection`（读 `settings`）。只 `use kind_of`：`supported_exts` 不进本任务的代码，写成 `use crate::extract::{kind_of, supported_exts};` 会撞 `unused_imports`（它的 caller 在 Task 10）。
 - Produces:
   - `pub struct ScanOptions { pub exclude_dirs: Vec<String>, pub max_file_bytes: u64, pub max_files_per_project: i64 }`
   - `impl ScanOptions { pub fn load(conn: &Connection) -> AppResult<ScanOptions> }`
