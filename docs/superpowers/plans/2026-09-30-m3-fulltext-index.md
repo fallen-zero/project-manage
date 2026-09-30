@@ -54,7 +54,7 @@
 | 14 | calamine：`open_workbook_auto` 后要 `use calamine::Reader as _;`，`worksheet_range(name)?` 直接拿到 Range（**不是**双层 Result），`range.rows()` 逐格 `cell.to_string()` | 探针 `a5` |
 | 15 | chardetng **1.0 改了 API**：`EncodingDetector::new(Iso2022JpDetection::Deny)`、`guess(None, Utf8Detection::Deny)`；旧的 `new()` / `guess(_, bool)` 编不过 | 探针 `a9`（改前 E0061/E0308） |
 | 16 | 「先 `std::str::from_utf8` 严格试一次，失败才探测」对 GBK/UTF-8/纯 ASCII 三类输入都得到正确结果，round-trip 相等 | 探针 `a9` |
-| 17 | UTF-16 **不需要自己判 BOM**：`encoding_rs::Encoding::decode` 内部先跑 `Encoding::for_bom`，认 UTF-8/UTF-16LE/UTF-16BE 三种 BOM，命中就**盖过**传进来的 encoding 并剥掉 BOM。实测：UTF-16LE 字节 chardetng 猜成 `windows-1252`，`decode` 回报 `used=UTF-16LE`、输出与原文逐字相等（BE 同理）；走 `decode_without_bom_handling` 得到 `ÿþŒš6e¥bJT…` 且 `had_errors=false` —— 正是「不报错、只是永远搜不到」。GBK 不受影响（猜 GBK、用 GBK、原文正确） | 探针 `a16`（本轮临时跑后即删；永久守护是 Task 3 的 `utf16_with_bom_is_decoded_not_guessed`）+ 读源码 `encoding_rs-0.8.42/src/lib.rs:3039` |
+| 17 | UTF-16 **不需要自己判 BOM**：`encoding_rs::Encoding::decode` 内部先跑 `Encoding::for_bom`，认 UTF-8/UTF-16LE/UTF-16BE 三种 BOM，命中就**盖过**传进来的 encoding 并剥掉 BOM。实测：UTF-16LE 字节 chardetng 猜成 `windows-1252`，`decode` 回报 `used=UTF-16LE`、输出与原文逐字相等（BE 同理）；走 `decode_without_bom_handling` 得到 `ÿþŒš6e¥bJT…` 且 `had_errors=false` —— 正是「不报错、只是永远搜不到」。GBK 不受影响（猜 GBK、用 GBK、原文正确） | 探针 `a17`（本轮临时跑后即删；永久守护是 Task 3 的 `utf16_with_bom_is_decoded_not_guessed`）+ 读源码 `encoding_rs-0.8.42/src/lib.rs:3039` |
 | 18 | pdf-extract 对「假 PDF 头」和「截断的真 PDF」都**返回 Err 而非 panic**；`catch_unwind` 是防 lopdf 在别的畸形输入上 panic 的兜底，本机无法构造出触发它的样本（见已知缺口） | 探针 `a10` |
 | 19 | `tests/fixtures/sample-cn.pdf`（Edge 打印真中文 PDF，150225 B）可被 pdf-extract 抽出 86 字，含「验收」「维保」 | 探针 `a1` |
 | 20 | walkdir 2.5 的入口是 **`WalkDir`**（没有 `WalkBuilder`）；`IntoIter::skip_current_dir()` 在命中排除目录后调用即可整棵剪掉；Windows 上返回的路径**带反斜杠**、`file_name()` 可用于比较；`metadata().modified()` 转 unix 秒可用 | 探针 `b1`（E0433 后改用 `WalkDir`） |
@@ -90,7 +90,7 @@
 - `src/router.tsx`、`src/components/app-shell.tsx` — 新路由与导航项。
 - `docs/技术方案.md`、`docs/开发进度.md` — 收口。
 
-测试基线：**动手前 `cargo test --lib` = 41 passed**（本轮已实测，临时探针已全部删除）。每个任务的 Expected 数字都从这条链往上加，最后到 82。
+测试基线：**动手前 `cargo test --lib` = 41 passed**（本轮已实测：`grep -c "#\[test\]"` 各模块 4+12+7+9+9 = 41，与实跑一致；临时探针已全部删除）。每个任务的 Expected 数字都从这条链往上加，最后到 **83**（+3 +5 +4 +4 +4 +5 +6 +6 +5 = 42 条新测试；Task 10/11/12 不新增 Rust 测试）。
 
 ---
 
@@ -205,7 +205,7 @@
     }
 ```
 
-`mod tests` 顶部已有 `use super::*;`，`params!` 需要在 `db.rs` 顶部引入：把 `use rusqlite::Connection;` 改成 `use rusqlite::{params, Connection};`（只有测试用得到，加 `#[cfg(test)]` 引入反而会让生产代码报 unused，直接用顶层引入最省事；若 clippy 抱怨，就改成在 tests 里 `use rusqlite::params;`）。
+`params!` 只在测试里用得到，所以**必须写在 `#[cfg(test)] mod tests` 内部**（`use super::*;` 之后加一行 `use rusqlite::params;`），不要改 `db.rs` 顶部的 `use rusqlite::Connection;`。这条是实测过的：把 `params` 提到顶层后 `cargo clippy --lib -- -D warnings` 报 `error: unused import: params --> src\db.rs:3:16`（Task 2 Step 5 就是这道闸，会被卡住）——`--lib` 不带 test cfg，测试模块不参与编译，顶层引入因此是未使用的。
 
 - [ ] **Step 2: 跑测试确认失败**
 
