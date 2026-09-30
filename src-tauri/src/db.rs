@@ -82,7 +82,7 @@ fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
 }
 
 /// 线性版本迁移：一个版本一段 DDL，只追加不改历史，便于备份包跨版本恢复。
-const TARGET_VERSION: i64 = 2;
+const TARGET_VERSION: i64 = 3;
 
 fn migrate(conn: &Connection) -> AppResult<()> {
     conn.execute_batch(
@@ -104,6 +104,7 @@ fn migrate(conn: &Connection) -> AppResult<()> {
         conn.execute_batch(match target {
             1 => V1,
             2 => V2,
+            3 => V3,
             _ => "",
         })?;
         conn.execute(
@@ -158,6 +159,100 @@ CREATE TABLE project_dirs (
 
 -- 一个项目只有一个主根目录，这是索引器「一个根一个扫描任务」的前提
 CREATE UNIQUE INDEX ux_project_root ON project_dirs(project_id) WHERE kind = 'root';
+";
+
+/// v3：密钥库 + 信息台账。台账里的敏感列一律 `*_cipher` + `*_nonce` 成对出现，
+/// 明文永不入库，也就永远不会被 M3 的全文索引捞到。
+const V3: &str = "
+CREATE TABLE vault_meta (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    kdf_m_cost INTEGER NOT NULL,
+    kdf_t_cost INTEGER NOT NULL,
+    kdf_p_cost INTEGER NOT NULL,
+    pw_salt    BLOB NOT NULL,
+    pw_cipher  BLOB NOT NULL,
+    pw_nonce   BLOB NOT NULL,
+    rc_salt    BLOB NOT NULL,
+    rc_cipher  BLOB NOT NULL,
+    rc_nonce   BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE ledger_envs (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    env        TEXT NOT NULL CHECK (env IN ('dev','test','pre','prod')),
+    name       TEXT NOT NULL,
+    url        TEXT,
+    port       TEXT,
+    note       TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT
+);
+
+CREATE TABLE ledger_credentials (
+    id                 TEXT PRIMARY KEY,
+    project_id         TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    env_id             TEXT REFERENCES ledger_envs(id) ON DELETE SET NULL,
+    title              TEXT NOT NULL,
+    username_cipher    BLOB,
+    username_nonce     BLOB,
+    password_cipher    BLOB,
+    password_nonce     BLOB,
+    url                TEXT,
+    note               TEXT,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at         TEXT
+);
+
+CREATE TABLE ledger_servers (
+    id                    TEXT PRIMARY KEY,
+    project_id            TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name                  TEXT NOT NULL,
+    ip                    TEXT,
+    bastion               TEXT,
+    account_cipher        BLOB,
+    account_nonce         BLOB,
+    password_cipher       BLOB,
+    password_nonce        BLOB,
+    note                  TEXT,
+    created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at            TEXT
+);
+
+CREATE TABLE ledger_links (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind       TEXT NOT NULL DEFAULT 'other'
+               CHECK (kind IN ('jira','zentao','wiki','doc','repo','other')),
+    title      TEXT NOT NULL,
+    url        TEXT NOT NULL,
+    note       TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT
+);
+
+CREATE TABLE ledger_notes (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title      TEXT NOT NULL,
+    body       TEXT NOT NULL DEFAULT '',
+    tag        TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT
+);
+
+CREATE INDEX ix_ledger_project ON ledger_envs(project_id);
+CREATE INDEX ix_ledger_cred_project ON ledger_credentials(project_id);
+CREATE INDEX ix_ledger_srv_project ON ledger_servers(project_id);
+CREATE INDEX ix_ledger_link_project ON ledger_links(project_id);
+CREATE INDEX ix_ledger_note_project ON ledger_notes(project_id);
 ";
 
 #[cfg(test)]

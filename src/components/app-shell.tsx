@@ -1,7 +1,9 @@
 import { useEffect } from "react";
 import { Link, Outlet } from "@tanstack/react-router";
 import { Badge } from "@/components/ui/badge";
+import { VaultControl } from "@/components/vault-dialog";
 import { useAppStore } from "@/stores/app-store";
+import { useVaultStore } from "@/stores/vault";
 
 const nav = [
   { to: "/", label: "搜索" },
@@ -10,10 +12,12 @@ const nav = [
 
 export function AppShell() {
   const { status, error, loading, refresh } = useAppStore();
+  const refreshVault = useVaultStore((s) => s.refresh);
 
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+    void refreshVault();
+  }, [refresh, refreshVault]);
 
   return (
     <div className="flex h-screen flex-col bg-muted/30">
@@ -29,6 +33,9 @@ export function AppShell() {
             {n.label}
           </Link>
         ))}
+        <div className="ml-auto">
+          <VaultControl />
+        </div>
       </header>
 
       <main className="flex-1 overflow-auto">

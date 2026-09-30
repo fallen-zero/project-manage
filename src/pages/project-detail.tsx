@@ -20,6 +20,7 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { ProjectForm } from "@/components/project-form";
+import { LedgerPanel } from "@/components/ledger-panel";
 import { copyText, openFolder, pickFolder, revealFolder } from "@/lib/api";
 import { useProjectsStore } from "@/stores/projects";
 import { toInput, type ProjectDir } from "@/types/project";
@@ -250,6 +251,10 @@ export function ProjectDetailPage() {
           </Button>
         </div>
       </section>
+
+      <div className="mt-4 rounded-xl border bg-background p-4">
+        <LedgerPanel projectId={project.id} />
+      </div>
 
       <Dialog open={editing} onOpenChange={setEditing}>
         <DialogContent className="max-h-[90vh] overflow-auto sm:max-w-2xl">
