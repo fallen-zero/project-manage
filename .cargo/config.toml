@@ -1,0 +1,5 @@
+# Windows 系统代理指向 127.0.0.1:7897，代理软件未运行时 cargo 会连不上索引
+# （报 "Could not connect to server ... over proxy 127.0.0.1"），而直连 index.crates.io 是通的。
+# 只对本仓库禁用代理，不改用户全局配置。
+[http]
+proxy = ""
