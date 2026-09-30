@@ -16,14 +16,14 @@ fn jieba() -> &'static Jieba {
 }
 
 /// 入库侧唯一入口。用 `cut_for_search` 而不是 `cut`：它是 `cut` 的超集，会把「付款条件」
-/// 这类复合词再切成 付款/条件，查询侧按 `cut` 切出来的子词才命得中。
-/// 换来的是中文复合词的召回，代价是索引膨胀。膨胀率随文本波动，**不是容量常数**：
-/// brief 那个样本实测是 21 → 23 词条（约 1.11 倍），那只是一次测量的一个串，别拿它做预算；
-/// task-2-report §2 的分词实测表里 `十二个月` 5 个字就切出 `十二 二个 十二个 月` 4 个 token，
-/// 说明同一函数在别的输入上贵得多。Task 7 估库体积请以那张表为准、并往更保守的方向取值。
+/// 这类复合词再切成 付款/条件，查询侧按 `cut` 切出来的子词才命得中（这条召回由
+/// `compound_words_are_indexed_as_whole_and_parts` 钉住）。代价是索引膨胀，而膨胀率随输入波动，
+/// **不是容量常数**：实测 `cut_for_search` 相对 `cut` 的词条数比从 1.0（`合同与报价，条款从优`）
+/// 到 1.57（`这份报价单含税总价为十二个月`）。Task 7 估库体积请取偏上的值，别拿单个比值做预算。
 ///
-/// 标点保留在正文里：unicode61 不把标点当索引字符，所以它不会造成假命中，
-/// 而 `snippet()` 是从原始列文本重建摘要的，留着标点才可读。
+/// 标点保留在正文里：unicode61 默认的 token 字符集是 `categories = "L* N* Co"`
+/// （libsqlite3-sys-0.38.2 bundled `sqlite3.c:265946`），标点 P* 不在其中、是分隔符，
+/// 所以它不会造成假命中；而 `snippet()` 是从原始列文本重建摘要的，留着标点才可读。
 #[allow(dead_code)] // 生产调用点在 Task 7（写入侧）/ Task 8（检索侧）落地后才出现
 pub fn index_text(text: &str) -> String {
     jieba()
@@ -47,11 +47,11 @@ pub fn query_expression(query: &str, prefix: bool) -> Option<String> {
         .into_iter()
         .map(|x| x.word.trim().to_owned())
         // 纯标点词永不进索引，留在查询里只会把整条 AND 变成 0 命中（实测「验收，」即如此）。
-        // 这里用 is_alphanumeric 而不是「非空白」，是有意的不对称，别当 bug「修掉」：
-        // unicode61 把符号类别（Sm/Sc/Sk/So，如 ™ € ± ★）也当词字符并索引，
-        // 而 char::is_alphanumeric() 对它们回 false，于是整串只有符号的查询会返回 None（连 SQL 都不发），
-        // 「25°」这类词会退化成只查「25」。这是计划裁定的行为、影响面窄（符号单独成词，或符号紧贴数字），
-        // 故保持判据不变，只在此登记两侧口径为何不一致。
+        // 这里用 is_alphanumeric 而不是「非空白」，是因为它和索引侧几乎同口径：unicode61 默认只把
+        // `L* N* Co` 当词字符，标点 P* 与符号 S*（™ € ± ★）都是分隔符、永不进索引，
+        // 所以丢弃「整词无字母数字」没有信息损失。唯一比索引侧窄的是私有使用区 Co——它是词字符
+        // 而 is_alphanumeric 回 false，于是全由 Co 组成的查询词会被丢掉、返回无结果而不是错结果。
+        // 本项目索引的是中/英/数字文本，故判据保持不变，只在此登记这一处口径差。
         .filter(|t| !t.is_empty() && t.chars().any(|c| c.is_alphanumeric()))
         .map(|t| {
             let quoted = format!("\"{}\"", t.replace('"', "\"\""));
@@ -141,7 +141,7 @@ mod tests {
         assert!(rows(&conn, "根本没写过", false).is_empty());
         // 入库侧必须保留标点：`body_tokens` 就是 snippet() 拿来渲染的那一列，
         // 谁在这里把标点过滤掉，摘要会变成「甲方要求验收指标」这种没气口的串，
-        // 而查询侧（:47 丢弃纯标点词）永远不会因此变红，所以只能在这一侧钉住。
+        // 而查询侧（`query_expression` 里丢弃非字母数字词的那个 filter）永远不会因此变红，所以只能在这一侧钉住。
         assert!(index_text("合同，报价。").contains('，'), "入库侧不许过滤标点");
         assert_eq!(index_text(""), "", "空串不该产出一个空格");
     }
