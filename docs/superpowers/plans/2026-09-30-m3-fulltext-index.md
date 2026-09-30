@@ -636,14 +636,16 @@ git commit -m "feat: M3 分词模块用单一 jieba 词典包住入库与查询�
 **Files:**
 - Create: `src-tauri/src/extract.rs`（本任务只写文本分支 + 骨架）
 - Modify: `src-tauri/src/lib.rs`（`mod extract;`）
-- Test: `src-tauri/src/extract.rs` 的 `mod tests`（用 `tempfile::tempdir()`）
+- Test: `src-tauri/src/extract.rs` 的 `mod tests`（本任务四条全部喂字节串，**不碰文件系统**，所以不用 `tempfile`；落盘路径由 Task 5 的 `extract_one` 分派测试覆盖）
 
 **Interfaces:**
-- Consumes: `chardetng::EncodingDetector::new(Iso2022JpDetection::Deny)` + `guess(None, Utf8Detection::Deny)`、`encoding_rs`、`crate::error::{AppError, AppResult}`
+- Consumes: `chardetng::EncodingDetector::new(Iso2022JpDetection::Deny)` + `guess(None, Utf8Detection::Deny)`、`encoding_rs`、`crate::error::{AppError, AppResult}`（`AppError::io(path, &e)` 已存在，`src-tauri/src/error.rs:21`，错误码 `fs_failed`）
 - Produces:
   - `pub enum ExtractError` 的落点：本任务先只用 `AppError`，错误码固定两个 —— `extract_unsupported`、`extract_failed`（编码问题不新增码：UTF-16/GBK 只要解得出来就入库，见下面 `decode_text_bytes`）
   - `fn decode_text_bytes(bytes: &[u8]) -> String`（**不是 `AppResult`**：探测解不出时用替换字符照样入库，这条函数没有失败分支；包成 `Result` 会被 `cargo clippy -- -D warnings` 的 `unnecessary_wraps` 拦下）
-  - `pub fn read_text_file(path: &Path) -> AppResult<String>`
+  - `fn read_text_file(path: &Path) -> AppResult<String>`
+
+  `fail` 与 `read_text_file` 在本任务**没有 caller**（前者第一次被 Task 4 的 Office 分支调用，后者被 Task 5 的 `extract_one` 调用），而 `mod extract;` 是私有模块，`pub` 也救不了 `dead_code`，`cargo clippy --lib -- -D warnings` 会当场红。两处各带一条 `#[allow(dead_code)]` 并在注释里写明是哪个任务接上，**Task 4/5 落地时必须删掉对应那行**（与 Task 2 的三条 `pub fn` 同形，那三条的删除责任已经记在 Task 7/8）。若 rustc 把不可达链条往下传、连 `decode_text_bytes` 也报 `never used`，就同样加一条 allow 并在报告里点名 —— 它的删除责任跟 `read_text_file` 一起走 Task 5，别顺手豁免到永久。
 
 - [ ] **Step 1: 写失败测试（4 条）**
 
@@ -651,12 +653,6 @@ git commit -m "feat: M3 分词模块用单一 jieba 词典包住入库与查询�
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn write_tmp(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
-        let p = dir.join(name);
-        std::fs::write(&p, bytes).unwrap();
-        p
-    }
 
     /// spec 明写：Windows 中文环境 GBK 必然出现。假设 UTF-8 不会报错，只会得到一片
     /// 乱码索引 —— 所以这条测试断言的是「解回原句」，不是「没报错」。
@@ -726,12 +722,13 @@ Expected: `unresolved module` / `cannot find function decode_text_bytes`
 //! 没有文字层、空文件都归到这里），由调用方标成 `skipped/empty_text`，不是失败。
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::{AppError, AppResult};
 
 /// 错误码是前端要分支的稳定契约，所以两个码名不要改：
 /// extract_unsupported（类型不支持）、extract_failed（抽取过程报错）
+#[allow(dead_code)] // 第一个 caller 在 Task 4 的 Office 分支，落地时删掉本行
 fn fail(code: &'static str, msg: &str, hint: &str) -> AppError {
     AppError::new(code, msg, Some(hint))
 }
@@ -758,6 +755,7 @@ fn decode_text_bytes(bytes: &[u8]) -> String {
     decoded.into_owned()
 }
 
+#[allow(dead_code)] // caller 是 Task 5 的 extract_one 分派，落地时删掉本行（decode_text_bytes 若一起被报，同批删）
 fn read_text_file(path: &Path) -> AppResult<String> {
     let mut buf = Vec::new();
     std::fs::File::open(path)
@@ -774,7 +772,12 @@ fn read_text_file(path: &Path) -> AppResult<String> {
 Run: `cd src-tauri && cargo test --lib extract`
 Expected: `4 passed`；全量 `cargo test --lib` → `54 passed; 0 failed`
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: clippy + 提交**
+
+```bash
+cd src-tauri && cargo clippy --lib -- -D warnings && cargo clippy --lib --all-targets -- -D warnings
+```
+Expected: 两道都零告警。`--lib` 那道专门用来暴露上面两条 `#[allow(dead_code)]` 该不该再加第三条；`--all-targets` 那道会把测试模块里没用到的东西（比如临时辅助函数）报出来。两道闸在本任务都要跑，是因为 Task 5/6 的闸就是 `--lib --all-targets`，现在留下的告警会在那两个任务里变成别人头上的红灯。
 
 ```bash
 git add src-tauri/src/extract.rs src-tauri/src/lib.rs
