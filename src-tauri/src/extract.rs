@@ -10,7 +10,6 @@ use crate::error::{AppError, AppResult};
 
 /// 错误码是前端要分支的稳定契约，所以两个码名不要改：
 /// extract_unsupported（类型不支持）、extract_failed（抽取过程报错）
-#[allow(dead_code)] // 第一个 caller 在 Task 4 的 Office 分支，落地时删掉本行
 fn fail(code: &'static str, msg: &str, hint: &str) -> AppError {
     AppError::new(code, msg, Some(hint))
 }
@@ -49,9 +48,209 @@ fn read_text_file(path: &Path) -> AppResult<String> {
     Ok(decode_text_bytes(&buf))
 }
 
+/// 事实 12：docx 的正文节点是 `<w:t>`、pptx 是 `<a:t>`，`local_name` 都是 `t`。
+/// 所以两种格式共用一个循环，靠 tag 名区分范围即可；`check_end_names = false` 是因为
+/// Office 的命名前缀只在文档内部一致，关掉能避免严格校验把整份文件判死。
+fn xml_texts(xml: &str, tag: &[u8]) -> AppResult<Vec<String>> {
+    use quick_xml::events::Event;
+
+    let mut reader = quick_xml::Reader::from_str(xml);
+    reader.config_mut().check_end_names = false;
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut inside = false;
+    loop {
+        match reader
+            .read_event()
+            .map_err(|e| fail("extract_failed", &format!("XML 解析失败：{e}"), "文件可能已损坏或是加密的 Office 文档"))?
+        {
+            Event::Eof => break,
+            Event::Start(e) if e.local_name().as_ref() == tag => inside = true,
+            Event::Text(t) if inside => {
+                let s = t
+                    .xml10_content()
+                    .map_err(|e| fail("extract_failed", &format!("XML 文本解码失败：{e}"), "文件可能已损坏"))?;
+                cur.push_str(&s);
+            }
+            Event::GeneralRef(r) if inside => {
+                // 载荷是裸片段（"apos" / "#39"），补回 & 和 ; 才能交给 unescape。
+                let frag = String::from_utf8_lossy(r.as_ref()).into_owned();
+                if let Ok(s) = quick_xml::escape::unescape(&format!("&{frag};")) {
+                    cur.push_str(&s);
+                }
+            }
+            Event::End(e) if inside && e.local_name().as_ref() == tag => {
+                if !cur.trim().is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+                cur.clear();
+                inside = false;
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// `slides = false` 走 docx（word/document.xml + `<w:t>`），true 走 pptx（ppt/slides/slideN.xml + `<a:t>`）。
+#[allow(dead_code)] // caller 是 Task 5 的 extract_one 分派，落地时删掉本行
+pub fn office_text(path: &Path, slides: bool) -> AppResult<String> {
+    let file = std::fs::File::open(path).map_err(|e| AppError::io(path, &e))?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|e| fail("extract_failed", &format!("解包失败：{e}"), "文件可能已损坏或受密码保护"))?;
+
+    let parts: Vec<String> = if slides {
+        let mut names: Vec<String> = zip
+            .file_names()
+            .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
+            .map(|n| n.to_owned())
+            .collect();
+        // slide10 必须排在 slide2 之后：按文件名里的数字排，字符串序会把它排到前面。
+        names.sort_by_key(|n| {
+            let stem = n.trim_end_matches(".xml").trim_start_matches("ppt/slides/slide");
+            stem.parse::<u32>().unwrap_or(u32::MAX)
+        });
+        names
+    } else {
+        vec!["word/document.xml".to_owned()]
+    };
+
+    let mut chunks: Vec<String> = Vec::new();
+    for name in &parts {
+        let mut xml = String::new();
+        let read = zip
+            .by_name(name)
+            .map(|mut entry| entry.read_to_string(&mut xml));
+        match read {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => return Err(AppError::io(path, &e)),
+            Err(e) => {
+                // 加密包或缺部件都在这里现形：记 failed 而不是整轮失败。
+                return Err(fail(
+                    "extract_failed",
+                    &format!("读取 {name} 失败：{e}"),
+                    "文件可能已损坏、受密码保护，或不是标准的 Office 文件",
+                ));
+            }
+        }
+        chunks.extend(xml_texts(&xml, b"t")?);
+    }
+    Ok(chunks.join("\n"))
+}
+
+/// xlsx/xls 走 calamine。`open_workbook_auto` 后必须 `use calamine::Reader as _`，
+/// 且 `worksheet_range` 直接返回 `Result<Range, Error>`（不是双层 Result）。
+#[allow(dead_code)] // caller 是 Task 5 的 extract_one 分派，落地时删掉本行
+pub fn sheet_text(path: &Path) -> AppResult<String> {
+    use calamine::Reader as _;
+
+    let mut book = calamine::open_workbook_auto(path)
+        .map_err(|e| fail("extract_failed", &format!("打开表格失败：{e}"), "文件可能已损坏、受密码保护，或是伪装成表格的其它格式"))?;
+    let mut text = String::new();
+    for name in book.sheet_names() {
+        let Ok(range) = book.worksheet_range(&name) else {
+            continue; // 单个 sheet 读不出来不该让整份文件失败
+        };
+        for row in range.rows() {
+            for cell in row {
+                let s = cell.to_string();
+                if !s.is_empty() {
+                    text.push_str(&s);
+                    text.push(' ');
+                }
+            }
+        }
+    }
+    Ok(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 两行都是测试专用，别提到模块顶层：`cargo clippy --lib` 不带 test cfg，顶层引入会被判 unused。
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    /// docx/pptx 本质是 zip + xml，测试里自己拼一个，省掉二进制 fixture。
+    fn make_office(dir: &Path, name: &str, part: &str, xml: &str) -> PathBuf {
+        let p = dir.join(name);
+        let mut w = zip::write::ZipWriter::new(std::fs::File::create(&p).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        w.start_file("[Content_Types].xml", opts).unwrap();
+        w.write_all(br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#)
+            .unwrap();
+        w.start_file(part, opts).unwrap();
+        w.write_all(xml.as_bytes()).unwrap();
+        w.finish().unwrap();
+        p
+    }
+
+    /// 事实 10/11：quick-xml 0.41 把实体拆成独立的 GeneralRef 事件，且载荷不含 & 和 ;。
+    /// 直接 xml10_content() 会把正文截断，read_text() 会把实体原样留在正文。
+    /// 唯一正确的写法是 escape::unescape(&format!("&{frag};"))。
+    #[test]
+    fn docx_text_resolves_entities_instead_of_truncating() {
+        let dir = tempfile::tempdir().unwrap();
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>合同&apos;验收</w:t></w:r><w:r><w:t xml:space="preserve"> 标准 &amp; 说明</w:t></w:r></w:p></w:body></w:document>"#;
+        let p = make_office(dir.path(), "t.docx", "word/document.xml", xml);
+        let text = office_text(&p, false).unwrap();
+        assert!(text.contains("合同'验收"), "实体必须还原成字符：{text:?}");
+        assert!(text.contains("标准 & 说明"), "{text:?}");
+        assert!(!text.contains("&apos;") && !text.contains("apos"), "正文里不许残留实体片段：{text:?}");
+    }
+
+    /// <w:instrText> 是域代码（HYPERLINK 之类），不是正文；只认 <w:t> 就自动跳过。
+    #[test]
+    fn docx_skips_field_codes_and_keeps_paragraph_breaks() {
+        let dir = tempfile::tempdir().unwrap();
+        let xml = r#"<w:document xmlns:w="http://x"><w:body><w:p><w:r><w:t>正文一</w:t><w:br/><w:t>正文二</w:t></w:r></w:p><w:p><w:r><w:instrText>HYPERLINK</w:instrText><w:t>正文三</w:t></w:r></w:p></w:body></w:document>"#;
+        let p = make_office(dir.path(), "f.docx", "word/document.xml", xml);
+        let text = office_text(&p, false).unwrap();
+        assert!(text.contains('一') && text.contains('二') && text.contains('三'), "{text:?}");
+        assert!(!text.contains("HYPERLINK"), "域代码不该进索引：{text:?}");
+    }
+
+    /// pptx 的正文在 ppt/slides/slideN.xml 里，逐个 slide 按序号读，文本节点是 <a:t>。
+    #[test]
+    fn pptx_reads_every_slide_in_numeric_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.pptx");
+        let mut w = zip::write::ZipWriter::new(std::fs::File::create(&p).unwrap());
+        let opts = zip::write::SimpleFileOptions::default();
+        w.start_file("[Content_Types].xml", opts).unwrap();
+        w.write_all(br#"<?xml version="1.0"?/>"#).unwrap();
+        for (n, word) in [(2u32, "第二页"), (10, "第十页"), (1, "第一页")] {
+            // clippy::needless_borrows_for_generic_args：`start_file` 的形参是 `S: ToString`，
+            // `String` 本身就满足，写成 `&format!(…)` 会在 `cargo clippy --lib --all-targets`
+            // 那道闸上被判红，这里按 clippy 的建议去掉借用。
+            w.start_file(format!("ppt/slides/slide{n}.xml"), opts).unwrap();
+            let xml = format!(
+                r#"<p:sld xmlns:a="http://x" xmlns:p="http://y"><p:cSld><p:sp><p:txBody><a:p><a:r><a:t>{word}验收</a:t></a:r></a:p></p:txBody></p:sp></p:cSld></p:sld>"#
+            );
+            w.write_all(xml.as_bytes()).unwrap();
+        }
+        w.finish().unwrap();
+        let text = office_text(&p, true).unwrap();
+        let i1 = text.find("第一页").unwrap();
+        let i2 = text.find("第二页").unwrap();
+        let i10 = text.find("第十页").unwrap();
+        assert!(i1 < i2 && i2 < i10, "slide10 不该排在 slide2 前：{text:?}");
+    }
+
+    #[test]
+    fn xlsx_concatenates_every_sheet_and_cell() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.xlsx");
+        {
+            let mut wb = rust_xlsxwriter::Workbook::new();
+            wb.add_worksheet().write(0, 0, "合同验收标准").unwrap();
+            wb.add_worksheet().write(1, 2, "维保期").unwrap();
+            wb.save(&p).unwrap();
+        }
+        let text = sheet_text(&p).unwrap();
+        assert!(text.contains("合同验收标准"), "{text:?}");
+        assert!(text.contains("维保期"), "第二个 sheet 也要读：{text:?}");
+    }
 
     /// spec 明写：Windows 中文环境 GBK 必然出现。假设 UTF-8 不会报错，只会得到一片
     /// 乱码索引 —— 所以这条测试断言的是「解回原句」，不是「没报错」。
