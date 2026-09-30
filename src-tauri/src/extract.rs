@@ -16,7 +16,10 @@ fn fail(code: &'static str, msg: &str, hint: &str) -> AppError {
 }
 
 fn decode_text_bytes(bytes: &[u8]) -> String {
-    // 严格 UTF-8 先试一次：绝大多数现代文本文件走这条，且不会误判。
+    // 严格 UTF-8 先试一次：绝大多数现代文本文件走这条。已知取舍：个别 GBK 双字节对恰好也是
+    // 合法 UTF-8（实测 `C4 A3` / `C5 B4` / `C4 BC` 分别解成 `ģ Ŵ ļ`），整份都由这种对组成的
+    // 短文件会静默走快路径、解成一片拉丁扩展字符。一整句中文的 GBK 流不在窗口内（实测在
+    // `from_utf8` 处就报错），所以顺序保留、这里不改判据。
     // BOM 对 `from_utf8` 是合法字符（U+FEFF），会原样留在串首，所以要剥。
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.trim_start_matches('\u{FEFF}').to_owned();
@@ -69,8 +72,9 @@ mod tests {
 
     /// Windows 记事本「另存为 Unicode」和 PowerShell 的 `>` 重定向默认就产出 UTF-16LE，
     /// 这些文件在用户的目录里真实存在——拒收等于「永远搜不到」。
-    /// 解法不是自己分派，而是别绕过 `decode` 的 BOM 嗅探（事实 17）：写成断言「解回原文且没有 BOM」，
-    /// 谁哪天把它换成 `decode_without_bom_handling`，这条就会红。
+    /// 解法不是自己分派，而是别绕过 `decode` 的 BOM 嗅探（事实 17）：断言写成「解回原文」。
+    /// 谁哪天把它换成 `decode_without_bom_handling`，那函数只回 2 元组、先撞编译错误；
+    /// 把解构一起改掉的版本会撞这条断言，因为 windows-1252 解出的 mojibake 不等于原文。
     #[test]
     fn utf16_with_bom_is_decoded_not_guessed() {
         let cn = "验收报告";
@@ -90,7 +94,10 @@ mod tests {
     }
 
     /// UTF-8 BOM 会被 from_utf8 原样留下 \u{FEFF}，它进索引串首不影响命中，但
-    /// 出现在 UI 摘要里是个看不见的方块，所以这里要求剥掉。
+    /// 出现在 UI 摘要里是个看不见的方块，所以这里要求剥掉。样本故意叠两层 BOM（字节级
+    /// EF BB BF + 串首 U+FEFF），钉的是 `trim_start_matches` 剥**全部**前导 BOM 而不是一个；
+    /// 现实文件只有一个，多剥这层不留风险，也不与探测路径的 `for_bom`（只剥一个）冲突——
+    /// 带 UTF-8 BOM 的文件必然走 `from_utf8` 快路径，走不到探测分支。
     #[test]
     fn utf8_bom_is_stripped() {
         let mut bytes = vec![0xEF, 0xBB, 0xBF];
