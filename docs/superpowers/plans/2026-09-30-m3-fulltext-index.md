@@ -92,7 +92,7 @@
 - `src/router.tsx`、`src/components/app-shell.tsx` — 新路由与导航项。
 - `docs/技术方案.md`、`docs/开发进度.md` — 收口。
 
-测试基线：**动手前 `cargo test --lib` = 41 passed**（本轮已实测：`grep -c "#\[test\]"` 各模块 4+12+7+9+9 = 41，与实跑一致；临时探针已全部删除）。每个任务的 Expected 数字都从这条链往上加，最后到 **84**（+4 +5 +4 +4 +4 +5 +6 +6 +5 = 43 条新测试；Task 10/11/12 不新增 Rust 测试）。
+测试基线：**动手前 `cargo test --lib` = 41 passed**（本轮已实测：`grep -c "#\[test\]"` 各模块 4+12+7+9+9 = 41，与实跑一致；临时探针已全部删除）。每个任务的 Expected 数字都从这条链往上加，最后到 **85**（+4 +5 +4 +4 +5 +5 +6 +6 +5 = 44 条新测试；Task 10/11/12 不新增 Rust 测试）。
 
 ---
 
@@ -1124,7 +1124,7 @@ git commit -m "feat: M3 Office 抽取：docx/pptx 共用事件循环并还原实
 - 四种输入**都没 panic**，所以 `catch_unwind` 的 `Err(_)` 分支在本机仍不可构造 —— 实现里那句「已知缺口，不要当成已证」的注释要保持这个口径，别写成「已验证能兜住 panic」。
 - 签名已核：`pub fn extract_text<P: AsRef<Path>>(path: P) -> Result<String, OutputError>`（`pdf-extract-0.12.1/src/lib.rs:2219`），`OutputError` 有 `Display`(:43) 与 `Error`(:54)，所以 `format!("PDF 抽取失败：{e}")` 直接可用，不需要 `to_string()`。
 
-- [ ] **Step 1: 写失败测试（4 条）**
+- [ ] **Step 1: 写失败测试（5 条）**
 
 ```rust
     fn fixture(name: &str) -> PathBuf {
@@ -1177,15 +1177,64 @@ git commit -m "feat: M3 Office 抽取：docx/pptx 共用事件循环并还原实
         assert_eq!(e.code, "extract_unsupported", "图片属 M6 OCR，本版本明确不支持");
     }
 
-    /// 分派表和 supported_exts() 必须同源：UI 上写的「支持的类型」要是真的那一套。
+    /// 分派表和 supported_exts() 必须同源，而且**两个方向都要查**：
+    /// `SUPPORTED` 里出现 `kind_of` 分派不到的扩展名 = UI 承诺了搜不到的类型；
+    /// `TEXT_EXTS` 里出现 `SUPPORTED` 没有的扩展名 = 真能抽进索引、UI 却不列，用户根本想不到去搜。
+    /// 只查前一个方向的话，后者可以一直绿着漂移，而这正是本测试存在的理由。
     #[test]
     fn supported_exts_list_matches_the_dispatch_table() {
         for ext in supported_exts() {
             assert!(kind_of(ext).is_some(), "{ext} 在清单里却分派不到抽取器");
             assert_eq!(ext.to_lowercase(), *ext, "清单里的扩展名统一小写");
         }
+        // 反方向：分派表必须清单的子集。漏了这条，往 TEXT_EXTS 加一个 "log" 就是一次静默漂移。
+        for e in TEXT_EXTS {
+            assert!(supported_exts().contains(e), "{e} 能分派却不在 UI 清单里");
+        }
         for kind_ext in ["txt", "md", "csv", "docx", "pptx", "xlsx", "xls", "pdf"] {
             assert!(supported_exts().contains(&kind_ext), "{kind_ext} 缺清单");
+        }
+    }
+
+    /// 五个分派臂都要真的走一遍。这条存在的理由是一个具体失效：docx 如果被接成 `slides = true`，
+    /// `office_text` 找不到 `ppt/slides/*` 部件、返回 `Ok("")`，于是 12 条测试全绿而库里的正文是空的 ——
+    /// 属于「不报错、只是搜不到」那一类，只有把每种扩展名真的喂进 `extract_text` 才守得住。
+    /// `xls` 与 `xlsx` 共用 `DocKind::Workbook` 同一个 match 臂，路由由 `xlsx` 这一条覆盖
+    /// （本机造不出真 `.xls`，`rust_xlsxwriter` 只写 xlsx）。
+    #[test]
+    fn every_dispatch_arm_routes_to_its_own_extractor() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "分派正文text".as_bytes()).unwrap();
+        let docx = make_office(
+            dir.path(),
+            "a.docx",
+            "word/document.xml",
+            r#"<w:document xmlns:w="http://x"><w:body><w:p><w:r><w:t>分派正文word</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+        let pptx = make_office(
+            dir.path(),
+            "a.pptx",
+            "ppt/slides/slide1.xml",
+            r#"<p:sld xmlns:a="http://x" xmlns:p="http://y"><p:cSld><p:sp><p:txBody><a:p><a:r><a:t>分派正文slides</a:t></a:r></a:p></p:txBody></p:sp></p:cSld></p:sld>"#,
+        );
+        let xlsx = dir.path().join("a.xlsx");
+        {
+            let mut wb = rust_xlsxwriter::Workbook::new();
+            wb.add_worksheet().write(0, 0, "分派正文workbook").unwrap();
+            wb.save(&xlsx).unwrap();
+        }
+
+        // 四个标记互不相同，所以「接错抽取器」必然表现为拿到空串或 Err，而不是换了一种正文还看不出。
+        for (path, want) in [
+            (dir.path().join("a.md"), "分派正文text"),
+            (docx, "分派正文word"),
+            (pptx, "分派正文slides"),
+            (xlsx, "分派正文workbook"),
+            (fixture("sample-cn.pdf"), "验收"),
+        ] {
+            let text = extract_text(&path)
+                .unwrap_or_else(|e| panic!("{} 应能抽出正文，实际报错 {}", path.display(), e.code));
+            assert!(text.contains(want), "{} 分派到了错误的抽取器：{text:?}", path.display());
         }
     }
 ```
@@ -1290,9 +1339,9 @@ pub fn extract_text(path: &Path) -> AppResult<String> {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib extract`
-Expected: `12 passed`；全量 → `62 passed; 0 failed`
+Expected: `13 passed`；全量 → `63 passed; 0 failed`
 
-计数已由控制方当场数过（`grep -c "#\[test\]" src/extract.rs` = 8，`grep -rc "#\[test\]" src --include=*.rs` 求和 = 58），所以 12/62 是实数、不是估计。**不要为了让数字对上而增删 `#[test]`**；若出现不匹配，说明测试没按本任务写的四条落地，回去核对。
+计数由控制方当场数过，不是推算：本任务动手前 `grep -c "#\[test\]" src/extract.rs` = 8、全 crate 求和 = 58；落地后（含修订轮新增的第 5 条）应为 **13 / 63**，即本任务净新增 5 条。**不要为了让数字对上而随意增删 `#[test]`** —— 只有本任务写的这 5 条，多一条少一条都要回去核对。（修订原因见 Step 1 里 `every_dispatch_arm_routes_to_its_own_extractor` 的文档注释：五个分派臂此前在本计划里没有任何一条端到端走过 `extract_text`，Task 9 的测试只喂 `.txt`。）
 
 - [ ] **Step 5: 跑两道 clippy 闸**
 
@@ -1561,7 +1610,7 @@ pub fn scan_root(root: &Path, opts: &ScanOptions) -> ScanOutcome {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_scan`
-Expected: `5 passed`；全量 → `67 passed; 0 failed`
+Expected: `5 passed`；全量 → `68 passed; 0 failed`
 
 `missing_root_is_reported_instead_of_panicking` 若拿不到 `walk_errors`（walkdir 对不存在的根只吐一条 IOErr，确实会进错误流），就检查是不是 `Z:/` 被解析成了别的形态；**不要**改成断言「空清单即通过」——那会放过「根目录不可达却静默」这个真实故障。
 
@@ -1942,7 +1991,7 @@ pub fn list_docs(
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_store`
-Expected: `6 passed`；全量 → `73 passed; 0 failed`
+Expected: `6 passed`；全量 → `74 passed; 0 failed`
 
 - [ ] **Step 5: 提交**
 
@@ -2161,7 +2210,7 @@ pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<Doc
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_store`
-Expected: `12 passed`（Task 7 的 6 + 本任务 6）；全量 → `79 passed; 0 failed`
+Expected: `12 passed`（Task 7 的 6 + 本任务 6）；全量 → `80 passed; 0 failed`
 
 若 `fts5_syntax...` 里 `hits(&c, "*")` 报错而不是空，说明 `query_expression("*", false)` 回了 `Some`——事实 8 要求纯标点被过滤后回 `None`；回到 Task 2 修过滤器，**不要**在这里加特判。
 
@@ -2183,6 +2232,7 @@ git commit -m "feat: M3 两段全文检索并钉住密文不进索引的验收"
 
 **Interfaces:**
 - Consumes: `index_scan::{ScanOptions, scan_root}`、`extract::extract_text`、`index_store::{write_doc, current_rowid, clear_project, DocOutcome}`、`db::open`、`tauri::Emitter`、`std::sync::atomic::{AtomicBool, Ordering}`
+  - `extract_text` 的 `Err` 实际有**三个**码名，不是两个：`extract_unsupported`、`extract_failed`，加上 `AppError::io` 带来的 `fs_failed`（读文件本身失败，典型是扫描到抽取之间文件被删/被占用）。下面的 `match` 用「`extract_unsupported` 单列、其余一律 `Failed`」的写法，所以 `fs_failed` 会落进 `failed` 而不是 `missing` —— 这是有意的：`missing` 描述的是对账结论（库里有一行、磁盘上没有了），归 M5 的启动对账写，抽取这一轮不判它。别在 Task 9 里顺手把它改成 `missing`。
 - Produces:
   - `pub struct ScanTarget { pub project_id: String, pub project_name: String, pub root_path: String }`
   - `pub fn targets(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<ScanTarget>>`
@@ -2651,7 +2701,7 @@ pub fn start(
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_job`
-Expected: `5 passed`；全量 → `84 passed; 0 failed`
+Expected: `5 passed`；全量 → `85 passed; 0 failed`
 
 `cancel_stops_the_pass_early` 若一次跑完（`done == 60`），原因是第一次回调就置位、而检查点在下一轮开头 —— 断言 `done < 60` 应当成立。若始终不成立，先确认 `PROGRESS_EVERY` 与回调时机，不要靠加 `sleep` 让它「看起来对」。
 
@@ -3143,7 +3193,7 @@ index_docs_fts      FTS5 虚表：name_tokens + body_tokens，tokenize=unicode61
 
 `docs/开发进度.md` 新增 `## M3 验收证据`，按 M2 那节的格式写全：
 
-- `cargo test --lib`：`84 passed; 0 failed`，按模块拆一行（`db` / `project` / `ledger` / `vault` / `search` / `tokenize` / `extract` / `index_scan` / `index_store` / `index_job` 各几条，数字从实际输出抄，不要推算）。
+- `cargo test --lib`：`85 passed; 0 failed`，按模块拆一行（`db` / `project` / `ledger` / `vault` / `search` / `tokenize` / `extract` / `index_scan` / `index_store` / `index_job` 各几条，数字从实际输出抄，不要推算）。
 - `cargo clippy --lib --all-targets -- -D warnings` 结果。
 - `npm run build` 的模块数与耗时。
 - Step 3 的逐条真机断言结果（只写「几条命中 / matchedBy 是什么 / 布尔值」，不抄正文）。
