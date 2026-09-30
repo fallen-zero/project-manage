@@ -39,7 +39,6 @@ fn decode_text_bytes(bytes: &[u8]) -> String {
     decoded.into_owned()
 }
 
-#[allow(dead_code)] // caller 是 Task 5 的 extract_one 分派，落地时删掉本行（decode_text_bytes 若一起被报，同批删）
 fn read_text_file(path: &Path) -> AppResult<String> {
     let mut buf = Vec::new();
     std::fs::File::open(path)
@@ -127,7 +126,6 @@ fn close_run(cur: &mut String, out: &mut Vec<String>, inside: &mut bool) {
 }
 
 /// `slides = false` 走 docx（word/document.xml + `<w:t>`），true 走 pptx（ppt/slides/slideN.xml + `<a:t>`）。
-#[allow(dead_code)] // caller 是 Task 5 的 extract_one 分派，落地时删掉本行
 pub fn office_text(path: &Path, slides: bool) -> AppResult<String> {
     let file = std::fs::File::open(path).map_err(|e| AppError::io(path, &e))?;
     let mut zip = zip::ZipArchive::new(file)
@@ -174,7 +172,6 @@ pub fn office_text(path: &Path, slides: bool) -> AppResult<String> {
 
 /// xlsx/xls 走 calamine。`open_workbook_auto` 后必须 `use calamine::Reader as _`，
 /// 且 `worksheet_range` 直接返回 `Result<Range, Error>`（不是双层 Result）。
-#[allow(dead_code)] // caller 是 Task 5 的 extract_one 分派，落地时删掉本行
 pub fn sheet_text(path: &Path) -> AppResult<String> {
     use calamine::Reader as _;
 
@@ -196,6 +193,92 @@ pub fn sheet_text(path: &Path) -> AppResult<String> {
         }
     }
     Ok(text)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocKind {
+    Text,
+    Word,
+    Slides,
+    Workbook,
+    Pdf,
+}
+
+/// 纯文本分支的扩展名清单，`kind_of` 与下面的 `SUPPORTED` 都从它出发。
+/// .doc/.ppt 属 M7（要 LibreOffice headless）、图片属 M6（OCR），本版本不登记、不建行。
+const TEXT_EXTS: &[&str] = &[
+    "txt", "md", "markdown", "csv", "json", "xml", "yml", "yaml", "ini", "conf", "sql", "java",
+    "py", "js", "ts", "bat", "sh",
+];
+
+/// UI 上「支持的类型」就念这张表。它和 `kind_of` 是同一套信息的两种写法（一份给分派、
+/// 一份给展示），改扩展名时两处一起改；一致性由 `supported_exts_list_matches_the_dispatch_table`
+/// 钉住——清单里出现 `kind_of` 分派不到的扩展名会直接红。
+const SUPPORTED: &[&str] = &[
+    "txt", "md", "markdown", "csv", "json", "xml", "yml", "yaml", "ini", "conf", "sql", "java",
+    "py", "js", "ts", "bat", "sh", "docx", "pptx", "xlsx", "xls", "pdf",
+];
+
+#[allow(dead_code)] // caller 在 Task 10 的 IPC（UI 要念这张表），落地时删掉本行
+pub fn supported_exts() -> &'static [&'static str] {
+    SUPPORTED
+}
+
+pub fn kind_of(ext: &str) -> Option<DocKind> {
+    let e = ext.to_ascii_lowercase();
+    if TEXT_EXTS.contains(&e.as_str()) {
+        Some(DocKind::Text)
+    } else {
+        match e.as_str() {
+            "docx" => Some(DocKind::Word),
+            "pptx" => Some(DocKind::Slides),
+            "xlsx" | "xls" => Some(DocKind::Workbook),
+            "pdf" => Some(DocKind::Pdf),
+            _ => None,
+        }
+    }
+}
+
+/// pdf-extract 内部依赖 lopdf，畸形结构有 panic 的前科；一轮索引不能因为一个坏文件整体失败。
+/// 注意：本机实测的假 PDF 头与截断文件都走的是 Err 分支（事实 18），
+/// 这里的 catch_unwind 防的是 panic 分支，那条分支在本机无法构造 —— 属已知缺口，不要当成已证。
+fn pdf_text(path: &Path) -> AppResult<String> {
+    let p = path.to_path_buf();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pdf_extract::extract_text(&p)));
+    match r {
+        Ok(Ok(text)) => Ok(text),
+        Ok(Err(e)) => Err(fail(
+            "extract_failed",
+            &format!("PDF 抽取失败：{e}"),
+            "确认文件未损坏；扫描版 PDF 没有文字层需等 M6 的 OCR",
+        )),
+        Err(_) => Err(fail(
+            "extract_failed",
+            "PDF 解析器在畸形文件上 panic，已兜住并跳过该文件",
+            "该文件本轮不索引；可换 PDF 工具另存一份再登记",
+        )),
+    }
+}
+
+/// 入口：只按扩展名分派，不做大小校验（上限归 Task 6 的扫描器），不做状态标记（归 Task 7）。
+#[allow(dead_code)] // caller 在 Task 9 的 index_job，落地时删掉本行
+pub fn extract_text(path: &Path) -> AppResult<String> {
+    let ext = path
+        .extension()
+        .map(|e| e.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match kind_of(&ext) {
+        Some(DocKind::Text) => read_text_file(path),
+        Some(DocKind::Word) => office_text(path, false),
+        Some(DocKind::Slides) => office_text(path, true),
+        Some(DocKind::Workbook) => sheet_text(path),
+        Some(DocKind::Pdf) => pdf_text(path),
+        None => Err(fail(
+            "extract_unsupported",
+            &format!("不支持的文件类型 .{ext}"),
+            "M3 只索引文本/Office/PDF；图片属 M6 OCR，.doc/.ppt 属 M7",
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -351,5 +434,67 @@ mod tests {
         let text = decode_text_bytes(&bytes);
         assert!(text.starts_with("验收清单"), "实际前缀：{:?}", &text[..text.len().min(8)]);
         assert!(!text.contains('\u{FEFF}'));
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    /// 真中文 PDF（Edge 打印）必须能抽出可搜的中文。这条同时也是 pdf-extract 的中文可用性证据。
+    #[test]
+    fn real_pdf_yields_searchable_chinese_text() {
+        let text = extract_text(&fixture("sample-cn.pdf")).unwrap();
+        assert!(text.chars().count() > 40, "抽出来的正文太短：{}", text.chars().count());
+        assert!(text.contains("验收") && text.contains("维保"), "正文应含关键词：{text:?}");
+    }
+
+    /// 事实 18：pdf-extract 对畸形 PDF 返回 Err；catch_unwind 兜的是 lopdf 潜在 panic。
+    /// 这里断言的是「返回 Err 且调用方不 panic」，不预设它走哪条分支。
+    #[test]
+    fn malformed_pdfs_fail_cleanly_without_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let garbage = dir.path().join("g.pdf");
+        std::fs::write(&garbage, b"%PDF-1.4 not a real pdf body\n%%EOF\n").unwrap();
+        let real = std::fs::read(fixture("sample-cn.pdf")).unwrap();
+        let truncated = dir.path().join("t.pdf");
+        std::fs::write(&truncated, &real[..real.len() / 3]).unwrap();
+
+        for p in [garbage.as_path(), truncated.as_path()] {
+            let r = extract_text(p);
+            assert!(
+                r.is_err(),
+                "畸形 PDF 必须落成失败结果而不是崩掉：{:?}",
+                r.map(|t| t.chars().count())
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_is_case_insensitive_and_rejects_unknown_types() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("A.TXT"), "验收".as_bytes()).unwrap();
+        assert!(extract_text(&dir.path().join("A.TXT")).unwrap().contains("验收"), "扩展名要忽略大小写");
+
+        let e = extract_text(&dir.path().join("lib.dll")).unwrap_err();
+        assert_eq!(e.code, "extract_unsupported");
+
+        let png = dir.path().join("截图.PNG");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\n").unwrap();
+        let e = extract_text(&png).unwrap_err();
+        assert_eq!(e.code, "extract_unsupported", "图片属 M6 OCR，本版本明确不支持");
+    }
+
+    /// 分派表和 supported_exts() 必须同源：UI 上写的「支持的类型」要是真的那一套。
+    #[test]
+    fn supported_exts_list_matches_the_dispatch_table() {
+        for ext in supported_exts() {
+            assert!(kind_of(ext).is_some(), "{ext} 在清单里却分派不到抽取器");
+            assert_eq!(ext.to_lowercase(), *ext, "清单里的扩展名统一小写");
+        }
+        for kind_ext in ["txt", "md", "csv", "docx", "pptx", "xlsx", "xls", "pdf"] {
+            assert!(supported_exts().contains(&kind_ext), "{kind_ext} 缺清单");
+        }
     }
 }
