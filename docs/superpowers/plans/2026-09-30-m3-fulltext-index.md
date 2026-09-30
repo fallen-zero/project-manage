@@ -91,7 +91,7 @@
 - `src/router.tsx`、`src/components/app-shell.tsx` — 新路由与导航项。
 - `docs/技术方案.md`、`docs/开发进度.md` — 收口。
 
-测试基线：**动手前 `cargo test --lib` = 41 passed**（本轮已实测：`grep -c "#\[test\]"` 各模块 4+12+7+9+9 = 41，与实跑一致；临时探针已全部删除）。每个任务的 Expected 数字都从这条链往上加，最后到 **83**（+3 +5 +4 +4 +4 +5 +6 +6 +5 = 42 条新测试；Task 10/11/12 不新增 Rust 测试）。
+测试基线：**动手前 `cargo test --lib` = 41 passed**（本轮已实测：`grep -c "#\[test\]"` 各模块 4+12+7+9+9 = 41，与实跑一致；临时探针已全部删除）。每个任务的 Expected 数字都从这条链往上加，最后到 **84**（+4 +5 +4 +4 +4 +5 +6 +6 +5 = 43 条新测试；Task 10/11/12 不新增 Rust 测试）。
 
 ---
 
@@ -105,7 +105,7 @@
 **Interfaces:**
 - Consumes: `db::open(data_dir)`、`db::open_in_memory()`、既有 `settings(key, value)` 表
 - Produces:
-  - 表 `index_docs(doc_rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL, path TEXT NOT NULL, ext TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0, mtime INTEGER NOT NULL DEFAULT 0, index_status TEXT NOT NULL DEFAULT 'pending', skip_reason TEXT NULL, error_msg TEXT NULL, indexed_at TEXT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(project_id, path))`
+  - 表 `index_docs(doc_rowid INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, path TEXT NOT NULL, ext TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0, mtime INTEGER NOT NULL DEFAULT 0, index_status TEXT NOT NULL DEFAULT 'pending', skip_reason TEXT NULL, error_msg TEXT NULL, indexed_at TEXT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')), UNIQUE(project_id, path))`（这行与 Step 3 的 DDL 同源，冲突以 Step 3 为准；`project_id` 的外键见事实 24）
   - 虚表 `index_docs_fts(name_tokens, body_tokens, tokenize='unicode61')`，其 `rowid` == `index_docs.doc_rowid`
   - `settings` 三行种子：`index_exclude_dirs`、`index_max_file_bytes`、`index_max_files_per_project`
   - `schema_meta` 最大版本 = 4
@@ -296,9 +296,88 @@ Expected: `44 passed; 0 failed`（基线 41 + 本任务 3）
 - [ ] **Step 5: 既有库的前向迁移不能报错**
 
 Run: `cd src-tauri && cargo test --lib db::tests`
-Expected: 7 条全绿（`db::tests` 原有 4 条含 M0 的 WAL 三条，加本任务 3 条）。`migrate` 是 `for target in (current+1)..=TARGET_VERSION`，老库从 3 升 4 只跑 `V4`，`INSERT OR IGNORE` 保证重复执行不炸。
+Expected: 7 条全绿（`db::tests` 原有 4 条含 M0 的 WAL 三条，加本任务 3 条）。`migrate` 是 `for target in (current+1)..=TARGET_VERSION`，老库从 3 升 4 只跑 `V4`。
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 6: 写迁移原子性的失败测试（1 条）**
+
+上面那句「老库升 4 只跑 V4」有个前提没被守住：`execute_batch` 与写 `schema_meta` 版本行是**两条独立的自动提交语句**，而 `V4` 的两条 `CREATE` 没有 `IF NOT EXISTS`。断电或报错卡在两者中间，库里就留下「表建了一半、版本号没落」的半成品，下次启动重跑同一个版本会撞 `table index_docs already exists` → `migrate` 报错 → `db::open` 报错。而这个项目对唯一持久库的 stance 是**拒绝启动而不是静默降级**（M0 的 WAL 读回就是这个立场），所以这条路径等于把用户唯一的库变砖。修法是「一个版本 = 一个事务」：SQLite 的 DDL 可回滚，半成品会整个消失而不是留下来毒死下一次启动。
+
+追加到 `mod tests`：
+
+```rust
+    /// 一个版本 = 一个事务：失败的 batch 既不留半成品表，也不留版本号行。
+    /// 守的是「断电后下次启动还起得来」：这个库是唯一副本，没有回退路径。
+    #[test]
+    fn a_failed_version_leaves_no_partial_objects_and_no_version_row() {
+        let conn = open_in_memory().unwrap();
+        apply_version(&conn, 99, "CREATE TABLE atomic_probe(x); CREATE TABLE atomic_probe(x);")
+            .expect_err("同名 CREATE 的第二条必须让整个 batch 失败");
+        let objs: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'atomic_probe'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(objs, 0, "事务回滚后不该留下第一条已建好的表");
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM schema_meta WHERE version = 99", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "失败的版本不该写下版本号");
+    }
+```
+
+不断言错误文案（`AppError` 的 Display 里是否带底层 SQLite 消息不在本任务的契约内），只断言两个结构后果：对象不存在、版本号没落。
+
+- [ ] **Step 7: 跑测试确认失败**
+
+Run: `cd src-tauri && cargo test --lib -- db::tests::a_failed_version`
+Expected: 编译失败 `cannot find function apply_version`（这条函数还不存在）。
+
+- [ ] **Step 8: 把版本循环改成事务**
+
+`migrate` 里那段 `for target in …` 换成调用新函数，新函数放在 `migrate` 之后：
+
+```rust
+    for target in (current + 1)..=TARGET_VERSION {
+        let ddl = match target {
+            1 => V1,
+            2 => V2,
+            3 => V3,
+            4 => V4,
+            _ => "",
+        };
+        apply_version(conn, target, ddl)?;
+    }
+```
+
+```rust
+/// 一个版本 = 一个事务：DDL 与版本行同生同死。
+///
+/// 不能拆成两条自动提交语句：`execute_batch` 成功不代表版本已登记，中间出任何事
+/// （报错、断电、进程被杀）都会留下「对象建了一半、`schema_meta` 还停在旧版本」的库，
+/// 重放同一个版本时 `CREATE TABLE`（V4 没写 `IF NOT EXISTS`）直接失败，而本项目对唯一
+/// 持久库是拒绝启动的，于是应用永久起不来。`Transaction` 的 drop 默认就是回滚
+/// （rusqlite 0.40.2 `src/transaction.rs:25` 的 `DropBehavior::Rollback` 注释写明
+/// "This is the default"），所以这里不需要手写 rollback 分支；用 `unchecked_transaction`
+/// 是因为 `migrate` 只拿到 `&Connection`，`transaction()` 要 `&mut self`。
+fn apply_version(conn: &Connection, target: i64, ddl: &str) -> AppResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(ddl)?;
+    tx.execute(
+        "INSERT INTO schema_meta (version, applied_at) VALUES (?1, datetime('now'))",
+        [target],
+    )?;
+    tx.commit()
+}
+```
+
+- [ ] **Step 9: 跑测试确认通过**
+
+Run: `cd src-tauri && cargo test --lib && cargo clippy --lib --all-targets -- -D warnings`
+Expected: `45 passed; 0 failed`（基线 41 + v4 三条 + 本步 1 条），clippy 零告警。
+
+- [ ] **Step 10: 提交**
 
 ```bash
 git add src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/src/db.rs
@@ -522,7 +601,7 @@ pub fn clean_snippet(raw: &str) -> String {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib tokenize`
-Expected: `5 passed`；再跑全量 `cargo test --lib` → `49 passed; 0 failed`
+Expected: `5 passed`；再跑全量 `cargo test --lib` → `50 passed; 0 failed`
 
 如果 `clean_snippet` 的第三条断言（`报价 单 2026 年`）不成立，先打印实际输出再判断：「单 2026」之间左邻是 CJK、右邻是数字，按规则会删空格，得到 `报价单2026 年`。以这个为准，不要为了过测试放宽规则。
 
@@ -677,7 +756,7 @@ fn read_text_file(path: &Path) -> AppResult<String> {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib extract`
-Expected: `4 passed`；全量 `cargo test --lib` → `53 passed; 0 failed`
+Expected: `4 passed`；全量 `cargo test --lib` → `54 passed; 0 failed`
 
 - [ ] **Step 5: 提交**
 
@@ -915,7 +994,7 @@ pub fn sheet_text(path: &Path) -> AppResult<String> {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib extract`
-Expected: `8 passed`（Task 3 的 4 条 + 本任务 4 条）；全量 → `57 passed; 0 failed`
+Expected: `8 passed`（Task 3 的 4 条 + 本任务 4 条）；全量 → `58 passed; 0 failed`
 
 - [ ] **Step 5: 提交**
 
@@ -1104,7 +1183,7 @@ pub fn extract_text(path: &Path) -> AppResult<String> {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib extract`
-Expected: `12 passed`；全量 → `61 passed; 0 failed`
+Expected: `12 passed`；全量 → `62 passed; 0 failed`
 
 - [ ] **Step 5: 提交（含 fixture）**
 
@@ -1356,7 +1435,7 @@ pub fn scan_root(root: &Path, opts: &ScanOptions) -> ScanOutcome {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_scan`
-Expected: `5 passed`；全量 → `66 passed; 0 failed`
+Expected: `5 passed`；全量 → `67 passed; 0 failed`
 
 `missing_root_is_reported_instead_of_panicking` 若拿不到 `walk_errors`（walkdir 对不存在的根只吐一条 IOErr，确实会进错误流），就检查是不是 `Z:/` 被解析成了别的形态；**不要**改成断言「空清单即通过」——那会放过「根目录不可达却静默」这个真实故障。
 
@@ -1737,7 +1816,7 @@ pub fn list_docs(
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_store`
-Expected: `6 passed`；全量 → `72 passed; 0 failed`
+Expected: `6 passed`；全量 → `73 passed; 0 failed`
 
 - [ ] **Step 5: 提交**
 
@@ -1956,7 +2035,7 @@ pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<Doc
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_store`
-Expected: `12 passed`（Task 7 的 6 + 本任务 6）；全量 → `78 passed; 0 failed`
+Expected: `12 passed`（Task 7 的 6 + 本任务 6）；全量 → `79 passed; 0 failed`
 
 若 `fts5_syntax...` 里 `hits(&c, "*")` 报错而不是空，说明 `query_expression("*", false)` 回了 `Some`——事实 8 要求纯标点被过滤后回 `None`；回到 Task 2 修过滤器，**不要**在这里加特判。
 
@@ -2446,7 +2525,7 @@ pub fn start(
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_job`
-Expected: `5 passed`；全量 → `83 passed; 0 failed`
+Expected: `5 passed`；全量 → `84 passed; 0 failed`
 
 `cancel_stops_the_pass_early` 若一次跑完（`done == 60`），原因是第一次回调就置位、而检查点在下一轮开头 —— 断言 `done < 60` 应当成立。若始终不成立，先确认 `PROGRESS_EVERY` 与回调时机，不要靠加 `sleep` 让它「看起来对」。
 
@@ -2938,7 +3017,7 @@ index_docs_fts      FTS5 虚表：name_tokens + body_tokens，tokenize=unicode61
 
 `docs/开发进度.md` 新增 `## M3 验收证据`，按 M2 那节的格式写全：
 
-- `cargo test --lib`：`83 passed; 0 failed`，按模块拆一行（`db` / `project` / `ledger` / `vault` / `search` / `tokenize` / `extract` / `index_scan` / `index_store` / `index_job` 各几条，数字从实际输出抄，不要推算）。
+- `cargo test --lib`：`84 passed; 0 failed`，按模块拆一行（`db` / `project` / `ledger` / `vault` / `search` / `tokenize` / `extract` / `index_scan` / `index_store` / `index_job` 各几条，数字从实际输出抄，不要推算）。
 - `cargo clippy --lib --all-targets -- -D warnings` 结果。
 - `npm run build` 的模块数与耗时。
 - Step 3 的逐条真机断言结果（只写「几条命中 / matchedBy 是什么 / 布尔值」，不抄正文）。
@@ -2966,6 +3045,7 @@ git commit -m "docs: 记录 M3 验收证据并按实测更正索引表设计"
 - **性能数字仍是估算**：20 MB / 5 万上限、`PROGRESS_EVERY = 20` 都是拍出来的初始值，只在沙盒小样本上验过行为，没验过吞吐。真项目第一次全量跑之后可能要回头调批次与上限默认值。
 - **未测分支**：`catch_unwind` 的 panic 分支、FTS 的 `missing` 状态（M5 才产生它）、**无 BOM 的 UTF-16**（chardetng 认不出来，仍会被猜成单字节编码解出 mojibake —— 记事本/PowerShell 写 UTF-16 都带 BOM，所以实际少见，但它是「不报错、只是搜不到」那个失效形态的残留口子）、UTF-32（头四字节 `FF FE 00 00` 会被 `for_bom` 匹配成 UTF-16LE，解出来是错的，encoding_rs 无 UTF-32）、更多编码（GB2312 与 GBK 同源，Big5 未测）。
 - **召回的固有代价**：前缀段会放宽结果（`matchedBy = "prefix"` 就是为此存在的标注）。如果实际用起来噪音大，M4 可以按 `matchedBy` 分组而不是混排。
+- **FTS 虚表的孤儿行**：`index_docs.project_id` 的 `ON DELETE CASCADE` 只带走主表行，虚表没有 FK、不受连带（事实 24），所以走 M1 的硬删项目路径会留下永不回收的 `index_docs_fts` 行。检索侧靠 `JOIN index_docs` 天然过滤，功能上看不见它们，代价只是索引体积。裁定：本轮不加触发器（那是过度设计），也不在半途改 M1 的删除路径；由 M5 的启动对账统一回收。Task 10 的接线者若顺手，可在 `index_start(rebuild)` 之外不做处理——重建本来就走 `clear_project`，会连带清掉虚表。
 - **不做的东西**（避免下一个会话又去补）：不加 `content=` 外部内容表（正文不双存）、不引入 Tantivy、不做 notify（M5）、不做 OCR（M6）、不做 .doc/.ppt（M7）、不给前端加单测框架。
 
 ## 执行方式
