@@ -368,7 +368,9 @@ fn apply_version(conn: &Connection, target: i64, ddl: &str) -> AppResult<()> {
         "INSERT INTO schema_meta (version, applied_at) VALUES (?1, datetime('now'))",
         [target],
     )?;
-    tx.commit()
+    // `tx.commit()` 返回 `rusqlite::Result<()>`，与本函数的 `AppResult<()>` 不同型，
+    // 直接当尾表达式会 E0308；用 `?` 走 error.rs 里那个 From 转换，与上面两处一致。
+    Ok(tx.commit()?)
 }
 ```
 
@@ -379,9 +381,16 @@ Expected: `45 passed; 0 failed`（基线 41 + v4 三条 + 本步 1 条），clip
 
 - [ ] **Step 10: 提交**
 
+本任务落两个提交（评审修复轮与建表分开，别把两条不同内容的改动挤进同一条 message）：
+
 ```bash
 git add src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/src/db.rs
 git commit -m "feat: M3 库层 v4 建 index_docs 与 rowid 对齐的 FTS5 虚表"
+```
+
+```bash
+git add src-tauri/src/db.rs
+git commit -m "fix: 库层迁移改为一版本一事务，失败不再留下半成品库"
 ```
 
 ---
