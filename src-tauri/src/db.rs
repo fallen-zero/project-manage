@@ -101,19 +101,36 @@ fn migrate(conn: &Connection) -> AppResult<()> {
         .unwrap_or(0);
 
     for target in (current + 1)..=TARGET_VERSION {
-        conn.execute_batch(match target {
+        let ddl = match target {
             1 => V1,
             2 => V2,
             3 => V3,
             4 => V4,
             _ => "",
-        })?;
-        conn.execute(
-            "INSERT INTO schema_meta (version, applied_at) VALUES (?1, datetime('now'))",
-            [target],
-        )?;
+        };
+        apply_version(conn, target, ddl)?;
     }
     Ok(())
+}
+
+/// 一个版本 = 一个事务：DDL 与版本行同生同死。
+///
+/// 不能拆成两条自动提交语句：`execute_batch` 成功不代表版本已登记，中间出任何事
+/// （报错、断电、进程被杀）都会留下「对象建了一半、`schema_meta` 还停在旧版本」的库，
+/// 重放同一个版本时 `CREATE TABLE`（V4 没写 `IF NOT EXISTS`）直接失败，而本项目对唯一
+/// 持久库是拒绝启动的，于是应用永久起不来。`Transaction` 的 drop 默认就是回滚
+/// （rusqlite 0.40.2 `src/transaction.rs:25` 的 `DropBehavior::Rollback` 注释写明
+/// "This is the default"），所以这里不需要手写 rollback 分支；用 `unchecked_transaction`
+/// 是因为 `migrate` 只拿到 `&Connection`，`transaction()` 要 `&mut self`。
+fn apply_version(conn: &Connection, target: i64, ddl: &str) -> AppResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(ddl)?;
+    tx.execute(
+        "INSERT INTO schema_meta (version, applied_at) VALUES (?1, datetime('now'))",
+        [target],
+    )?;
+    // commit 自己返回 rusqlite::Error，和上面两处 `?` 一样过 From 收敛成 AppError。
+    Ok(tx.commit()?)
 }
 
 const V1: &str = "CREATE TABLE IF NOT EXISTS settings (
@@ -300,16 +317,21 @@ mod tests {
     use super::*;
     use rusqlite::params;
 
+    /// index_docs.project_id 有 REFERENCES projects(id) 外键，而 after_open 里
+    /// PRAGMA foreign_keys=ON，所以必须先落一行父项目，插子表才走得通。
+    fn seed_project(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO projects (id, name) VALUES (?1, '索引测试项目')",
+            params![id],
+        )
+        .unwrap();
+    }
+
     /// v4 建表必须真的成功：FTS5 虚表在 bundled 构建里不是「假设可用」，这里直接建一次。
     #[test]
     fn v4_creates_index_tables_and_fts_is_writable() {
         let conn = open_in_memory().unwrap();
-        // index_docs.project_id 带外键，父行必须先存在。
-        conn.execute(
-            "INSERT INTO projects (id, name) VALUES ('p-1', '索引测试项目')",
-            [],
-        )
-        .unwrap();
+        seed_project(&conn, "p-1");
         // 表存在
         let names: Vec<String> = conn
             .prepare(
@@ -353,13 +375,7 @@ mod tests {
     #[test]
     fn index_status_check_accepts_the_five_documented_states() {
         let conn = open_in_memory().unwrap();
-        // index_docs.project_id 有 REFERENCES projects(id) 外键，而 after_open 里
-        // PRAGMA foreign_keys=ON，所以必须先落一行父项目，插入才走得通。
-        conn.execute(
-            "INSERT INTO projects (id, name) VALUES ('p-1', '索引测试项目')",
-            [],
-        )
-        .unwrap();
+        seed_project(&conn, "p-1");
         for (i, status) in ["pending", "ok", "skipped", "failed", "missing"]
             .iter()
             .enumerate()
@@ -408,6 +424,27 @@ mod tests {
             .unwrap(),
             4
         );
+    }
+
+    /// 一个版本 = 一个事务：失败的 batch 既不留半成品表，也不留版本号行。
+    /// 守的是「断电后下次启动还起得来」：这个库是唯一副本，没有回退路径。
+    #[test]
+    fn a_failed_version_leaves_no_partial_objects_and_no_version_row() {
+        let conn = open_in_memory().unwrap();
+        apply_version(&conn, 99, "CREATE TABLE atomic_probe(x); CREATE TABLE atomic_probe(x);")
+            .expect_err("同名 CREATE 的第二条必须让整个 batch 失败");
+        let objs: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'atomic_probe'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(objs, 0, "事务回滚后不该留下第一条已建好的表");
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM schema_meta WHERE version = 99", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "失败的版本不该写下版本号");
     }
 
     #[test]
