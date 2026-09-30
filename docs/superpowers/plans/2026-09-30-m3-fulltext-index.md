@@ -870,7 +870,11 @@ git commit -m "feat: M3 纯文本抽取走 chardetng 探测，UTF-16 靠 decode 
         w.start_file("[Content_Types].xml", opts).unwrap();
         w.write_all(br#"<?xml version="1.0"?/>"#).unwrap();
         for (n, word) in [(2u32, "第二页"), (10, "第十页"), (1, "第一页")] {
-            w.start_file(&format!("ppt/slides/slide{n}.xml"), opts).unwrap();
+            // 这里不能写 `&format!(...)`：`start_file` 的形参是 `S: ToString`，
+            // 借用在 `cargo clippy --lib --all-targets -- -D warnings` 上被判
+            // needless_borrows_for_generic_args（Task 4 实测：error: the borrowed expression
+            // implements the required traits），直接把 String 传进去。
+            w.start_file(format!("ppt/slides/slide{n}.xml"), opts).unwrap();
             let xml = format!(
                 r#"<p:sld xmlns:a="http://x" xmlns:p="http://y"><p:cSld><p:sp><p:txBody><a:p><a:r><a:t>{word}验收</a:t></a:r></a:p></p:txBody></p:sp></p:cSld></p:sld>"#
             );
@@ -909,7 +913,9 @@ Expected: `cannot find function office_text` / `sheet_text`
 
 ```rust
 /// 事实 12：docx 的正文节点是 `<w:t>`、pptx 是 `<a:t>`，`local_name` 都是 `t`。
-/// 所以两种格式共用一个循环，靠 tag 名区分范围即可；`check_end_names = false` 是因为
+/// 所以两种格式共用一个循环：**区分范围靠读哪个部件**（`word/document.xml` vs
+/// `ppt/slides/slideN.xml`），传进来的 tag 两边都是 `b"t"`，别误读成它在筛命名空间。
+/// `check_end_names = false` 是因为
 /// Office 的命名前缀只在文档内部一致，关掉能避免严格校验把整份文件判死。
 fn xml_texts(xml: &str, tag: &[u8]) -> AppResult<Vec<String>> {
     use quick_xml::events::Event;
