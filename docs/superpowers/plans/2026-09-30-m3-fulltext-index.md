@@ -61,6 +61,7 @@
 | 21 | `INSERT … ON CONFLICT (project_id, path) DO UPDATE` 不改 `id`：**同一行被重新索引时 `index_docs.id` 与 `doc_rowid` 保持稳定**，所以 FTS 可以先按 rowid 点删再插 | 探针 `b2`：第二次用不同 id 写同路径，行仍是 `d1` |
 | 22 | `settings` 读回缺失键时 `query_row(...).ok()` 得到 `None`，逗号分隔值按 `trim` + 去空处理可用；值里允许出现空格（`目标 目录`） | 探针 `b2` |
 | 23 | `tauri::Emitter::emit<S: Serialize + Clone>(&self, event, payload)` 在 2.12.0 存在（`tauri-2.12.0/src/lib.rs:961`），`AppHandle` 可 move 进线程 | 读 tauri 源码 |
+| 24 | `after_open` 里 `PRAGMA foreign_keys=ON` 是生效的，所以 **插 `index_docs` 必须先有对应 `projects` 行**，否则 `FOREIGN KEY constraint failed`；Task 1 的两条建表测试因此各带一行 `INSERT INTO projects`（Task 7/8/9 的测试用 `seed_project()` 满足同一约束）。另一半：FTS5 虚表没有 FK，**不受 `ON DELETE CASCADE` 连带**——软删/硬删项目只会带走 `index_docs` 行，虚表留下孤儿行，只能由写入侧按 rowid 显式清（Task 7 的 `clear_project`/`delete_doc`），检索侧靠 `JOIN index_docs` 天然过滤 | 探针 `a18`（Task 1 落地时实测） |
 
 **这些是 spec 第 127 行的更正**：spec 写「`content_rowid` 对齐 `index_docs.id`」，但 `id` 是 TEXT uuid，SQLite 的 rowid 必须是整数。实际采用**事实 2** 的形状：`index_docs` 加一列 `doc_rowid INTEGER PRIMARY KEY AUTOINCREMENT` 作为对齐锚，`id TEXT UNIQUE` 保留给业务与 IPC。Task 12 会把 spec 这句改过来。
 
@@ -118,6 +119,12 @@
     #[test]
     fn v4_creates_index_tables_and_fts_is_writable() {
         let conn = open_in_memory().unwrap();
+        // index_docs.project_id 带外键，父行必须先存在（事实 24）。
+        conn.execute(
+            "INSERT INTO projects (id, name) VALUES ('p-1', '索引测试项目')",
+            [],
+        )
+        .unwrap();
         // 表存在
         let names: Vec<String> = conn
             .prepare(
@@ -161,6 +168,13 @@
     #[test]
     fn index_status_check_accepts_the_five_documented_states() {
         let conn = open_in_memory().unwrap();
+        // index_docs.project_id 有 REFERENCES projects(id) 外键，而 after_open 里
+        // PRAGMA foreign_keys=ON，所以必须先落一行父项目，插入才走得通（见事实 24）。
+        conn.execute(
+            "INSERT INTO projects (id, name) VALUES ('p-1', '索引测试项目')",
+            [],
+        )
+        .unwrap();
         for (i, status) in ["pending", "ok", "skipped", "failed", "missing"].iter().enumerate() {
             conn.execute(
                 "INSERT INTO index_docs (id, project_id, path, ext, index_status)
@@ -209,8 +223,8 @@
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cd src-tauri && cargo test --lib db::tests::v4 db::tests::index_status`
-Expected: FAIL，报 `no such table: index_docs` / `no such table: settings`（key 不存在那步是 `Query returned no rows`）
+Run: `cd src-tauri && cargo test --lib -- db::tests::v4 db::tests::index_status`
+Expected: FAIL 3 条，报 `no such table: index_docs`；种子值那条报 `QueryReturnedNoRows`（键不存在）。注意多个过滤词要放在 `--` 后面，`cargo test --lib a b` 会被 cargo 当成未知参数。
 
 - [ ] **Step 3: 写迁移**
 
@@ -282,7 +296,7 @@ Expected: `44 passed; 0 failed`（基线 41 + 本任务 3）
 - [ ] **Step 5: 既有库的前向迁移不能报错**
 
 Run: `cd src-tauri && cargo test --lib db::tests`
-Expected: 4 条（含 M0 的 WAL 三条）全绿。`migrate` 是 `for target in (current+1)..=TARGET_VERSION`，老库从 3 升 4 只跑 `V4`，`INSERT OR IGNORE` 保证重复执行不炸。
+Expected: 7 条全绿（`db::tests` 原有 4 条含 M0 的 WAL 三条，加本任务 3 条）。`migrate` 是 `for target in (current+1)..=TARGET_VERSION`，老库从 3 升 4 只跑 `V4`，`INSERT OR IGNORE` 保证重复执行不炸。
 
 - [ ] **Step 6: 提交**
 
