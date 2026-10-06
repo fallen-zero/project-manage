@@ -195,10 +195,16 @@ pub struct DocHit {
     pub project_id: String,
     pub project_name: String,
     pub path: String,
-    /// 已按 `clean_snippet` 收回 CJK 空格的摘要，命中词用 [ ] 包住
+    /// 已按 `clean_snippet` 收回 CJK 空格的摘要，命中词用 [ ] 包住。
+    /// 两条 M4 要知道的契约（控制方探针实测）：摘要取自**正文列**（`snippet()` 的第 2 个实参固定为 1），
+    /// 只靠文件名命中的结果摘要不带 [ ]；且摘要串是预分词后的正文，`cut_for_search` 的复合词会
+    /// 连着出现两次（实测「里面只有付款条件付款条件与验收流程」）—— 不影响召回，只影响观感。
+    /// 要拿原文做摘要得在建表时给虚表加一列 UNINDEXED 正文，不许在检索侧拼。
     pub snippet: String,
     /// exact | prefix：放宽过的命中要能被界面标出来，否则用户会以为是 bug
     pub matched_by: &'static str,
+    /// bm25 原值，**越小越好**：bundled `sqlite3.c:245090` 交回的是 `-1.0 * score`，
+    /// 所以 `ORDER BY bm25(...)` 升序就是最相关在前。这个数只用于相对排序，别直接显示给用户。
     pub score: f64,
 }
 
@@ -233,6 +239,10 @@ fn run_select(conn: &Connection, expr: &str, limit: i64, matched_by: &'static st
 /// 第二段「前缀」只在 0 命中时放宽成 `"维保"*`，把被切成「维保期」这种长词的情况捞回来。
 /// 只做第一段会表现为「功能没坏但搜不到」，直接只做第二段则精度差。
 /// 两段用同一个 `query_expression`，即同一套预处理，见 tokenize.rs 的头注释。
+///
+/// `limit` 原样进 SQL，这里不校验也不补默认值：SQLite 里负数 LIMIT = 不限行、0 = 无行，
+/// clamp 属于调用方的系统边界（Task 10 的 IPC：`limit.unwrap_or(50).clamp(1, 200)`）。
+/// 刻意不做第二道校验 —— 本项目只在边界校验一次，两道 clamp 会漂成两个数。
 #[allow(dead_code)] // caller 在 Task 10 的检索 IPC，落地时删掉本行
 pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<DocHit>> {
     let q = query.trim();
@@ -484,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn chinese_word_hits_body_and_name_with_a_readable_snippet() {
+    fn chinese_word_hits_with_a_readable_body_snippet() {
         let c = seeded_with_docs();
         let got = hits(&c, "验收");
         assert_eq!(got.len(), 2, "{:?}", got.iter().map(|h| &h.path).collect::<Vec<_>>());
@@ -492,7 +502,18 @@ mod tests {
         let hit = &got[0];
         assert_eq!(hit.project_name, "政务云迁移", "结果要带项目名，供 M4 分组");
         assert!(hit.snippet.contains('[') && hit.snippet.contains(']'), "摘要要标出命中词：{}", hit.snippet);
-        assert!(!hit.snippet.contains(" 甲 方"), "摘要不该是散开的字：{}", hit.snippet);
+        // 原来这条写的是 `!hit.snippet.contains(" 甲 方")`，控制方探针实测它是假断言：
+        // 入库串是 jieba 词用空格拼的，「甲方」本身是一个词，原始摘要为
+        // "甲方 要求 [验收] 指标 见 合同 附件"，里面根本不存在 " 甲 方" 这个子串，
+        // 把 run_select 里的 clean_snippet 调用删掉，整套测试照样全绿。
+        // 夹具正文全 CJK，所以「摘要里一个空格都不该剩」既断得住，又能被同一处变异打红。
+        assert!(!hit.snippet.contains(' '), "摘要里不该残留分词空格：{}", hit.snippet);
+        // 摘要只取自正文列（snippet 的第 2 个实参固定为 1）：只靠文件名命中的结果，摘要不带 [ ]。
+        // 这条是 M4 的界面契约，探针实测 hits("报价单")[0].snippet =
+        // "里面只有付款条件付款条件与验收流程"（正文没「报价单」三个字，故无标记）。
+        let only_name = hits(&c, "报价单");
+        assert_eq!(only_name.len(), 1);
+        assert!(!only_name[0].snippet.contains('['), "正文没这个词、只靠文件名命中时摘要不带标记：{}", only_name[0].snippet);
     }
 
     /// 事实 5：复合词的子词查询靠 cut_for_search 才能命中。
@@ -558,22 +579,55 @@ mod tests {
         )
         .unwrap();
 
-        // 1) 用敏感字段的明文检索，一条都不该命中
+        // 1) 用敏感字段的明文检索，一条都不该命中。先钉住这条腿不是空转：
+        //    查询串必须真的能成形，否则 doc_hits 跳过 SQL 直接回空、断言恒绿。
+        //    探针实测 query_expression(secret,false) = Some("\"机密\" AND \"串\" AND \"Zhang\" AND \"2026\"")。
+        assert!(query_expression(secret, false).is_some(), "第 1 段的查询串要能成形，否则空结果是假绿");
         assert!(hits(&c, secret).is_empty(), "敏感字段明文进不了 FTS");
-        // 2) 结构性检查：整张虚表里连这个字符串的片段都搜不到（不依赖分词是否切开）
-        let needle = "%Zhang@2026%";
+        // 2) 结构性检查：虚表两列里连片段都不该有。needle 只用**一段连续**字符 ——
+        //    原来写的 "%Zhang@2026%" 经探针实测：在「明文真的进了索引」的库里照样回 0
+        //    （入库串是 jieba 词用空格拼的，Zhang 与 2026 之间被隔开了），
+        //    也就是这条当时无论有没有泄露都恒绿。换 %Zhang% / %2026% 后各回 1，才是能变红的写法。
         for col in ["body_tokens", "name_tokens"] {
-            let n: i64 = c
-                .query_row(
-                    &format!("SELECT count(*) FROM index_docs_fts WHERE {col} LIKE ?1"),
-                    params![needle],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert_eq!(n, 0, "{col} 里不该存在敏感值：{n}");
+            for needle in ["%Zhang%", "%2026%"] {
+                let n: i64 = c
+                    .query_row(
+                        &format!("SELECT count(*) FROM index_docs_fts WHERE {col} LIKE ?1"),
+                        params![needle],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(n, 0, "{col} 里不该存在敏感值 {needle}：{n}");
+            }
         }
-        // 3) 反向对照：同一行的明文列 note（交付时用）走的是库内字段检索，
+        // 3) 自我证明（正面照控）：把同一串明文走**正常写入路径**放进索引，上面两条必须能变红。
+        //    没有这一段，前两条只是「看起来像测试」。探针实测：hits(&c2, secret) 回 1 条、
+        //    body_tokens LIKE '%2026%' 计数 1。
+        let c2 = seeded_with_docs();
+        write_doc(&c2, "p1", &file("C:/x/演示.docx"), DocOutcome::Ok(secret.into())).unwrap();
+        assert_eq!(hits(&c2, secret).len(), 1, "正面照控：明文一旦进了索引，第 1 段断言真的会红");
+        let n: i64 = c2
+            .query_row("SELECT count(*) FROM index_docs_fts WHERE body_tokens LIKE '%2026%'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "正面照控：明文一旦进了索引，第 2 段的 LIKE 真的抓得到");
+        // 4) 反向对照：台账的明文列 note（交付时用）走的是库内字段检索，
         //    而 FTS 这边只有磁盘文件正文，两边互不污染
         assert_eq!(hits(&c, "付款条件").len(), 1);
+    }
+
+    /// 两条 guard 分支和 limit 的去向。`search.rs` 给自己的同名 guard 留了测试
+    /// （断 `invalid_input`），这里补齐，否则「空白查询不扫库」「超长要拒绝」全靠肉眼。
+    /// limit 那三条钉的是**现状**不是意图：SQLite 里负数 LIMIT = 不限行、0 = 无行，
+    /// `doc_hits` 不做二次校验，clamp 归调用方边界（Task 10 的 IPC 写 `limit.unwrap_or(50).clamp(1, 200)`）。
+    #[test]
+    fn query_guards_and_limit_pass_straight_through() {
+        let c = seeded_with_docs();
+        assert!(doc_hits(&c, "   ", 50).unwrap().is_empty(), "空白查询不扫库");
+        let long = "验".repeat(129);
+        let e = doc_hits(&c, &long, 50).unwrap_err();
+        assert_eq!(e.code, "invalid_input", "超 128 字要拒绝，不是静默按前 128 字搜");
+        assert_eq!(doc_hits(&c, "验收", 1).unwrap().len(), 1, "limit 要真的限制条数");
+        assert_eq!(doc_hits(&c, "验收", -1).unwrap().len(), 2, "负数 limit 原样交给 SQL（SQLite：不限行）");
+        assert!(doc_hits(&c, "验收", 0).unwrap().is_empty(), "0 就是 0 行，不许悄悄变成默认值");
     }
 }
