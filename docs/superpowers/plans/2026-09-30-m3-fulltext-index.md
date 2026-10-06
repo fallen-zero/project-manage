@@ -2359,9 +2359,11 @@ git commit -m "feat: M3 两段全文检索并钉住密文不进索引的验收"
 **Interfaces:**
 - Consumes: `index_scan::{ScanOptions, scan_root}`、`extract::extract_text`、`index_store::{write_doc, current_rowid, clear_project, DocOutcome}`、`db::open`、`tauri::Emitter`、`std::sync::atomic::{AtomicBool, Ordering}`
   - `extract_text` 的 `Err` 实际有**三个**码名，不是两个：`extract_unsupported`、`extract_failed`，加上 `AppError::io` 带来的 `fs_failed`（读文件本身失败，典型是扫描到抽取之间文件被删/被占用）。下面的 `match` 用「`extract_unsupported` 单列、其余一律 `Failed`」的写法，所以 `fs_failed` 会落进 `failed` 而不是 `missing` —— 这是有意的：`missing` 描述的是对账结论（库里有一行、磁盘上没有了），归 M5 的启动对账写，抽取这一轮不判它。别在 Task 9 里顺手把它改成 `missing`。
+- **`capped` 的语义（Task 6 修复轮改过扫描侧，这里按新语义接）**：`scan_root` 的单项目配额是在分「可抽取 / 超限」两桶**之前**判的，所以 `ScanOutcome.capped = true` 说的是「`files` + `over_size` 合计撞到 `max_files_per_project`，至少还有一个受支持的文件被丢掉」，而不是「可抽取清单被截断」。接法：`ProjectResult.scanned_total` 取两桶之和（它就是本轮会产生多少行），`capped` 原样透传；`break` 之后剩下的文件既没有行也没有计数，`ScanOutcome` 里**没有**被丢弃的条数字段，因此摘要只能说「截断了」而不能说「还差 M 个」—— 这是有意的，别为了凑那个数字去给 `ScanOutcome` 加字段。超限那一桶同样会被截，Task 11 的文案要按这个写（见 Task 11 Step 4）。
 - **顺带收掉的豁免**（`run_pass` 是这三个 `pub` 项的第一个非测试 caller）：`extract.rs` 里 `extract_text` 上面那条 `#[allow(dead_code)] // caller 在 Task 9`、`index_scan.rs` 里 `scan_root` 与 `ScanOptions::load` 上面各一条同形豁免，本任务落地时一并删掉。漏删不会红，只会变成永久豁免，所以 Step 里要跑 `grep -n "allow(dead_code)" src/extract.rs src/index_scan.rs` —— 期望结果：`extract.rs` 只剩 `supported_exts` 那一条（caller 在 Task 10），`index_scan.rs` 应该**一条都不剩**。
 - Produces:
   - `pub struct ScanTarget { pub project_id: String, pub project_name: String, pub root_path: String }`
+  - `pub fn targets(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<ScanTarget>>`
   - `pub struct Progress { pub state: &'static str, pub project_id: String, pub project_name: String, pub total: i64, pub done: i64, pub ok: i64, pub skipped: i64, pub failed: i64, pub current: String }`（camelCase Serialize）
   - `pub struct ProjectResult { pub project_id: String, pub project_name: String, pub scanned_total: i64, pub ok: i64, pub skipped: i64, pub failed: i64, pub unchanged: i64, pub walk_errors: i64, pub capped: bool, pub root_missing: bool }`
   - `pub struct RunSummary { pub state: &'static str, pub results: Vec<ProjectResult>, pub started_at: String, pub finished_at: String }`
@@ -3204,8 +3206,8 @@ export const isTerminal = (p: IndexProgress | null) =>
 - **支持类型清单**：把 `overview.supportedExts` 原样列出，并配一句「清单之外的类型（图片、.doc/.ppt、压缩包）不会建行：图片等归 M6 OCR，.doc/.ppt 归 M7」。这是「为什么这个文件搜不到」的第一层答案。
 - **超限与排除**：显示 `maxFileBytes`（换算成 MB）、`maxFilesPerProject`、`excludeDirs`。
 - 项目表：每个项目一行 —— 名称、根目录（不可达时红标 `rootExists=false`，文案「根目录当前不可达，通常是盘没挂载」）、`ok / skipped / failed / pending / missing` 五个数字。选中一行后下方列出该项目的文件行（`indexDocs`），状态筛选下拉：全部 / ok / skipped / failed。
-- 每条文件行展示 `skipReason`（`too_large` / `empty_text` / `over_project_cap`）与 `errorMsg` 的中文映射，例如 `too_large` → `超出单文件上限`。映射写成 `src/pages/index-status.tsx` 内的一个 `const REASON_LABEL: Record<string, string>`，不要为它建 store。
-- 上一轮摘要：`lastRun.results` 里逐项目显示 `scannedTotal / ok / skipped / failed / unchanged`，并显式标出 `capped`（`已达单项目文件上限，本轮只索引前 N 个`）与 `rootMissing`、`walkErrors`。
+- 每条文件行展示 `skipReason`（`too_large` / `empty_text`）与 `errorMsg` 的中文映射，例如 `too_large` → `超出单文件上限`。映射写成 `src/pages/index-status.tsx` 内的一个 `const REASON_LABEL: Record<string, string>`，不要为它建 store。**不要给 `over_project_cap` 留映射**：触顶后被丢弃的文件根本不建行（`scan_root` 在 `break` 之后什么都不返回，见 Task 6 的 `capped`），M3 没有任何写入方；留着等于告诉用户「这里本该有一行」，是假的可观测性。上限这件事由下一行的项目级 `capped` 标注回答。
+- 上一轮摘要：`lastRun.results` 里逐项目显示 `scannedTotal / ok / skipped / failed / unchanged`，并显式标出 `capped`（文案用 `已达单项目文件上限，本轮只处理前 N 个（含超限跳过的行），其余文件本轮没有行`）与 `rootMissing`、`walkErrors`。**别把 `scannedTotal` 念成「索引了 N 个」**：Task 6 的配额是在分「可抽取 / 超限」两桶**之前**判的（见 Task 9 Interfaces 的 capped 语义），这 N 个里含 `too_large` 的 skipped 行，而真正能抽正文的文件可能反而被挤掉了。
 - **试搜区**：一个输入框 + 结果列表，直接吃 `searchDocs`。每条显示 `path`、`snippet`、`matchedBy`；`prefix` 那条要在旁边标「宽松匹配」，让用户知道这不是精确命中。这一区同时是 M4 的输入素材，本任务只求「能验」。
 - 敏感字段脱敏的既有约定不影响本页（本页没有任何密文列）。
 - 样式：全部用 Tailwind 工具类 + `@/components/ui` 里的 `Button`/`Card`/`Input`/`Select`/`Badge`；不新建样式文件。
