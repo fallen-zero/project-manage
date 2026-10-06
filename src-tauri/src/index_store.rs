@@ -1,8 +1,11 @@
-//! 索引表的读写。两条不变量：
+//! 索引表的读写。三条不变量：
 //! 1. 主表与 FTS 是两处存储，任何增删都要在同一个事务里做两笔（事实 3），否则命中列表里会
 //!    出现已经不存在的文件。
 //! 2. 只有 `DocOutcome::Ok` 会往虚表写东西。skipped/failed 只留状态行 —— 「为什么搜不到」
 //!    的答案在行上，不在正文里，也就不该出现在搜索结果里。
+//! 3. 本模块每个写函数**自己开事务**（`unchecked_transaction()` 跳过重入检查，调用方再包一层
+//!    会让内层 `commit()` 提前提交外层事务）。Task 9 的 `run_pass` 逐文件调 `write_doc`，
+//!    不要在外面套事务，也不要指望「一轮一个事务」的提速。
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -132,7 +135,8 @@ pub struct StatusCount {
 #[allow(dead_code)] // caller 在 Task 10 的状态统计 IPC，落地时删掉本行
 pub fn status_counts(conn: &Connection, project_id: &str) -> AppResult<Vec<StatusCount>> {
     let mut stmt = conn.prepare(
-        "SELECT index_status, count(*) FROM index_docs WHERE project_id = ?1 GROUP BY index_status",
+        "SELECT index_status, count(*) FROM index_docs WHERE project_id = ?1 GROUP BY index_status
+                  ORDER BY index_status",
     )?;
     let rows = stmt.query_map(params![project_id], |r| {
         Ok(StatusCount { status: r.get(0)?, count: r.get(1)? })
@@ -227,6 +231,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hit, 1);
+        let indexed_at: Option<String> = c
+            .query_row("SELECT indexed_at FROM index_docs WHERE doc_rowid = ?1", params![rowid], |r| r.get(0))
+            .unwrap();
+        assert!(indexed_at.is_some(), "ok 行必须带索引时间，Task 10 的清单要能回答「什么时候建的索引」");
     }
 
     /// 事实 21：同路径重写不换行、不留重复 FTS 行（rowid 与对外 id 都稳定 + 点删再插）。
@@ -280,10 +288,18 @@ mod tests {
         write_doc(&c, "p1", &file("C:/b.docx"), DocOutcome::Failed("解包失败".into())).unwrap();
         write_doc(&c, "p1", &file("C:/c.docx"), DocOutcome::Empty).unwrap();
         write_doc(&c, "p1", &file("C:/d.docx"), DocOutcome::Ok("   ".into())).unwrap();
-        let blank: (String, Option<String>) = c
-            .query_row("SELECT index_status, skip_reason FROM index_docs WHERE path = 'C:/d.docx'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        let blank: (String, Option<String>, Option<String>) = c
+            .query_row(
+                "SELECT index_status, skip_reason, indexed_at FROM index_docs WHERE path = 'C:/d.docx'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
             .unwrap();
-        assert_eq!(blank, ("skipped".to_string(), Some("empty_text".to_string())), "空白正文算 empty_text，不算 ok");
+        assert_eq!(
+            blank,
+            ("skipped".to_string(), Some("empty_text".to_string()), None),
+            "空白正文算 empty_text、不算 ok，且不得有索引时间"
+        );
         assert_eq!(c.query_row("SELECT count(*) FROM index_docs", [], |r| r.get::<_, i64>(0)).unwrap(), 4);
         assert_eq!(c.query_row("SELECT count(*) FROM index_docs_fts", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         let reason: Option<String> = c
