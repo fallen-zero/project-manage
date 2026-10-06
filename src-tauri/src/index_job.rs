@@ -1,7 +1,9 @@
 //! 索引作业。分成两层是刻意的：
 //! - `run_pass` 纯函数，收 &Connection + 进度回调，内存库就能测完（取消、增量、重建、不可达根目录）。
-//! - `start` 只是把回调换成 Tauri 事件，并维护 running/cancel 标志。它不在本任务的测试范围里，
-//!   正确性由 Task 12 的真机验证承担 —— 别在这里写只能证明 mock 的测试。
+//! - `start` 把回调换成 Tauri 事件，并负责 running/cancel 两个标志的生命周期（`RunningGuard`
+//!   的 Drop 复位、`spawn` 起不来时返回错误而不是 panic）。它的线程体不在本任务的测试范围里
+//!   （要 `AppHandle`），正确性由 Task 12 的真机验证承担 —— 别在这里写只能证明 mock 的测试；
+//!   但 `RunningGuard` 的复位语义是可测的，`running_flag_is_released_even_when_the_job_panics` 钉它。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,7 +35,9 @@ pub struct ScanTarget {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Progress {
-    /// running | done | cancelled | error
+    /// running | done | cancelled | error。四个都有构造点：`running` 由 `progress_for` 发，
+    /// `done`/`cancelled` 与 `error` 由 `terminal` 发（修复轮之前 `done`/`error` 一个都没有，
+    /// 只订阅事件的前端因此等不到「这一轮结束了」的信号）。
     pub state: &'static str,
     pub project_id: String,
     pub project_name: String,
@@ -43,7 +47,12 @@ pub struct Progress {
     pub skipped: i64,
     pub failed: i64,
     /// 当前正在处理的文件路径，用于界面显示「在做什么」。只读展示，不落日志。
+    /// 终止事件（`terminal`）里是空串：那一刻不属于任何一个文件。
     pub current: String,
+    /// 只有 `state == "error"` 时有值，是给界面直接念的一句话（含 `[code]` 前缀）。
+    /// 单独立一个字段而不是塞进 `current`：`current` 的契约是文件路径，混用会让 Task 11
+    /// 的「当前文件」栏显示成错误文案。
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -235,6 +244,44 @@ fn progress_for(
         skipped: acc.skipped,
         failed: acc.failed,
         current: current.to_owned(),
+        error: None,
+    }
+}
+
+/// 轮级终止事件。`run_pass` 只在项目边界发「这个项目」的进度，一轮结束/失败没有任何事件，
+/// 只订阅事件的前端就只能反过来轮询 summary。`done`/`cancelled`/`error` 三个状态全靠这里发。
+/// `project_id`/`project_name` 在终止事件里是空串 —— 它不属于某一个项目，Task 11 别拿它当 key。
+fn terminal(state: &'static str, results: &[ProjectResult], error: Option<String>) -> Progress {
+    let sum = |f: fn(&ProjectResult) -> i64| results.iter().map(f).sum();
+    Progress {
+        state,
+        project_id: String::new(),
+        project_name: String::new(),
+        total: sum(|r| r.scanned_total),
+        done: sum(|r| r.done_total()),
+        ok: sum(|r| r.ok),
+        skipped: sum(|r| r.skipped),
+        failed: sum(|r| r.failed),
+        current: String::new(),
+        error,
+    }
+}
+
+/// `running` 唯一的复位点。线程体正常走完、提前 `return`、还是 panic unwind，Drop 都会执行。
+/// 少了它，一次 panic 就把 `running` 永久留在 true —— 界面上再也起不动第二轮，只能重启应用，
+/// 而且没有任何日志说明为什么。`start` 里不许再出现第二处 `running.store(false)`
+/// （唯一例外是 `spawn` 返回 Err 时守卫根本没构造出来，只能就地复位）。
+struct RunningGuard(Arc<IndexShared>);
+
+impl RunningGuard {
+    fn enter(shared: &Arc<IndexShared>) -> Self {
+        Self(Arc::clone(shared))
+    }
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        self.0.running.store(false, Ordering::SeqCst);
     }
 }
 
@@ -242,13 +289,37 @@ pub struct IndexShared {
     pub cancel: AtomicBool,
     pub running: AtomicBool,
     pub summary: Mutex<Option<RunSummary>>,
+    /// 上一轮为什么没跑成。三个失败出口（库打不开 / settings 读不出 / pass 中途报错）都必须
+    /// 往这里写一句话，Task 10 的界面才能回答「点了索引按钮怎么什么都没发生」。
+    /// 存 `format!("{e}")` 而不是 `AppError` 本体：它只 derive 了 `Debug`、没有 `Clone`，
+    /// 而这里要跨线程留一份。代价是机器码混在串里，Task 10 若要按 code 分支再改存三元组。
+    pub last_error: Mutex<Option<String>>,
 }
 
 impl IndexShared {
     #[allow(dead_code)] // 构造点在 Task 10 的 AppState::manage，落地时删掉本行
     pub fn new() -> Self {
-        Self { cancel: AtomicBool::new(false), running: AtomicBool::new(false), summary: Mutex::new(None) }
+        Self {
+            cancel: AtomicBool::new(false),
+            running: AtomicBool::new(false),
+            summary: Mutex::new(None),
+            last_error: Mutex::new(None),
+        }
     }
+}
+
+/// 一轮彻底失败的出口：原因同时写进 `last_error`（给 Task 10 的 IPC 读）和一次 `error` 终止事件
+/// （给只订阅事件的前端），两处用同一个串，界面上才不会「按钮说失败了、事件说没有」。
+/// 失败轮的 `summary` 置 `None`：一轮没跑完就不该留下半截摘要，Task 11 显示的是「这一轮的结果」。
+fn report_failure(emit: &mut impl FnMut(Progress), shared: &IndexShared, msg: String) {
+    let event = terminal("error", &[], Some(msg.clone()));
+    if let Ok(mut g) = shared.summary.lock() {
+        *g = None;
+    }
+    if let Ok(mut g) = shared.last_error.lock() {
+        *g = Some(msg);
+    }
+    emit(event);
 }
 
 /// 薄壳：自己开一条连接（不能借用 AppState 里那条 —— 一轮索引要几分钟，
@@ -270,35 +341,48 @@ pub fn start(
         ));
     }
     shared.cancel.store(false, Ordering::SeqCst);
-    std::thread::spawn(move || {
-        let finish = |summary: Option<RunSummary>, shared: &Arc<IndexShared>| {
-            if let Ok(mut g) = shared.summary.lock() {
-                *g = summary;
-            }
-            shared.running.store(false, Ordering::SeqCst);
-        };
-        let conn = match db::open(&data_dir) {
-            Ok(c) => c,
-            Err(_) => {
-                finish(None, &shared);
-                return;
-            }
-        };
-        let opts = ScanOptions::load(&conn).ok();
+    // 用 Builder 而不是 thread::spawn：后者在线程创建失败时**直接 panic**，而本机物理 16 GB、
+    // commit charge 耗尽（os error 1455）是这轮开发里反复出现过的实况。起不来就返回错误，
+    // 让 Task 10 的 IPC 能念出原因，而不是把 panic 丢进 Tauri 的命令线程里。
+    let worker = Arc::clone(&shared);
+    if let Err(e) = std::thread::Builder::new().name("index-job".to_owned()).spawn(move || {
+        let _guard = RunningGuard::enter(&worker);
         let mut emit = |p: Progress| {
             let _ = app.emit(PROGRESS_EVENT, p);
         };
-        let summary = match &opts {
-            Some(o) => run_pass(&conn, o, project_id.as_deref(), rebuild, &shared.cancel, &mut emit).ok(),
-            None => None,
+        let conn = match db::open(&data_dir) {
+            Ok(c) => c,
+            Err(err) => return report_failure(&mut emit, &worker, format!("{err}")),
         };
-        if let Some(mut s) = summary {
-            s.state = if shared.cancel.load(Ordering::SeqCst) { "cancelled" } else { "done" };
-            finish(Some(s), &shared);
-        } else {
-            finish(None, &shared);
+        let opts = match ScanOptions::load(&conn) {
+            Ok(o) => o,
+            Err(err) => return report_failure(&mut emit, &worker, format!("{err}")),
+        };
+        match run_pass(&conn, &opts, project_id.as_deref(), rebuild, &worker.cancel, &mut emit) {
+            // state 由 run_pass 自己定（它末尾已经按 cancel 判过一次），这里不再重算第二遍。
+            // 注意是 `Ok(s)` 而不是 `Ok(mut s)`：少了「外面再算一遍 state」之后没人改它，
+            // 留着 `mut` 会被 `-D warnings` 打成 `variable does not need to be mutable`（控制方实测）。
+            Ok(s) => {
+                let event = terminal(s.state, &s.results, None);
+                if let Ok(mut g) = worker.summary.lock() {
+                    *g = Some(s);
+                }
+                if let Ok(mut g) = worker.last_error.lock() {
+                    *g = None;
+                }
+                emit(event);
+            }
+            Err(err) => report_failure(&mut emit, &worker, format!("{err}")),
         }
-    });
+    }) {
+        // 线程根本没起来：闭包没跑过、守卫也没构造，`running` 只能在这里自己复位。
+        shared.running.store(false, Ordering::SeqCst);
+        return Err(AppError::new(
+            "index_spawn_failed",
+            &format!("索引线程启动失败：{e}"),
+            Some("本机内存/提交空间不足时会出现，先关掉几个占内存大的程序再试"),
+        ));
+    }
     Ok(())
 }
 
@@ -343,8 +427,10 @@ mod tests {
 
     /// 库里的行数。重建用例要拿它证明「磁盘上没了的旧行跟着掉」，
     /// 光看 `doc_hits` 不够：命中原问句可能只是因为那行根本没被写过。
-    fn doc_rows(conn: &Connection) -> i64 {
-        conn.query_row("SELECT count(*) FROM index_docs WHERE project_id = 'p1'", [], |r| r.get(0)).unwrap()
+    /// `project_id` 走参数而不是写死 `'p1'` —— `missing_root_...` 那条用例里同时有 p1 和 p2，
+    /// 助手写死 id 会让它读出 0、然后以错误的理由变红。
+    fn doc_rows(conn: &Connection, project_id: &str) -> i64 {
+        conn.query_row("SELECT count(*) FROM index_docs WHERE project_id = ?1", [project_id], |r| r.get(0)).unwrap()
     }
 
     /// 一轮 pass 要把结局各归其位：ok / skipped(too_large) / skipped(empty_text，空白抽取) / 未支持不建行 / 排除目录不进。
@@ -427,10 +513,17 @@ mod tests {
         assert!(done > 0, "至少要真的开始过，否则这条测试什么都没证明");
     }
 
-    /// 重建：先把该项目的行与 FTS 清掉再写。两件事都要钉住 ——
-    /// ① 内容变了的文件必须重读；② 磁盘上已经没了的旧行不能留。
+    /// 重建：先把该项目的行与 FTS 清掉再写。三件事都要钉住 ——
+    /// ① 内容变了的文件必须重读；② 磁盘上已经没了的旧行不能留；③ 一个字节都没动的文件
+    /// 在重建趟也必须被重读（`unchanged == 0`）。
     /// ②才是 `clear_project` 唯一承重的场景：`write_doc` 的 `ON CONFLICT DO UPDATE` 会自己
     /// 换掉同路径旧正文，所以「同一文件改了内容」根本测不到它，只有「这一轮不再出现的旧行」测得到。
+    /// ③不是给 `!rebuild` 那个短路守卫当检测的 —— 探针实测：把 `} else if !rebuild` 改成
+    /// `} else if true`，7 条**全绿**。原因是 rebuild 趟开头 `clear_project` 已把该项目的行全删了，
+    /// `current_rowid` 必然回 None，所以那个短路在 rebuild 趟里是不可观测的死逻辑；它只在
+    /// 「以后谁把 `clear_project` 挪走」时才显形，而那一改动同时会红 ②（见 Step 4 变异清单）。
+    /// `不变.txt` 的真正价值：它是两轮之间唯一「路径、内容、mtime 全不变」的在场文件，
+    /// 给 `doc_rows == 3` 与 `稳定 == 1` 两条正面照控提供落点 —— 没有它，本用例只能断「归零」。
     #[test]
     fn rebuild_rewrites_everything_and_leaves_no_stale_tokens() {
         let dir = tempfile::tempdir().unwrap();
@@ -439,21 +532,69 @@ mod tests {
         std::fs::write(&p, "第一版 验收".as_bytes()).unwrap();
         let gone = dir.path().join("归档说明.txt");
         std::fs::write(&gone, "这份要归档 验收".as_bytes()).unwrap();
+        let same = dir.path().join("不变.txt");
+        std::fs::write(&same, "这一份两轮都不动 稳定".as_bytes()).unwrap();
         let conn = db::open_in_memory().unwrap();
         seeded_project(&conn, "p1", dir.path());
         run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
-        assert_eq!(doc_rows(&conn), 2, "第一趟两行都该在库里");
-        assert_eq!(crate::index_store::doc_hits(&conn, "归档", 20).unwrap().len(), 1,
-            "正面照控：被删的那个文件第一趟确实进了索引，否则后面的 0 命中什么都没证明");
+        assert_eq!(doc_rows(&conn, "p1"), 3, "第一趟三行都该在库里");
+        // 正面照控：验收 只出现在 合同/归档说明 两个文件的**正文**里（两个文件名都没有它），
+        // 所以 == 2 才真的证明正文进了索引。只查「归档」会被 name_tokens 满足，证不到正文那条腿。
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收", 20).unwrap().len(), 2,
+            "正面照控：两份正文都在库里，否则后面的 0 命中什么都没证明");
 
         std::fs::write(&p, "第二版 报价".as_bytes()).unwrap();
         std::fs::remove_file(&gone).unwrap();
         let summary = run_pass(&conn, &opts(), None, true, &no_cancel(), &mut |_| {}).unwrap();
-        assert_eq!(summary.results[0].ok, 1, "重建必须重读：{:?}", summary.results[0]);
+        assert_eq!(summary.results[0].ok, 2, "重建必须把在场的全重读：{:?}", summary.results[0]);
+        assert_eq!(summary.results[0].unchanged, 0, "重建趟不该有文件被跳过：{:?}", summary.results[0]);
         assert_eq!(crate::index_store::doc_hits(&conn, "验收", 20).unwrap().len(), 0, "旧正文要跟着清掉");
-        assert_eq!(crate::index_store::doc_hits(&conn, "报价", 20).unwrap().len(), 1);
         assert_eq!(crate::index_store::doc_hits(&conn, "归档", 20).unwrap().len(), 0, "磁盘上没了的旧行不能留");
-        assert_eq!(doc_rows(&conn), 1, "库里的行数也要跟着掉");
+        assert_eq!(crate::index_store::doc_hits(&conn, "报价", 20).unwrap().len(), 1);
+        assert_eq!(crate::index_store::doc_hits(&conn, "稳定", 20).unwrap().len(), 1, "没动的文件要被重写回来");
+        assert_eq!(doc_rows(&conn, "p1"), 2, "库里的行数也要跟着掉");
+    }
+
+    /// 撞配额这一轮的口径：`capped` 必须原样透到 `ProjectResult`，`scanned_total` 必须是
+    /// 「两桶之和」—— 它就是本轮会产生多少行，Task 11 的摘要与状态统计要拿它对账。
+    /// `ScanOutcome` 里**没有**「被丢弃了几条」的字段，所以这里只能断「收下的那 3 条」，
+    /// 别说「还差 M 个」；也别为了凑那个数去给 `ScanOutcome` 加字段。
+    /// 没有这条用例，`acc.capped = outcome.capped` 与 `acc.walk_errors` 两行是零守护的赋值。
+    #[test]
+    fn capped_and_scanned_total_survive_the_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..4 {
+            std::fs::write(dir.path().join(format!("验收{i}.txt")), format!("第{i}份 报价").as_bytes()).unwrap();
+        }
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", dir.path());
+        let mut o = opts();
+        o.max_files_per_project = 3;
+
+        let summary = run_pass(&conn, &o, None, false, &no_cancel(), &mut |_| {}).unwrap();
+        let r = &summary.results[0];
+        assert!(r.capped, "触顶必须透上来，否则 Task 11 说不出「为什么少了几个」：{r:?}");
+        assert_eq!(r.scanned_total, 3, "两桶之和就是本轮的行数：{r:?}");
+        assert_eq!(r.ok, 3);
+        assert_eq!(r.walk_errors, 0, "触顶不是遍历错误，不该混进 walk_errors");
+        assert_eq!(doc_rows(&conn, "p1"), 3, "被丢弃的文件既不建行也不计数");
+    }
+
+    /// `running` 只由 `RunningGuard` 的 Drop 复位。`start` 的线程体在本任务不可测（要 AppHandle），
+    /// 但「一次 panic 把 running 永久留在 true、界面上再也起不动第二轮、只能重启应用」是这个模块
+    /// 最贵的一类失效，必须有一处能变红的断言钉住守卫本身。
+    #[test]
+    fn running_flag_is_released_even_when_the_job_panics() {
+        let shared = Arc::new(IndexShared::new());
+        shared.running.store(true, Ordering::SeqCst);
+        let s = Arc::clone(&shared);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = RunningGuard::enter(&s);
+            panic!("作业里炸了，这条用例的前提就是它要炸");
+        }))
+        .is_err();
+        assert!(panicked, "内部没有 panic，这条用例什么都没测");
+        assert!(!shared.running.load(Ordering::SeqCst), "panic 也必须释放 running");
     }
 
     /// 根目录没挂载是日常（移动盘/网络盘）。它只能让该项目自己标 root_missing，
@@ -479,5 +620,22 @@ mod tests {
         let only_p2 = run_pass(&conn, &opts(), Some("p2"), false, &no_cancel(), &mut |_| {}).unwrap();
         assert_eq!(only_p2.results.len(), 1);
         assert!(only_p2.results[0].root_missing);
+
+        // `rebuild && !root_missing` 的另一半：盘没挂载**不等于**文件被删了，重建不该顺手清掉
+        // 这个项目已有的行。少了 `!root_missing` 这个条件，拔掉的移动盘会在下一次重建时
+        // 把它的索引全冲成空表，而摘要照样报 done。
+        // 用「先建后删的临时目录」造这个场景：p2 上面那条 SQL 里的 Z:/ 从来就没有行，
+        // 拿它断「行数没变」是恒真的，什么也没证明。
+        let removable = tempfile::tempdir().unwrap();
+        std::fs::write(removable.path().join("验收.txt"), "甲方要求验收".as_bytes()).unwrap();
+        let conn2 = db::open_in_memory().unwrap();
+        seeded_project(&conn2, "p9", removable.path());
+        run_pass(&conn2, &opts(), Some("p9"), false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(doc_rows(&conn2, "p9"), 1, "前提：这个项目的行真的在库里");
+        drop(removable); // 目录一旦没了，本轮既扫不到它、也不该清掉它的历史行
+        let after = run_pass(&conn2, &opts(), Some("p9"), true, &no_cancel(), &mut |_| {}).unwrap();
+        assert!(after.results[0].root_missing, "{:?}", after.results[0]);
+        assert_eq!(after.results[0].scanned_total, 0);
+        assert_eq!(doc_rows(&conn2, "p9"), 1, "根不可达时 rebuild 不该动它已有的行");
     }
 }
