@@ -3,9 +3,10 @@
 //!    出现已经不存在的文件。
 //! 2. 只有 `DocOutcome::Ok` 会往虚表写东西。skipped/failed 只留状态行 —— 「为什么搜不到」
 //!    的答案在行上，不在正文里，也就不该出现在搜索结果里。
-//! 3. 本模块每个写函数**自己开事务**（`unchecked_transaction()` 跳过重入检查，调用方再包一层
-//!    会让内层 `commit()` 提前提交外层事务）。Task 9 的 `run_pass` 逐文件调 `write_doc`，
-//!    不要在外面套事务，也不要指望「一轮一个事务」的提速。
+//! 3. 本模块每个写函数**自己开事务**（`unchecked_transaction()` 直接下 `BEGIN DEFERRED`，
+//!    rusqlite 0.40.2 里没有重入检查，所以调用方再包一层会让内层 `BEGIN` 当场失败：
+//!    `cannot start a transaction within a transaction` → `db_failed`）。Task 9 的 `run_pass`
+//!    逐文件调 `write_doc`，不要在外面套事务，也不要指望「一轮一个事务」的提速。
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -310,6 +311,12 @@ mod tests {
             .query_row("SELECT error_msg FROM index_docs WHERE path = 'C:/b.docx'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(err.as_deref(), Some("解包失败"));
+        // skipped 行重写成 ok：`indexed_at = excluded.indexed_at` 这一支必须真的把时间带进来。
+        write_doc(&c, "p1", &file("C:/d.docx"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        let upgraded: Option<String> = c
+            .query_row("SELECT indexed_at FROM index_docs WHERE path = 'C:/d.docx'", [], |r| r.get(0))
+            .unwrap();
+        assert!(upgraded.is_some(), "skipped 行重写成 ok 之后必须补上索引时间");
     }
 
     #[test]
