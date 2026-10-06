@@ -48,13 +48,10 @@ impl ScanOptions {
 pub struct ScannedFile {
     // 这三条要等 Task 7 的 write_doc 才读（file.path / index_text(&file.file_name) / file.mtime）。
     // 用字段级而不是 struct 级豁免：ext 与 size 本模块真的在读，struct 级会把它们一起罩住。
-    #[allow(dead_code)] // reader 在 Task 7 的 write_doc，落地时删掉本行
     pub path: String,
-    #[allow(dead_code)] // reader 在 Task 7 的 write_doc，落地时删掉本行
     pub file_name: String,
     pub ext: String,
     pub size: u64,
-    #[allow(dead_code)] // reader 在 Task 7 的 write_doc，落地时删掉本行
     pub mtime: i64,
 }
 

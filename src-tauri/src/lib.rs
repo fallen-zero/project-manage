@@ -2,6 +2,7 @@ mod db;
 mod error;
 mod extract;
 mod index_scan;
+mod index_store;
 mod ledger;
 mod project;
 mod search;

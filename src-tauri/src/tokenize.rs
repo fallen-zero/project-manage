@@ -24,7 +24,6 @@ fn jieba() -> &'static Jieba {
 /// 标点保留在正文里：unicode61 默认的 token 字符集是 `categories = "L* N* Co"`
 /// （libsqlite3-sys-0.38.2 bundled `sqlite3.c:265946`），标点 P* 不在其中、是分隔符，
 /// 所以它不会造成假命中；而 `snippet()` 是从原始列文本重建摘要的，留着标点才可读。
-#[allow(dead_code)] // 生产调用点在 Task 7（写入侧）/ Task 8（检索侧）落地后才出现
 pub fn index_text(text: &str) -> String {
     jieba()
         .cut_for_search(text, true)
