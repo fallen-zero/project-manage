@@ -61,7 +61,7 @@
 | 21 | `INSERT … ON CONFLICT (project_id, path) DO UPDATE` 不改 `id`：**同一行被重新索引时 `index_docs.id` 与 `doc_rowid` 保持稳定**，所以 FTS 可以先按 rowid 点删再插 | 探针 `b2`：第二次用不同 id 写同路径，行仍是 `d1` |
 | 22 | `settings` 读回缺失键时 `query_row(...).ok()` 得到 `None`，逗号分隔值按 `trim` + 去空处理可用；值里允许出现空格（`目标 目录`） | 探针 `b2` |
 | 23 | `tauri::Emitter::emit<S: Serialize + Clone>(&self, event, payload)` 在 2.12.0 存在（`tauri-2.12.0/src/lib.rs:961`），`AppHandle` 可 move 进线程 | 读 tauri 源码 |
-| 24 | `after_open` 里 `PRAGMA foreign_keys=ON` 是生效的，所以 **插 `index_docs` 必须先有对应 `projects` 行**，否则 `FOREIGN KEY constraint failed`；Task 1 的两条建表测试因此各带一行 `INSERT INTO projects`（Task 7/8/9 的测试用 `seed_project()` 满足同一约束）。另一半：FTS5 虚表没有 FK，**不受 `ON DELETE CASCADE` 连带**——软删/硬删项目只会带走 `index_docs` 行，虚表留下孤儿行，只能由写入侧按 rowid 显式清（Task 7 的 `clear_project`/`delete_doc`），检索侧靠 `JOIN index_docs` 天然过滤 | 探针 `a18`（Task 1 落地时实测） |
+| 24 | `after_open` 里 `PRAGMA foreign_keys=ON` 是生效的，所以 **插 `index_docs` 必须先有对应 `projects` 行**，否则 `FOREIGN KEY constraint failed`；Task 1 的两条建表测试因此各带一行 `INSERT INTO projects`（Task 7/8/9 的测试用 `seed_project()` 满足同一约束）。另一半：FTS5 虚表没有 FK，**不受 `ON DELETE CASCADE` 连带**——软删/硬删项目只会带走 `index_docs` 行，虚表留下孤儿行，只能由写入侧按 rowid 显式清（Task 7 的 `clear_project`），检索侧靠 `JOIN index_docs` 天然过滤 | 探针 `a18`（Task 1 落地时实测） |
 | 25 | **`read_event` 对畸形 Office XML 不报错，只是不发收口信号**：`IllFormedError::MissingEndTag` 的文档明写「This error is returned from `Reader::read_to_end`」，逐事件读不会拿到，缺闭标签的输入一路走到 `Event::Eof`。且 `check_end_names = false` 时 End 事件**不被改写**、带的是那个不匹配闭标签自己的名字（`<w:t>abc</w:p>` 的 End 是 `p`），所以「End 名字等于 tag 才收口」在这类输入上永远收不了口。`escape::unescape` 只解析 5 个预定义实体与 `&#…;` 数字引用，其它命名实体回 `UnrecognizedEntity` | 读 `quick-xml-0.41.0`：`errors.rs:117-121`、`reader/mod.rs:111-113`（同处注明 Default 为 `true`，我们是显式关掉的）、`escape.rs:222` 与 `:47-49`。Task 4 评审据此重写状态机：三个收口时机（End / 新 Start / EOF）统一走 `close_run` |
 
 **这些是 spec 第 127 行的更正**：spec 写「`content_rowid` 对齐 `index_docs.id`」，但 `id` 是 TEXT uuid，SQLite 的 rowid 必须是整数。实际采用**事实 2** 的形状：`index_docs` 加一列 `doc_rowid INTEGER PRIMARY KEY AUTOINCREMENT` 作为对齐锚，`id TEXT UNIQUE` 保留给业务与 IPC。Task 12 会把 spec 这句改过来。
@@ -92,7 +92,7 @@
 - `src/router.tsx`、`src/components/app-shell.tsx` — 新路由与导航项。
 - `docs/技术方案.md`、`docs/开发进度.md` — 收口。
 
-测试基线：**动手前 `cargo test --lib` = 41 passed**（本轮已实测：`grep -c "#\[test\]"` 各模块 4+12+7+9+9 = 41，与实跑一致；临时探针已全部删除）。每个任务的 Expected 数字都从这条链往上加，最后到 **90**（+4 +5 +4 +4 +5 +10 +6 +6 +5 = 49 条新测试；Task 10/11/12 不新增 Rust 测试）。
+测试基线：**动手前 `cargo test --lib` = 41 passed**（本轮已实测：`grep -c "#\[test\]"` 各模块 4+12+7+9+9 = 41，与实跑一致；临时探针已全部删除）。每个任务的 Expected 数字都从这条链往上加，最后到 **91**（+4 +5 +4 +4 +5 +10 +7 +6 +5 = 50 条新测试；Task 10/11/12 不新增 Rust 测试）。
 
 ---
 
@@ -1757,19 +1757,21 @@ git commit -m "feat: M3 目录扫描：排除规则剪枝、大小与项目上�
 
 **Interfaces:**
 - Consumes: Task 1 的两张表、Task 2 的 `tokenize::index_text`、Task 6 的 `ScannedFile`、`uuid::Uuid`
+- **派发前必须做的死代码账（控制方实测，一次性探针跑完即删）**：`cargo clippy --lib -- -D warnings` 不带 `--all-targets`，不编译 `#[cfg(test)]`，本任务的六个 `pub fn` 一个生产 caller 都没有（`write_doc`/`current_rowid`/`delete_doc`/`clear_project` 到 Task 9 的 `index_job`，`status_counts`/`list_docs` 到 Task 10 的 IPC），探针当场报 **9 条** dead_code：六个函数（含下面裁定移除的那个）+ `enum DocOutcome`（四个变体合成一条 `variants Ok, Empty, Skipped, and Failed are never constructed`）+ `struct StatusCount` + `struct DocRow`。给六个函数各挂一条 `allow` 之后，`StatusCount` 与 `DocRow` 的两条**自己消失**（Task 3/5/6 记过的规律再次成立：allow 项是额外可达根，返回型被顺带罩住）；`DocOutcome` 那条不会消失，因为 lib 侧只有 match 没有构造 —— 必须在**枚举本体**挂一条（探针实测：一条 enum 级 allow 清掉那四个变体的报告，不需要逐变体挂）。本任务实际要落 **6 条豁免**（留下的人：`write_doc`/`current_rowid`/`clear_project`/`status_counts`/`list_docs` + `DocOutcome` 枚举），每条注明接上的任务号。`grep -c "allow(dead_code)" src/index_store.rs` 期望 6。
 - **顺带收掉的豁免**：Task 6 在 `ScannedFile` 的 `path`/`file_name`/`mtime` 三条字段上各留了一条 `#[allow(dead_code)] // reader 在 Task 7 的 write_doc`。本任务的 `write_doc` 一旦真的读它们（`file.path`、`index_text(&file.file_name)`、`file.mtime`），把那三行删掉 —— 漏删不会红，只会变成永久豁免，所以 Step 的 clippy 闸之外要再跑一次 `grep -n "allow(dead_code)" src/index_scan.rs` 确认只剩 `scan_root` 与 `load` 两条（它们的 caller 在 Task 9）。
 - Produces:
   - `pub enum DocOutcome { Ok(String), Empty, Skipped(&'static str), Failed(String) }`（`Ok` 带正文，其它三种都不写 FTS 行）
   - `pub fn write_doc(conn: &Connection, project_id: &str, file: &ScannedFile, outcome: DocOutcome) -> AppResult<i64>` → 回 `doc_rowid`
   - `pub fn current_rowid(conn, project_id, path, size, mtime) -> AppResult<Option<i64>>`（增量跳过用）
-  - `pub fn delete_doc(conn, project_id, path) -> AppResult<()>`
   - `pub fn clear_project(conn, project_id) -> AppResult<u64>`（重建前清场）
   - `pub struct StatusCount { pub status: String, pub count: i64 }`
   - `pub fn status_counts(conn, project_id: &str) -> AppResult<Vec<StatusCount>>`
   - `pub struct DocRow { pub id: String, pub path: String, pub ext: String, pub size: i64, pub status: String, pub skip_reason: Option<String>, pub error_msg: Option<String>, pub indexed_at: Option<String> }`
   - `pub fn list_docs(conn, project_id: &str, status: Option<&str>, limit: i64, offset: i64) -> AppResult<Vec<DocRow>>`
 
-- [ ] **Step 1: 写失败测试（6 条）**
+- **顺带收掉的豁免（第二条）**：`tokenize.rs:27` 的 `index_text` 上挂着一条 `#[allow(dead_code)] // 生产调用点在 Task 7（写入侧）/ Task 8（检索侧）`。本任务 `write_doc` 里的 `index_text(&file.file_name)` 与 `index_text(&body)` **就是它的第一个非测试调用点**，这条豁免必须在本任务删掉（可达性依据同 `extract.rs`：`kind_of`/`pdf_text` 没挂豁免，靠带豁免的 `extract_text` 抵达，今天两道闸是绿的）。提交前跑 `grep -c "allow(dead_code)" src/tokenize.rs` 期望从 **3 降到 2**（剩下 `query_expression`、`clean_snippet` 归 Task 8）。
+- **裁定：本任务不产出 `delete_doc`**（控制方派发前核出的计划缺陷，理由是「豁免必须有落点」）。原 Interfaces 列了它，但整份计划里**没有任何生产调用点**：Task 9 的 `run_pass` 只用 `clear_project`/`current_rowid`/`write_doc`，Task 10 的 IPC 只 Consumes `doc_hits`/`list_docs`/`status_counts`；而「库里有一行、磁盘上没有了」的 `missing` 判定按 Task 9 Interfaces 的既有裁定归 M5 的启动对账。留着一个全 M3 无人调用的 `pub fn`，它的 `#[allow(dead_code)]` 就没有删掉的那天 —— 与本仓库对 `over_project_cap` 的裁定同形（宁可删掉宣称，不留假的可观测性）。代价：M5 落地对账时重新补这十行和一条测试。**「删主表不删虚表会留孤儿行」这条不变量不会因为少这个函数而失去守护** —— `clear_project` 走的是同一处两点删，测试照钉，且改成跨项目对照后它还多钉了一件事：清场不能顺手把别的项目清掉。
+- [ ] **Step 1: 写失败测试（7 条）**
 
 ```rust
 #[cfg(test)]
@@ -1818,13 +1820,24 @@ mod tests {
         assert_eq!(hit, 1);
     }
 
-    /// 事实 21：同路径重写不换行、不留重复 FTS 行（rowid 稳定 + 点删再插）。
+    /// 事实 21：同路径重写不换行、不留重复 FTS 行（rowid 与对外 id 都稳定 + 点删再插）。
+    ///
+    /// 「旧正文不该还能搜到」这条断言用的词**不能出现在文件名里**：`name_tokens` 每次重写都
+    /// 由同一个 `file_name` 重新生成，用「验收」这种文件名里就有的词去断「搜不到」，
+    /// 永远为 1，断言当场变成装饰（控制方实测：原写法在正确实现下 `left: 1 / right: 0` 直接红）。
     #[test]
     fn rewriting_the_same_path_replaces_instead_of_duplicating() {
         let c = conn();
         seed_project(&c, "p1");
         let f = file("C:/x/合同验收.docx");
-        let r1 = write_doc(&c, "p1", &f, DocOutcome::Ok("第一版正文 验收".into())).unwrap();
+        let r1 = write_doc(&c, "p1", &f, DocOutcome::Ok("第一版正文 付款".into())).unwrap();
+        let before: i64 = c
+            .query_row("SELECT count(*) FROM index_docs_fts WHERE index_docs_fts MATCH ?1", params!["\"付款\""], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, 1, "旧正文的词先要真的能搜到，后面那条「搜不到」才不是空转");
+        let id_before: String = c
+            .query_row("SELECT id FROM index_docs WHERE doc_rowid = ?1", params![r1], |r| r.get(0))
+            .unwrap();
         let f2 = ScannedFile { size: 2048, mtime: 1_700_000_999, ..f.clone() };
         let r2 = write_doc(&c, "p1", &f2, DocOutcome::Ok("第二版正文 报价".into())).unwrap();
         assert_eq!(r1, r2, "同一路径重复写入必须复用同一行");
@@ -1832,12 +1845,24 @@ mod tests {
         assert_eq!(c.query_row("SELECT count(*) FROM index_docs_fts", [], |r| r.get::<_, i64>(0)).unwrap(), 1,
             "FTS 侧不该累积历史版本");
         let old: i64 = c
-            .query_row("SELECT count(*) FROM index_docs_fts WHERE index_docs_fts MATCH ?1", params!["\"验收\""], |r| r.get(0))
+            .query_row("SELECT count(*) FROM index_docs_fts WHERE index_docs_fts MATCH ?1", params!["\"付款\""], |r| r.get(0))
             .unwrap();
         assert_eq!(old, 0, "旧正文不该还能搜到");
+        let now: i64 = c
+            .query_row("SELECT count(*) FROM index_docs_fts WHERE index_docs_fts MATCH ?1", params!["\"报价\""], |r| r.get(0))
+            .unwrap();
+        assert_eq!(now, 1, "新正文要能搜到");
+        let id_after: String = c
+            .query_row("SELECT id FROM index_docs WHERE doc_rowid = ?1", params![r2], |r| r.get(0))
+            .unwrap();
+        assert_eq!(id_before, id_after, "重写不能换掉对外的 id：Task 8 的 doc_hits 与 Task 10 的 IPC 都拿它当结果标识");
     }
 
     /// skipped/failed 只留状态行，不能往虚表塞空串：空串行会让 count 统计与 FTS 行数对不上。
+    ///
+    /// 末尾那条 `DocOutcome::Ok("   ")` 是 Task 5 评审 defer 过来的：扫描型 PDF 抽出来是空串，
+    /// Task 9 走的是 `Ok(body)` 这一支，`empty_text` 在这里才是承重项 —— 少了 `.trim()`，
+    /// 一具空正文会带着 ok 状态进库，UI 上显示「已索引」而永远搜不到。
     #[test]
     fn non_ok_outcomes_record_status_but_write_no_fts_rows() {
         let c = conn();
@@ -1845,7 +1870,12 @@ mod tests {
         write_doc(&c, "p1", &file("C:/a.docx"), DocOutcome::Skipped("too_large")).unwrap();
         write_doc(&c, "p1", &file("C:/b.docx"), DocOutcome::Failed("解包失败".into())).unwrap();
         write_doc(&c, "p1", &file("C:/c.docx"), DocOutcome::Empty).unwrap();
-        assert_eq!(c.query_row("SELECT count(*) FROM index_docs", [], |r| r.get::<_, i64>(0)).unwrap(), 3);
+        write_doc(&c, "p1", &file("C:/d.docx"), DocOutcome::Ok("   ".into())).unwrap();
+        let blank: (String, Option<String>) = c
+            .query_row("SELECT index_status, skip_reason FROM index_docs WHERE path = 'C:/d.docx'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!(blank, ("skipped".to_string(), Some("empty_text".to_string())), "空白正文算 empty_text，不算 ok");
+        assert_eq!(c.query_row("SELECT count(*) FROM index_docs", [], |r| r.get::<_, i64>(0)).unwrap(), 4);
         assert_eq!(c.query_row("SELECT count(*) FROM index_docs_fts", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         let reason: Option<String> = c
             .query_row("SELECT skip_reason FROM index_docs WHERE path = 'C:/a.docx'", [], |r| r.get(0))
@@ -1873,20 +1903,28 @@ mod tests {
         assert!(!got.iter().any(|(s, _)| s == "failed"), "另一个项目的行不该混进来：{got:?}");
     }
 
+    /// 事实 3 的另一半：删的时候两边都要删。`delete_doc` 已按上面的裁定移出本任务，
+    /// 这处两点删由 `clear_project` 顶上来钉住。
     #[test]
-    fn delete_and_clear_remove_both_sides() {
+    fn clear_project_removes_rows_on_both_sides() {
         let c = conn();
         seed_project(&c, "p1");
+        seed_project(&c, "p2");
         write_doc(&c, "p1", &file("C:/1.docx"), DocOutcome::Ok("验收".into())).unwrap();
         write_doc(&c, "p1", &file("C:/2.docx"), DocOutcome::Ok("报价".into())).unwrap();
-        delete_doc(&c, "p1", "C:/1.docx").unwrap();
+        write_doc(&c, "p2", &file("D:/1.docx"), DocOutcome::Ok("付款".into())).unwrap();
+        assert_eq!(clear_project(&c, "p1").unwrap(), 2, "清场回的是本项目被删掉的行数");
         assert_eq!(c.query_row("SELECT count(*) FROM index_docs_fts", [], |r| r.get::<_, i64>(0)).unwrap(), 1,
             "删主表不删虚表会留下孤儿行，命中列表里会出现已消失的文件");
-        clear_project(&c, "p1").unwrap();
-        assert_eq!(c.query_row("SELECT count(*) FROM index_docs", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-        assert_eq!(c.query_row("SELECT count(*) FROM index_docs_fts", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(c.query_row("SELECT count(*) FROM index_docs WHERE project_id = 'p1'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(c.query_row("SELECT count(*) FROM index_docs WHERE project_id = 'p2'", [], |r| r.get::<_, i64>(0)).unwrap(), 1,
+            "清场不能顺手把别的项目一起清掉");
     }
 
+    /// 只数行数证不出 OFFSET 生效：`LIMIT 2 OFFSET 4` 在 5 行数据上只回 1 行，
+    /// 而「把 OFFSET 整个删掉」的错误实现照样回 2 行。所以这里断的是**具体是哪两行**。
+    /// （控制方实测：原写的 `list_docs(.., 2, 4)` + `assert_eq!(page.len(), 2)` 在正确实现下
+    /// 红在 `left: 1 / right: 2`。）
     #[test]
     fn list_docs_filters_by_status_and_pages() {
         let c = conn();
@@ -1901,9 +1939,32 @@ mod tests {
         }
         let skipped = list_docs(&c, "p1", Some("skipped"), 10, 0).unwrap();
         assert_eq!(skipped.len(), 3, "{:?}", skipped.iter().map(|d| &d.path).collect::<Vec<_>>());
-        let page = list_docs(&c, "p1", None, 2, 4).unwrap();
-        assert_eq!(page.len(), 2, "分页要有效：{:?}", page.iter().map(|d| &d.path).collect::<Vec<_>>());
-        assert!(page.iter().all(|d| !d.path.is_empty()));
+        let page = list_docs(&c, "p1", None, 2, 2).unwrap();
+        let got: Vec<String> = page.iter().map(|d| d.path.clone()).collect();
+        assert_eq!(got, vec!["C:/2.docx".to_string(), "C:/3.docx".to_string()],
+            "分页要按 path 排序真的跳过前两行");
+    }
+
+    /// 增量跳过闸门。这个函数没有 caller 之前（Task 9）最容易写漏的是 `index_status = 'ok'`
+    /// 那一条：漏了它，上次 failed/skipped 的行会被当成「已经索引过」，用户看到的是一次失败
+    /// 之后永久搜不到 —— 正是本项目要消灭的那类静默失效。
+    #[test]
+    fn current_rowid_gates_the_incremental_skip() {
+        let c = conn();
+        seed_project(&c, "p1");
+        seed_project(&c, "p2");
+        let f = file("C:/x/合同验收.docx");
+        let rowid = write_doc(&c, "p1", &f, DocOutcome::Ok("正文 付款".into())).unwrap();
+        assert_eq!(current_rowid(&c, "p1", &f.path, f.size as i64, f.mtime).unwrap(), Some(rowid),
+            "同路径、size 与 mtime 都没变、上次是 ok：这一轮不该再读文件");
+        assert_eq!(current_rowid(&c, "p1", &f.path, f.size as i64 + 1, f.mtime).unwrap(), None, "大小变了要重抽");
+        assert_eq!(current_rowid(&c, "p1", &f.path, f.size as i64, f.mtime + 1).unwrap(), None, "修改时间变了要重抽");
+        assert_eq!(current_rowid(&c, "p2", &f.path, f.size as i64, f.mtime).unwrap(), None,
+            "另一个项目的同路径行不能冒充本项目已索引");
+        let g = file("C:/x/坏文件.docx");
+        write_doc(&c, "p1", &g, DocOutcome::Failed("解包失败".into())).unwrap();
+        assert_eq!(current_rowid(&c, "p1", &g.path, g.size as i64, g.mtime).unwrap(), None,
+            "上次失败的行必须重试");
     }
 }
 ```
@@ -1922,14 +1983,16 @@ Expected: `unresolved module`
 //! 2. 只有 `DocOutcome::Ok` 会往虚表写东西。skipped/failed 只留状态行 —— 「为什么搜不到」
 //!    的答案在行上，不在正文里，也就不该出现在搜索结果里。
 
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
+use uuid::Uuid;
 
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 use crate::index_scan::ScannedFile;
 use crate::tokenize::index_text;
 
 /// `Ok(String)` 携带抽取到的正文，交给这里决定要不要落 FTS。
+#[allow(dead_code)] // 构造点在 Task 9 的 index_job；本任务只有测试构造它，落地时删掉本行
 pub enum DocOutcome {
     Ok(String),
     Empty,
@@ -1937,6 +2000,7 @@ pub enum DocOutcome {
     Failed(String),
 }
 
+#[allow(dead_code)] // caller 在 Task 9 的 index_job，落地时删掉本行
 pub fn write_doc(
     conn: &Connection,
     project_id: &str,
@@ -1989,6 +2053,8 @@ pub fn write_doc(
         |r| r.get(0),
     )?;
 
+    // 这一笔是**硬性前提**而不是「免得累积历史版本」的优化：FTS5 对重复 rowid 直接回约束错误。
+    // 控制方实测把这句抽掉，第二次写同路径当场 Err（rusqlite 文案 `constraint failed` → AppError `db_failed`）。
     tx.execute("DELETE FROM index_docs_fts WHERE rowid = ?1", params![rowid])?;
     if let Some(body) = body {
         tx.execute(
@@ -2002,6 +2068,7 @@ pub fn write_doc(
 
 /// 增量跳过：同路径且 size + mtime 都没变、上次是 ok，就不再读文件。
 /// 返回 None 表示需要（重新）抽取。
+#[allow(dead_code)] // caller 在 Task 9 的增量跳过分支，落地时删掉本行
 pub fn current_rowid(
     conn: &Connection,
     project_id: &str,
@@ -2019,25 +2086,7 @@ pub fn current_rowid(
         .optional()?)
 }
 
-pub fn delete_doc(conn: &Connection, project_id: &str, path: &str) -> AppResult<()> {
-    let tx = conn.unchecked_transaction()?;
-    if let Some(rowid) = tx
-        .query_row(
-            "SELECT doc_rowid FROM index_docs WHERE project_id = ?1 AND path = ?2",
-            params![project_id, path],
-            |r| r.get::<_, i64>(0),
-        )
-        .optional()?
-    {
-        tx.execute("DELETE FROM index_docs_fts WHERE rowid = ?1", params![rowid])?;
-        tx.execute("DELETE FROM index_docs WHERE doc_rowid = ?1", params![rowid])?;
-    }
-    tx.commit()?;
-    Ok(())
-}
-
-/// 全量重建前清场。逐行删而不是 `DELETE FROM index_docs_fts`：
-/// 后者是 FTS5 的整表重建语句，代价高且会把别的项目一起清掉。
+#[allow(dead_code)] // caller 在 Task 9 的重建前清场，落地时删掉本行
 pub fn clear_project(conn: &Connection, project_id: &str) -> AppResult<u64> {
     let tx = conn.unchecked_transaction()?;
     let rowids: Vec<i64> = tx
@@ -2059,6 +2108,7 @@ pub struct StatusCount {
     pub count: i64,
 }
 
+#[allow(dead_code)] // caller 在 Task 10 的状态统计 IPC，落地时删掉本行
 pub fn status_counts(conn: &Connection, project_id: &str) -> AppResult<Vec<StatusCount>> {
     let mut stmt = conn.prepare(
         "SELECT index_status, count(*) FROM index_docs WHERE project_id = ?1 GROUP BY index_status",
@@ -2082,6 +2132,7 @@ pub struct DocRow {
     pub indexed_at: Option<String>,
 }
 
+#[allow(dead_code)] // caller 在 Task 10 的文件清单 IPC，落地时删掉本行
 pub fn list_docs(
     conn: &Connection,
     project_id: &str,
@@ -2112,19 +2163,34 @@ pub fn list_docs(
 }
 ```
 
-需要的引入：`use rusqlite::OptionalExtension;`（给 `.optional()`）、`use uuid::Uuid;`。`Transaction` 用不到就删掉那行引入，别留 unused import。
+引入已经写在上面的代码里，三条要点：
+- `use rusqlite::OptionalExtension;` 是 `.optional()` 的 trait，缺它 `current_rowid` 编译不过；`use uuid::Uuid;` 给 `Uuid::new_v4()`。
+- 原计划写的 `Transaction` **用不到**（`unchecked_transaction()` 的返回型靠类型推导即可），留着会在 `cargo clippy --lib -- -D warnings` 上被判 unused import；控制方探针已按此改法实测两道闸 exit 0。
+- 原计划写的 `use crate::error::{AppError, AppResult};` 里 **`AppError` 没有任何引用点**（`?` 走的是 `From<rusqlite::Error> for AppError` 这个 impl，不是名字），同样会被判 unused import，已在上面改成只引 `AppResult`。
 
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_store`
-Expected: `6 passed`；全量 → `79 passed; 0 failed`
+Expected: `7 passed`；全量 → `80 passed; 0 failed`（基线 73 + 本任务 7，控制方探针实测）
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 跑两道 clippy 闸 + 豁免对账**
+
+```bash
+cd src-tauri && cargo clippy --lib -- -D warnings && cargo clippy --lib --all-targets -- -D warnings
+grep -n "allow(dead_code)" src/index_scan.rs
+grep -c "allow(dead_code)" src/index_store.rs
+```
+
+Expected：两道闸 exit 0；`index_scan.rs` 只剩 `scan_root` 与 `load` 两条（Task 6 移交的那三条字段豁免必须已删）；`index_store.rs` 恰好 **6** 条。漏删不会红，只会变成永久豁免，所以这两条 grep 是提交前的硬检查，不是可选项。
+
+- [ ] **Step 6: 提交**
 
 ```bash
 git add src-tauri/src/index_store.rs src-tauri/src/lib.rs
 git commit -m "feat: M3 索引写入层：两点写、同路径复用 rowid、状态与分页查询"
 ```
+
+只 add 这两个文件，禁止 `git add -A`。
 
 ---
 
@@ -2136,6 +2202,8 @@ git commit -m "feat: M3 索引写入层：两点写、同路径复用 rowid、�
 
 **Interfaces:**
 - Consumes: Task 2 的 `query_expression` / `clean_snippet`、Task 1 的两张表、`crate::ledger` 与 `crate::vault`（只为验收测试造密文行）
+- **顺带收掉的豁免**：Task 2 留在 `tokenize.rs` 的 `query_expression` 与 `clean_snippet` 两条 `#[allow(dead_code)]`（同一条 `index_text` 的豁免已在 Task 7 收掉，Task 7 落地后该文件剩 2 条）。本任务的 `doc_hits` 是这两个函数的第一个非测试调用点，两条必须删干净：提交前 `grep -c "allow(dead_code)" src/tokenize.rs` 期望 **0**。
+- **本任务自己的死代码账要现算**：`doc_hits` 的生产 caller 在 Task 10，所以它会带一条新豁免；具体几条以 `cargo clippy --lib -- -D warnings` 实跑为准（`DocHit` 由带豁免的 `doc_hits` 抵达，按本仓库三次实测不需要单独挂）。派发前控制方会用一次性探针把数字钉死，实现者不必猜。
 - Produces:
   - `pub struct DocHit { pub doc_id: String, pub project_id: String, pub project_name: String, pub path: String, pub snippet: String, pub matched_by: &'static str, pub score: f64 }`（`#[serde(rename_all = "camelCase")]`）
   - `pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<DocHit>>`
@@ -2336,7 +2404,7 @@ pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<Doc
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_store`
-Expected: `12 passed`（Task 7 的 6 + 本任务 6）；全量 → `85 passed; 0 failed`
+Expected: `13 passed`（Task 7 的 7 + 本任务 6）；全量 → `86 passed; 0 failed`
 
 若 `fts5_syntax...` 里 `hits(&c, "*")` 报错而不是空，说明 `query_expression("*", false)` 回了 `Some`——事实 8 要求纯标点被过滤后回 `None`；回到 Task 2 修过滤器，**不要**在这里加特判。
 
@@ -2360,7 +2428,7 @@ git commit -m "feat: M3 两段全文检索并钉住密文不进索引的验收"
 - Consumes: `index_scan::{ScanOptions, scan_root}`、`extract::extract_text`、`index_store::{write_doc, current_rowid, clear_project, DocOutcome}`、`db::open`、`tauri::Emitter`、`std::sync::atomic::{AtomicBool, Ordering}`
   - `extract_text` 的 `Err` 实际有**三个**码名，不是两个：`extract_unsupported`、`extract_failed`，加上 `AppError::io` 带来的 `fs_failed`（读文件本身失败，典型是扫描到抽取之间文件被删/被占用）。下面的 `match` 用「`extract_unsupported` 单列、其余一律 `Failed`」的写法，所以 `fs_failed` 会落进 `failed` 而不是 `missing` —— 这是有意的：`missing` 描述的是对账结论（库里有一行、磁盘上没有了），归 M5 的启动对账写，抽取这一轮不判它。别在 Task 9 里顺手把它改成 `missing`。
 - **`capped` 的语义（Task 6 修复轮改过扫描侧，这里按新语义接）**：`scan_root` 的单项目配额是在分「可抽取 / 超限」两桶**之前**判的，所以 `ScanOutcome.capped = true` 说的是「`files` + `over_size` 合计撞到 `max_files_per_project`，至少还有一个受支持的文件被丢掉」，而不是「可抽取清单被截断」。接法：`ProjectResult.scanned_total` 取两桶之和（它就是本轮会产生多少行），`capped` 原样透传；`break` 之后剩下的文件既没有行也没有计数，`ScanOutcome` 里**没有**被丢弃的条数字段，因此摘要只能说「截断了」而不能说「还差 M 个」—— 这是有意的，别为了凑那个数字去给 `ScanOutcome` 加字段。超限那一桶同样会被截，Task 11 的文案要按这个写（见 Task 11 Step 4）。
-- **顺带收掉的豁免**（`run_pass` 是这三个 `pub` 项的第一个非测试 caller）：`extract.rs` 里 `extract_text` 上面那条 `#[allow(dead_code)] // caller 在 Task 9`、`index_scan.rs` 里 `scan_root` 与 `ScanOptions::load` 上面各一条同形豁免，本任务落地时一并删掉。漏删不会红，只会变成永久豁免，所以 Step 里要跑 `grep -n "allow(dead_code)" src/extract.rs src/index_scan.rs` —— 期望结果：`extract.rs` 只剩 `supported_exts` 那一条（caller 在 Task 10），`index_scan.rs` 应该**一条都不剩**。
+- **顺带收掉的豁免**（`run_pass` 是这三个 `pub` 项的第一个非测试 caller）：`extract.rs` 里 `extract_text` 上面那条 `#[allow(dead_code)] // caller 在 Task 9`、`index_scan.rs` 里 `scan_root` 与 `ScanOptions::load` 上面各一条同形豁免，本任务落地时一并删掉。漏删不会红，只会变成永久豁免，所以 Step 里要跑 `grep -n "allow(dead_code)" src/extract.rs src/index_scan.rs` —— 期望结果：`extract.rs` 只剩 `supported_exts` 那一条（caller 在 Task 10），`index_scan.rs` 应该**一条都不剩**；`index_store.rs` 里 Task 7 落的六条豁免中`write_doc`/`current_rowid`/`clear_project`/`DocOutcome` 四条由本任务的 `run_pass` 收掉（上面那行 `use crate::index_store::{clear_project, current_rowid, write_doc, DocOutcome};` 就是它们的非测试调用点），剩 `status_counts`/`list_docs` 两条归 Task 10 —— 所以 Task 9 提交前的期望是 `grep -c "allow(dead_code)" src/index_store.rs` 回 **2**。`delete_doc` 不存在（Task 7 已按裁定移除），别去找它。
 - Produces:
   - `pub struct ScanTarget { pub project_id: String, pub project_name: String, pub root_path: String }`
   - `pub fn targets(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<ScanTarget>>`
@@ -2829,7 +2897,7 @@ pub fn start(
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_job`
-Expected: `5 passed`；全量 → `90 passed; 0 failed`
+Expected: `5 passed`；全量 → `91 passed; 0 failed`
 
 `cancel_stops_the_pass_early` 若一次跑完（`done == 60`），原因是第一次回调就置位、而检查点在下一轮开头 —— 断言 `done < 60` 应当成立。若始终不成立，先确认 `PROGRESS_EVERY` 与回调时机，不要靠加 `sleep` 让它「看起来对」。
 
@@ -2851,6 +2919,7 @@ git commit -m "feat: M3 索引作业：可测的 run_pass 与后台线程 emit �
 
 **Interfaces:**
 - Consumes: `index_job::{IndexShared, start, RunSummary, Progress}`、`index_store::{doc_hits, list_docs, status_counts, DocHit, DocRow, StatusCount}`、`index_scan::ScanOptions`、`extract::supported_exts`
+- **顺带收掉的豁免（M3 的最后一批）**：`index_store.rs` 里 Task 9 之后剩的 `status_counts`/`list_docs` 两条，和 `extract.rs` 里 Task 5 留的 `supported_exts` 一条 —— 上面那行 Consumes 与 `supported_exts: extract::supported_exts().to_vec()` 就是它们的非测试调用点。提交前 `grep -n "allow(dead_code)" src/index_store.rs src/extract.rs` 期望**只剩 `extract.rs` 里与本项目无关的既有写法**（逐条对照 Task 9 的报告，别凭印象）。收干净之后整个 `src/` 里应当只剩 `db.rs` 那一条 WAL 用的豁免 —— 这条留给 Task 12 的收口检查（`grep -rn "allow(dead_code)" src/*.rs` 期望只有 `db.rs` 一行）。
 - Produces（IPC 契约，前端 Task 11 按这些名字与字段写类型）:
   - `index_start(projectId?: string, rebuild: boolean) -> void`
   - `index_cancel() -> void`
@@ -3321,7 +3390,7 @@ index_docs_fts      FTS5 虚表：name_tokens + body_tokens，tokenize=unicode61
 
 `docs/开发进度.md` 新增 `## M3 验收证据`，按 M2 那节的格式写全：
 
-- `cargo test --lib`：`90 passed; 0 failed`，按模块拆一行（`db` / `project` / `ledger` / `vault` / `search` / `tokenize` / `extract` / `index_scan` / `index_store` / `index_job` 各几条，数字从实际输出抄，不要推算）。
+- `cargo test --lib`：`91 passed; 0 failed`，按模块拆一行（`db` / `project` / `ledger` / `vault` / `search` / `tokenize` / `extract` / `index_scan` / `index_store` / `index_job` 各几条，数字从实际输出抄，不要推算）。
 - `cargo clippy --lib --all-targets -- -D warnings` 结果。
 - `npm run build` 的模块数与耗时。
 - Step 3 的逐条真机断言结果（只写「几条命中 / matchedBy 是什么 / 布尔值」，不抄正文）。
