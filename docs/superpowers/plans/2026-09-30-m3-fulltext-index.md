@@ -1397,6 +1397,7 @@ git commit -m "feat: M3 PDF 抽取与扩展名分派入口，附真中文 PDF fi
 - **探针顺带证伪了两条预检判断**：`unnecessary_wraps` **不会**打在计划原来那版只回 `Ok` 的 `load` 上，`while_let_on_iterator` **不会**打在 `while let Some(entry) = it.next()` 上。本模块只有 dead_code 这一类闸要过。
 - **`load` 仍要改写，理由不是 lint**（控制方裁定）：原文 `unwrap_or_else(|_| default.to_owned())` 把「库读失败」和「设置行不存在」压成同一条路径，坏库/锁库时静默按 20 MB 与 50000 跑完整轮，用户看不到任何信号 —— 与本仓库对 `journal_mode` 的处理是同一条红线：能区分就必须区分。改法见 Step 3，钉住它的是 `settings_query_failure_propagates_instead_of_defaulting`。控制方实测：新版三条测试全绿、两道 clippy 闸 exit 0；把 `get` 改回吞错误的写法，该测试立刻红在 `called `Result::unwrap_err()` on an `Ok` value: ScanOptions { ..., max_file_bytes: 20971520, ... }`。
 - **不要顺手把「数字解析失败」也改成 Err**：M3 没有任何写这三行的入口（Task 11 只读展示），做成 Err 要连 Task 10/11 的设置写入口与校验一起动，超出本任务范围。保留 `unwrap_or` 默认值，并在注释里写明这是有意为之。
+- **Step 1 原文有两处本机跑不通，已由 Task 6 落地后回修计划本体**（实现者 `20add29` 报的 concern，控制方裁定：接受，且这是计划文本的错而不是实现的错）：① `paths.iter().any(|p| p == "dep.js")` —— `paths: Vec<&str>` 的 `iter()` 给出 `&&str`，与字面量 `"dep.js"` 比较撞 3 条 E0277、整个测试模块不编译，正字是 `|p| *p == "dep.js"`；② `&vec![b'a'; 100]` 在 `cargo clippy --lib --all-targets -- -D warnings` 上被 `useless_vec` 拦下，正字是 `&[b'a'; 100]`（数组直接 coerce 成 slice，不需要 vec）。两处都是改一个 token、断言强度零变化。
 
 - [ ] **Step 1: 写失败测试（8 条）**
 
@@ -1442,7 +1443,7 @@ mod tests {
         let out = scan_root(dir.path(), &opts(&["node_modules", "dist"]));
         let paths: Vec<&str> = out.files.iter().map(|f| f.file_name.as_str()).collect();
         assert!(paths.contains(&"readme.txt") && paths.contains(&"验收说明.docx"), "{paths:?}");
-        assert!(!paths.iter().any(|p| p == "dep.js" || p == "index.js" || p == "bundle.js"),
+        assert!(!paths.iter().any(|p| *p == "dep.js" || *p == "index.js" || *p == "bundle.js"),
             "排除目录里的文件不该出现：{paths:?}");
     }
 
@@ -1460,7 +1461,7 @@ mod tests {
     #[test]
     fn oversize_supported_files_are_separated_not_dropped() {
         let dir = tempfile::tempdir().unwrap();
-        touch(dir.path(), "大文件.txt", &vec![b'a'; 100]);
+        touch(dir.path(), "大文件.txt", &[b'a'; 100]);
         touch(dir.path(), "小文件.txt", b"ok");
         let mut o = opts(&[]);
         o.max_file_bytes = 50;
