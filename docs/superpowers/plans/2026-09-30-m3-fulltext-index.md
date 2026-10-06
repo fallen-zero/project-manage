@@ -1753,7 +1753,7 @@ git commit -m "feat: M3 目录扫描：排除规则剪枝、大小与项目上�
 **Files:**
 - Create: `src-tauri/src/index_store.rs`
 - Modify: `src-tauri/src/lib.rs`（`mod index_store;`）
-- Modify: `src-tauri/src/index_scan.rs`（删掉 `ScannedFile` 上那三条字段级 `#[allow(dead_code)]`，别的不动）
+- Modify: `src-tauri/src/index_scan.rs`（删掉 `ScannedFile` 上那三条字段级 `#[allow(dead_code)]`，以及它们上方那两行描述豁免的注释 —— 豁免本轮就删了，注释留着会让下个读者去找三条已经不存在的 `#[allow]`；其余不动）
 - Modify: `src-tauri/src/tokenize.rs`（删掉 `index_text` 上那条 `#[allow(dead_code)]`，别的不动）
 - Test: `index_store.rs` 同文件 `mod tests`
 
@@ -1773,6 +1773,12 @@ git commit -m "feat: M3 目录扫描：排除规则剪枝、大小与项目上�
 
 - **顺带收掉的豁免（第二条）**：`tokenize.rs:27` 的 `index_text` 上挂着一条 `#[allow(dead_code)] // 生产调用点在 Task 7（写入侧）/ Task 8（检索侧）`。本任务 `write_doc` 里的 `index_text(&file.file_name)` 与 `index_text(&body)` **就是它的第一个非测试调用点**，这条豁免必须在本任务删掉（可达性依据同 `extract.rs`：`kind_of`/`pdf_text` 没挂豁免，靠带豁免的 `extract_text` 抵达，今天两道闸是绿的）。提交前跑 `grep -c "allow(dead_code)" src/tokenize.rs` 期望从 **3 降到 2**（剩下 `query_expression`、`clean_snippet` 归 Task 8）。
 - **裁定：本任务不产出 `delete_doc`**（控制方派发前核出的计划缺陷，理由是「豁免必须有落点」）。原 Interfaces 列了它，但整份计划里**没有任何生产调用点**：Task 9 的 `run_pass` 只用 `clear_project`/`current_rowid`/`write_doc`，Task 10 的 IPC 只 Consumes `doc_hits`/`list_docs`/`status_counts`；而「库里有一行、磁盘上没有了」的 `missing` 判定按 Task 9 Interfaces 的既有裁定归 M5 的启动对账。留着一个全 M3 无人调用的 `pub fn`，它的 `#[allow(dead_code)]` 就没有删掉的那天 —— 与本仓库对 `over_project_cap` 的裁定同形（宁可删掉宣称，不留假的可观测性）。代价：M5 落地对账时重新补这十行和一条测试。**「删主表不删虚表会留孤儿行」这条不变量不会因为少这个函数而失去守护** —— `clear_project` 走的是同一处两点删，测试照钉，且改成跨项目对照后它还多钉了一件事：清场不能顺手把别的项目清掉。
+- **按 Task 7 评审补的三处（评审 Important 1 + Minor 2/3/5，控制方裁定纳入本任务）**：
+  ① `indexed_at` 原来**零断言**（`grep -n indexed_at` 只命中实现行）—— `CASE WHEN ?7 = 'ok'` 那支一旦和 `status` 的绑定漂移，7 条测试全绿而 Task 10 的清单里索引时间整列为空，正是本项目要消灭的「不报错、只是看不见」。改法不加第 8 条测试（不动聚合链）：在第 1 条里断 ok 行 `indexed_at.is_some()`，把第 3 条里 `C:/d.docx` 的三元组查询带上 `indexed_at` 并断 `None`。
+  ② `status_counts` 补 `ORDER BY index_status`：返回型直接喂 Task 10 的 IPC，Group By 的默认顺序是实现细节，Task 11 的状态列表会跟着查询计划漂。测试用 `contains` 断言，不依赖顺序，加了不会红。
+  ③ 模块 doc 补第 3 条不变量：本模块的写函数**自己开事务**，调用方不得再包一层（`unchecked_transaction()` 跳过重入检查，外层 `commit()` 会被内层提前触发）。Task 9 逐文件调 `write_doc`，这条写在接口上比等它运行时炸。
+- **顺带收掉的注释**：`index_scan.rs:49-50` 那两行「这三条要等 Task 7 的 `write_doc` 才读……用字段级而不是 struct 级豁免」描述的正是本轮删掉的三条豁免，改成过去式不如直接删（本仓库默认不写注释，这条 WHY 已不成立）。Files 清单已同步。
+
 - [ ] **Step 1: 写失败测试（7 条）**
 
 ```rust
@@ -1820,6 +1826,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hit, 1);
+        let indexed_at: Option<String> = c
+            .query_row("SELECT indexed_at FROM index_docs WHERE doc_rowid = ?1", params![rowid], |r| r.get(0))
+            .unwrap();
+        assert!(indexed_at.is_some(), "ok 行必须带索引时间，Task 10 的清单要能回答「什么时候建的索引」");
     }
 
     /// 事实 21：同路径重写不换行、不留重复 FTS 行（rowid 与对外 id 都稳定 + 点删再插）。
@@ -1873,10 +1883,18 @@ mod tests {
         write_doc(&c, "p1", &file("C:/b.docx"), DocOutcome::Failed("解包失败".into())).unwrap();
         write_doc(&c, "p1", &file("C:/c.docx"), DocOutcome::Empty).unwrap();
         write_doc(&c, "p1", &file("C:/d.docx"), DocOutcome::Ok("   ".into())).unwrap();
-        let blank: (String, Option<String>) = c
-            .query_row("SELECT index_status, skip_reason FROM index_docs WHERE path = 'C:/d.docx'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        let blank: (String, Option<String>, Option<String>) = c
+            .query_row(
+                "SELECT index_status, skip_reason, indexed_at FROM index_docs WHERE path = 'C:/d.docx'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
             .unwrap();
-        assert_eq!(blank, ("skipped".to_string(), Some("empty_text".to_string())), "空白正文算 empty_text，不算 ok");
+        assert_eq!(
+            blank,
+            ("skipped".to_string(), Some("empty_text".to_string()), None),
+            "空白正文算 empty_text、不算 ok，且不得有索引时间"
+        );
         assert_eq!(c.query_row("SELECT count(*) FROM index_docs", [], |r| r.get::<_, i64>(0)).unwrap(), 4);
         assert_eq!(c.query_row("SELECT count(*) FROM index_docs_fts", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         let reason: Option<String> = c
@@ -1979,11 +1997,14 @@ Expected: `unresolved module`
 - [ ] **Step 3: 写实现**
 
 ```rust
-//! 索引表的读写。两条不变量：
+//! 索引表的读写。三条不变量：
 //! 1. 主表与 FTS 是两处存储，任何增删都要在同一个事务里做两笔（事实 3），否则命中列表里会
 //!    出现已经不存在的文件。
 //! 2. 只有 `DocOutcome::Ok` 会往虚表写东西。skipped/failed 只留状态行 —— 「为什么搜不到」
 //!    的答案在行上，不在正文里，也就不该出现在搜索结果里。
+//! 3. 本模块每个写函数**自己开事务**（`unchecked_transaction()` 跳过重入检查，调用方再包一层
+//!    会让内层 `commit()` 提前提交外层事务）。Task 9 的 `run_pass` 逐文件调 `write_doc`，
+//!    不要在外面套事务，也不要指望「一轮一个事务」的提速。
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -2113,7 +2134,8 @@ pub struct StatusCount {
 #[allow(dead_code)] // caller 在 Task 10 的状态统计 IPC，落地时删掉本行
 pub fn status_counts(conn: &Connection, project_id: &str) -> AppResult<Vec<StatusCount>> {
     let mut stmt = conn.prepare(
-        "SELECT index_status, count(*) FROM index_docs WHERE project_id = ?1 GROUP BY index_status",
+        "SELECT index_status, count(*) FROM index_docs WHERE project_id = ?1 GROUP BY index_status
+                  ORDER BY index_status",
     )?;
     let rows = stmt.query_map(params![project_id], |r| {
         Ok(StatusCount { status: r.get(0)?, count: r.get(1)? })
