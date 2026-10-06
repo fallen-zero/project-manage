@@ -3349,35 +3349,46 @@ git commit -m "feat: M3 索引作业：可测的 run_pass 与后台线程 emit �
 
 **Files:**
 - Modify: `src-tauri/src/lib.rs`（`AppState` 加 `index: Arc<IndexShared>`、5 个 `#[tauri::command]`、`generate_handler!` 注册、`fts5_available` 抽成函数）
+- Modify: `src-tauri/src/index_store.rs`、`src-tauri/src/extract.rs`、`src-tauri/src/index_job.rs` —— 只删这 6 行 `#[allow(dead_code)]`（见下面的豁免账），一行实现都不改
 - Test: 无新增 Rust 测试（见「为什么不写测试」）
 
 **Interfaces:**
 - Consumes: `index_job::{IndexShared, start, RunSummary, Progress}`、`index_store::{doc_hits, list_docs, status_counts, DocHit, DocRow, StatusCount}`、`index_scan::ScanOptions`、`extract::supported_exts`
-- **顺带收掉的豁免（M3 的最后一批）**：`index_store.rs` 里 Task 9 之后剩的 `status_counts`/`list_docs` 两条，和 `extract.rs` 里 Task 5 留的 `supported_exts` 一条 —— 上面那行 Consumes 与 `supported_exts: extract::supported_exts().to_vec()` 就是它们的非测试调用点。提交前 `grep -n "allow(dead_code)" src/index_store.rs src/extract.rs` 期望**只剩 `extract.rs` 里与本项目无关的既有写法**（逐条对照 Task 9 的报告，别凭印象）。收干净之后整个 `src/` 里应当只剩 `db.rs` 那一条 WAL 用的豁免 —— 这条留给 Task 12 的收口检查（`grep -rn "allow(dead_code)" src/*.rs` 期望只有 `db.rs` 一行）。
+- **顺带收掉的豁免（M3 的最后一批，共 6 条）**：`index_store.rs` **3** 条（`status_counts` `:132`、`list_docs` `:157`、`doc_hits` `:242`）+ `extract.rs` **1** 条（`supported_exts` `:222`）+ `index_job.rs` **2** 条（`IndexShared::new` `:300`、`start` `:328`）。上面那行 Consumes 与 Step 1/Step 2 的调用点就是它们的非测试调用点。**原版这里只数了 3 条**（漏了 `doc_hits` 和 `index_job` 那两条），并把 `extract.rs` 剩下的写成「与本项目无关的既有写法」—— 控制方核对过：`extract.rs` 当时全文件只有 `supported_exts` 这一条豁免，那句话会让实现者去找一条不存在的东西、或者把该删的留着。
+  - 提交前的期望数字（控制方按当前树实测：`grep -rn "allow(dead_code)" src/*.rs` 共 **7** 条 = `db.rs` 1 + `extract.rs` 1 + `index_job.rs` 2 + `index_store.rs` 3）：本任务落地后 `index_store.rs` **0** / `extract.rs` **0** / `index_job.rs` **0**，整个 `src/` 只剩 **`db.rs` 那一条** WAL 用的豁免（它是常驻豁免，留给 Task 12 的收口检查：`grep -rn "allow(dead_code)" src/*.rs` 期望只有 `db.rs` 一行）。
+  - **删豁免后必须重跑两道 clippy 闸**：`cargo clippy --lib -- -D warnings` 是不编译 `#[cfg(test)]` 的那道，正是它能证明这 6 个符号现在真的有生产调用点；漏删一条不会红，只会变成永久豁免（本仓库已经为此返工过三次）。
 - Produces（IPC 契约，前端 Task 11 按这些名字与字段写类型）:
-  - `index_start(projectId?: string, rebuild: boolean) -> void`
-  - `index_cancel() -> void`
-  - `index_overview() -> IndexOverview`
+  - `index_start(projectId?: string, rebuild: boolean) -> void`（两个错误码必须能被界面念出来：`index_running`「已有一轮索引在跑」、`index_spawn_failed`「索引线程启动失败」—— 后者在本机是日常，不是理论分支）
+  - `index_cancel() -> void`（只置 `cancel`；复位由下一次 `index_start` 负责，`start` 开头有 `cancel.store(false)`，所以「空闲时点了取消」不会把下一轮也取消掉）
+  - `index_overview() -> IndexOverview`（camelCase：`running` / `fts5Available` / `lastRun` / `lastError` / `projects[]` / `excludeDirs` / `maxFileBytes` / `maxFilesPerProject` / `supportedExts`）
   - `index_docs(projectId: string, status?: string, limit: number, offset: number) -> DocRow[]`
   - `search_docs(query: string, limit?: number) -> DocHit[]`
 
+**本任务新添的三条边界，Task 11/12 要按它们写（都是控制方核对过的既有行为，别当成笔误）：**
+- **两处 clamp 是底层函数唯一的边界校验**：`list_docs` 里 `limit<=0` 会走「精确段回 0 行 → 再发一次前缀段查询」的**两段回退 = 两次 SQL 往返**，`index_docs` 的 `limit.clamp(1, 500)` 与 `search_docs` 的 `limit.unwrap_or(50).clamp(1, 200)` 把它挡在 IPC 边界上；`offset` 只 `.max(0)`（不做上限）。别把 clamp 挪进 `index_store.rs`：那一层还要给测试用 `limit=0` 断「0 行结果」这个语义。
+- **`last_error` 是字符串不是结构化错误**：内容是 `format!("{e}")`，形如 `[db_open_failed] 打不开库（hint…）`（`AppError` 只 derive `Debug`、没有 `Clone`，跨线程只能留串）。界面**整段念出来**就行；真要按照 code 分支（例如 `index_running` 不弹红、只提示），得先把它改成 `(code, message, hint)` 三元组再透出 —— 那是另一件事，别在本任务顺手改。
+- **`Progress` 的终止事件不属于任何项目**：`state` 取值是 `running | done | cancelled | error`，`error` 字段只在 `state == "error"` 有值，而 `terminal(...)` 发的那条 `project_id` / `project_name` / `current` 都是**空串**。Task 11 不能拿 `projectId` 当事件的 map key，也不能因为 `current` 是空串就判定「没在干活」。
+
 - [ ] **Step 1: 接线**
 
-`AppState` 增加字段并在 `setup` 里初始化：
+`AppState` 增加字段并在 `setup` 里初始化（`src/lib.rs:26` 是结构体、`:403` 是全 crate **唯一**一处 `AppState {` 字面量，改完不会有第二处漏掉）：
 
 ```rust
 struct AppState {
     conn: Mutex<rusqlite::Connection>,
     data_dir: PathBuf,
+    /// 解锁后的主密钥只活在进程内存里：锁屏/退出即丢，重新解锁靠主密码或恢复码。
     mk: Mutex<Option<MasterKey>>,
     /// 索引作业跨线程共享：running/cancel 是原子量，summary 是上一轮的结论。
     index: Arc<index_job::IndexShared>,
 }
 ```
 
+`src/lib.rs:14` 现在是 `use std::sync::{Mutex, MutexGuard};`，**`Arc` 还没导入**（全文件没用过它），要改成 `use std::sync::{Arc, Mutex, MutexGuard};`。`index_job` 的 `mod` 在 Task 9 已经挂上，不用再加。
+
 `setup` 里 `app.manage(AppState { conn: Mutex::new(conn), data_dir: data_dir.clone(), mk: Mutex::new(None), index: Arc::new(index_job::IndexShared::new()) })`。
 
-把 `db_status` 里的 FTS5 探测抽成可复用的：
+把 `db_status`（`src/lib.rs:83-91`）里那段 FTS5 探测抽成可复用的函数：
 
 ```rust
 fn fts5_available(conn: &rusqlite::Connection) -> bool {
@@ -3390,7 +3401,20 @@ fn fts5_available(conn: &rusqlite::Connection) -> bool {
 }
 ```
 
-`db_status` 内改为 `let fts5_available = fts5_available(&conn);`（局部变量与函数同名会遮住函数，改名 `has_fts`）。
+`db_status` 里那三处一起改（**少改一处就是编译错误**：局部变量与函数同名会遮住函数，而 `DbStatus` 的字段用的是字段名简写）：
+
+```rust
+    // FTS5 是全文检索的地基，这里显式探测而不是假设 bundled 构建一定带它
+    let has_fts = fts5_available(&conn);
+
+    Ok(DbStatus {
+        data_dir: state.data_dir.display().to_string(),
+        db_file: db::db_path(&state.data_dir).display().to_string(),
+        journal_mode,
+        schema_version,
+        fts5_available: has_fts,   // 原来是 `fts5_available,` 简写
+    })
+```
 
 - [ ] **Step 2: 五个命令**
 
@@ -3432,6 +3456,11 @@ struct IndexOverview {
     running: bool,
     fts5_available: bool,
     last_run: Option<index_job::RunSummary>,
+    /// 一轮彻底失败的原因串（`[code] message（hint）`）。Task 9 加 `IndexShared::last_error`
+    /// 就是为了这一刻 —— 没有这个字段，`report_failure` 写的缘由永远读不出来，
+    /// 界面上「按钮说失败了」和「这一轮为什么失败」就接不上。成功轮由 `start` 置回 None，
+    /// 所以这里不需要自己判断陈旧性。
+    last_error: Option<String>,
     projects: Vec<ProjectState>,
     exclude_dirs: Vec<String>,
     max_file_bytes: i64,
@@ -3465,7 +3494,10 @@ fn index_overview(state: State<'_, AppState>) -> AppResult<IndexOverview> {
         running: state.index.running.load(std::sync::atomic::Ordering::SeqCst),
         fts5_available: fts5_available(&conn),
         // 上一轮结论只是展示用，拿不到锁就回 None，不因为 UI 刷新阻塞作业线程。
+        // 这里两处 lock() 都只碰 IndexShared 自己的 Mutex，而作业线程从不反向拿 AppState 的
+        // conn 锁（它自己 `db::open` 了一条连接），所以「持着 conn 守卫再拿 summary」不构成环路。
         last_run: state.index.summary.lock().ok().and_then(|g| g.clone()),
+        last_error: state.index.last_error.lock().ok().and_then(|g| g.clone()),
         projects,
         exclude_dirs: opts.exclude_dirs,
         max_file_bytes: opts.max_file_bytes as i64,
@@ -3509,20 +3541,26 @@ fn search_docs(
 
 这五个命令的函数体只做「取连接 → 调已测函数 → 组装展示结构」，业务分支全在 Task 7-9 已覆盖的纯函数里。要真正确认 IPC 往返成立，只有把应用跑起来点一遍 —— 那是 Task 12 的活。这里给它们加 mock 测试只会证明「mock 被调了」，是负价值的测试。**代价要认**：`index_start` 的线程壳、`app.emit` 的连通性、capabilities 是否需要新权限，全部到 Task 12 才见分晓。
 
-- [ ] **Step 4: 编译门禁**
+- [ ] **Step 4: 编译门禁 + 豁免对账**
 
 ```bash
-cd src-tauri && cargo clippy --lib --all-targets -- -D warnings && cargo build --lib
+cd src-tauri && cargo clippy --lib -- -D warnings && cargo clippy --lib --all-targets -- -D warnings && cargo build --lib
+cargo test --lib            # 期望 96 passed; 0 failed —— 本任务不新增测试，数字必须一字不变
+grep -rn "allow(dead_code)" src/*.rs
 ```
 
-Expected: 零告警、`Finished`。同时确认前端事件名可用：`src-tauri/capabilities/default.json` 里已有 `core:default`（M2 验过），Rust→JS 的 `emit` 走它，无需新增权限条目。
+Expected: 两道闸零告警、`build` 回 `Finished`、`test` 仍 **96 passed**，且最后那条 grep **只剩 `src/db.rs` 一行**（`index_store.rs`/`extract.rs`/`index_job.rs` 各 0 行）。数字对不上就是豁免没删干净或有符号没接上，别改期望值。
+
+同时确认前端事件名可用：`src-tauri/capabilities/default.json` 里已有 `core:default`（M2 验过），Rust→JS 的 `emit` 走它，无需新增权限条目。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src-tauri/src/lib.rs
+git add src-tauri/src/lib.rs src-tauri/src/index_store.rs src-tauri/src/extract.rs src-tauri/src/index_job.rs
 git commit -m "feat: M3 索引相关 IPC 命令与作业状态接线"
 ```
+
+**四个文件都要进提交** —— 原版只写 `lib.rs`，那会把 6 行豁免删除留在工作树里不入库（Task 8/9 各犯过一次同一条）。提交前用 `git status --short` 确认改动面就是这四个文件，多一个都要解释。
 
 ---
 
