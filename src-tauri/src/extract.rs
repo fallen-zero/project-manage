@@ -261,7 +261,6 @@ fn pdf_text(path: &Path) -> AppResult<String> {
 }
 
 /// 入口：只按扩展名分派，不做大小校验（上限归 Task 6 的扫描器），不做状态标记（归 Task 7）。
-#[allow(dead_code)] // caller 在 Task 9 的 index_job，落地时删掉本行
 pub fn extract_text(path: &Path) -> AppResult<String> {
     let ext = path
         .extension()

@@ -18,7 +18,6 @@ pub struct ScanOptions {
 impl ScanOptions {
     /// 「设置行不存在」退回 spec 默认值；「查询失败」是另一回事，必须原样抛出去。
     /// 两者都用 `unwrap_or_else` 吞掉的写法见过一次，坏库时会静默按 20 MB 上限跑完整轮。
-    #[allow(dead_code)] // caller 在 Task 9 的 index_job，落地时删掉本行
     pub fn load(conn: &Connection) -> AppResult<ScanOptions> {
         use rusqlite::OptionalExtension;
         let get = |key: &str, default: &str| -> AppResult<String> {
@@ -81,7 +80,6 @@ fn to_scanned(entry: &walkdir::DirEntry) -> Option<ScannedFile> {
     })
 }
 
-#[allow(dead_code)] // caller 在 Task 9 的 index_job，落地时删掉本行
 pub fn scan_root(root: &Path, opts: &ScanOptions) -> ScanOutcome {
     let mut out = ScanOutcome::default();
     let mut it = walkdir::WalkDir::new(root)

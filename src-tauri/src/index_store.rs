@@ -17,7 +17,6 @@ use crate::index_scan::ScannedFile;
 use crate::tokenize::{index_text, query_expression};
 
 /// `Ok(String)` 携带抽取到的正文，交给这里决定要不要落 FTS。
-#[allow(dead_code)] // 构造点在 Task 9 的 index_job；本任务只有测试构造它，落地时删掉本行
 pub enum DocOutcome {
     Ok(String),
     Empty,
@@ -25,7 +24,6 @@ pub enum DocOutcome {
     Failed(String),
 }
 
-#[allow(dead_code)] // caller 在 Task 9 的 index_job，落地时删掉本行
 pub fn write_doc(
     conn: &Connection,
     project_id: &str,
@@ -93,7 +91,6 @@ pub fn write_doc(
 
 /// 增量跳过：同路径且 size + mtime 都没变、上次是 ok，就不再读文件。
 /// 返回 None 表示需要（重新）抽取。
-#[allow(dead_code)] // caller 在 Task 9 的增量跳过分支，落地时删掉本行
 pub fn current_rowid(
     conn: &Connection,
     project_id: &str,
@@ -111,7 +108,6 @@ pub fn current_rowid(
         .optional()?)
 }
 
-#[allow(dead_code)] // caller 在 Task 9 的重建前清场，落地时删掉本行
 pub fn clear_project(conn: &Connection, project_id: &str) -> AppResult<u64> {
     let tx = conn.unchecked_transaction()?;
     let rowids: Vec<i64> = tx
