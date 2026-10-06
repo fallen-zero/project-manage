@@ -1753,7 +1753,9 @@ git commit -m "feat: M3 目录扫描：排除规则剪枝、大小与项目上�
 **Files:**
 - Create: `src-tauri/src/index_store.rs`
 - Modify: `src-tauri/src/lib.rs`（`mod index_store;`）
-- Test: 同文件 `mod tests`
+- Modify: `src-tauri/src/index_scan.rs`（删掉 `ScannedFile` 上那三条字段级 `#[allow(dead_code)]`，别的不动）
+- Modify: `src-tauri/src/tokenize.rs`（删掉 `index_text` 上那条 `#[allow(dead_code)]`，别的不动）
+- Test: `index_store.rs` 同文件 `mod tests`
 
 **Interfaces:**
 - Consumes: Task 1 的两张表、Task 2 的 `tokenize::index_text`、Task 6 的 `ScannedFile`、`uuid::Uuid`
@@ -2186,11 +2188,11 @@ Expected：两道闸 exit 0；`index_scan.rs` 只剩 `scan_root` 与 `load` 两�
 - [ ] **Step 6: 提交**
 
 ```bash
-git add src-tauri/src/index_store.rs src-tauri/src/lib.rs
+git add src-tauri/src/index_store.rs src-tauri/src/lib.rs src-tauri/src/index_scan.rs src-tauri/src/tokenize.rs
 git commit -m "feat: M3 索引写入层：两点写、同路径复用 rowid、状态与分页查询"
 ```
 
-只 add 这两个文件，禁止 `git add -A`。
+**四个文件一起提交**：`index_scan.rs` 与 `tokenize.rs` 这次各删几行豁免，漏 add 就等于把改动丢在工作树里。`git status` 复核只应有这四个文件（禁止 `git add -A`）。
 
 ---
 
