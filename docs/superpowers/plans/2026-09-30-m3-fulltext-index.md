@@ -92,7 +92,7 @@
 - `src/router.tsx`、`src/components/app-shell.tsx` — 新路由与导航项。
 - `docs/技术方案.md`、`docs/开发进度.md` — 收口。
 
-测试基线：**动手前 `cargo test --lib` = 41 passed**（本轮已实测：`grep -c "#\[test\]"` 各模块 4+12+7+9+9 = 41，与实跑一致；临时探针已全部删除）。每个任务的 Expected 数字都从这条链往上加，最后到 **88**（+4 +5 +4 +4 +5 +8 +6 +6 +5 = 47 条新测试；Task 10/11/12 不新增 Rust 测试）。
+测试基线：**动手前 `cargo test --lib` = 41 passed**（本轮已实测：`grep -c "#\[test\]"` 各模块 4+12+7+9+9 = 41，与实跑一致；临时探针已全部删除）。每个任务的 Expected 数字都从这条链往上加，最后到 **90**（+4 +5 +4 +4 +5 +10 +6 +6 +5 = 49 条新测试；Task 10/11/12 不新增 Rust 测试）。
 
 ---
 
@@ -1399,7 +1399,7 @@ git commit -m "feat: M3 PDF 抽取与扩展名分派入口，附真中文 PDF fi
 - **不要顺手把「数字解析失败」也改成 Err**：M3 没有任何写这三行的入口（Task 11 只读展示），做成 Err 要连 Task 10/11 的设置写入口与校验一起动，超出本任务范围。保留 `unwrap_or` 默认值，并在注释里写明这是有意为之。
 - **Step 1 原文有两处本机跑不通，已由 Task 6 落地后回修计划本体**（实现者 `20add29` 报的 concern，控制方裁定：接受，且这是计划文本的错而不是实现的错）：① `paths.iter().any(|p| p == "dep.js")` —— `paths: Vec<&str>` 的 `iter()` 给出 `&&str`，与字面量 `"dep.js"` 比较撞 3 条 E0277、整个测试模块不编译，正字是 `|p| *p == "dep.js"`；② `&vec![b'a'; 100]` 在 `cargo clippy --lib --all-targets -- -D warnings` 上被 `useless_vec` 拦下，正字是 `&[b'a'; 100]`（数组直接 coerce 成 slice，不需要 vec）。两处都是改一个 token、断言强度零变化。
 
-- [ ] **Step 1: 写失败测试（8 条）**
+- [ ] **Step 1: 写失败测试（10 条）**
 
 ```rust
 #[cfg(test)]
@@ -1454,6 +1454,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         tree(dir.path());
         let out = scan_root(dir.path(), &opts(&[]));
+        assert!(!out.files.is_empty(), "整棵树什么都没扫出来时，下面那条 all() 是空转的真");
         assert!(out.files.iter().all(|f| f.ext != "png" && f.ext != "zip"), "{:?}",
             out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
     }
@@ -1482,6 +1483,41 @@ mod tests {
         let out = scan_root(dir.path(), &o);
         assert_eq!(out.files.len(), 10, "触顶后不该继续收：{}", out.files.len());
         assert!(out.capped, "触顶必须显式标记，否则用户以为项目就这么点文件");
+    }
+
+    /// 配额要盖住超限那一桶：一个「全是 30 万个超限大文件」的项目，按原顺序走，上限根本不生效
+    /// —— 走完整棵树、在内存里攒几十万个 ScannedFile，Task 7 还要逐条落 too_large 行。
+    /// 这条断的是两桶之和的总量，所以 `files`/`over_size` 各自几条不重要，重要的是不许超过 cap。
+    #[test]
+    fn oversize_files_consume_the_per_project_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..12 {
+            touch(dir.path(), &format!("图纸/图{i}.txt"), &[b'a'; 10]);
+        }
+        let mut o = opts(&[]);
+        o.max_file_bytes = 5; // 12 个文件全部超限
+        o.max_files_per_project = 10;
+        let out = scan_root(dir.path(), &o);
+        assert!(out.files.is_empty(), "全部超限不该有可抽取行：{}", out.files.len());
+        assert_eq!(out.over_size.len(), 10, "超限行也要撞配额就停：收了 {}", out.over_size.len());
+        assert!(out.capped, "只有超限文件的项目触顶同样要标记");
+    }
+
+    /// 根目录自己的名字命中排除清单时不许剪掉整棵树：少掉 `entry.depth() > 0` 会得到
+    /// 「0 个文件、0 条 walk_errors、capped=false」的静默空索引，用户完全看不出原因。
+    #[test]
+    fn a_root_named_like_an_excluded_dir_is_still_scanned() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("build"); // 用户把项目根指到了一个名叫 build 的目录
+        touch(&root, "交付/验收说明.docx", b"x");
+        let out = scan_root(&root, &opts(&["node_modules", "dist", "build"]));
+        assert_eq!(
+            out.files.iter().map(|f| f.file_name.as_str()).collect::<Vec<_>>(),
+            vec!["验收说明.docx"],
+            "根目录名不该在 depth 0 触发剪枝：walk_errors={:?}",
+            out.walk_errors
+        );
+        assert!(!out.capped);
     }
 
     /// 根目录不存在（移动盘没挂载）是常态：回 walk_errors，不 panic、不返回 Err。
@@ -1646,12 +1682,16 @@ pub fn scan_root(root: &Path, opts: &ScanOptions) -> ScanOutcome {
             }
             Ok(entry) => {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if entry.file_type().is_dir()
+                if entry.depth() > 0
+                    && entry.file_type().is_dir()
                     && opts.exclude_dirs.iter().any(|d| d.eq_ignore_ascii_case(&name))
                 {
                     it.skip_current_dir();
                     continue;
                 }
+                // `entry.depth() > 0` 不是可有可无的：少了它，用户把项目根指到一个真名叫
+                // `build`/`dist`/`target` 的目录时，根会在 depth 0 被剪掉，得到「0 个文件、
+                // 0 条错误、没有触顶标记」的静默空索引 —— 正是 capped 这条要求要防的那类。
                 if !entry.file_type().is_file() {
                     continue;
                 }
@@ -1659,15 +1699,18 @@ pub fn scan_root(root: &Path, opts: &ScanOptions) -> ScanOutcome {
                     continue;
                 };
                 if kind_of(&scanned.ext).is_none() {
-                    continue; // 未支持类型不建行，见测试里的说明
+                    continue; // 未支持类型不建行，也不占配额，见测试里的说明
+                }
+                // 配额必须打在「分大小两桶之前」：超限文件同样会各落一行 skipped，同样撑表。
+                // 放在 oversize 分支之后，上限对「全是超限大文件的项目」根本不生效 ——
+                // 走完整棵树、在内存里攒几十万个 ScannedFile，Task 7 还要逐条落 too_large 行。
+                if (out.files.len() as i64) + (out.over_size.len() as i64) >= opts.max_files_per_project {
+                    out.capped = true;
+                    break; // 触顶即停：剩下的文件不进清单，也没有行，由作业摘要点名项目
                 }
                 if scanned.size > opts.max_file_bytes {
                     out.over_size.push(scanned);
                     continue;
-                }
-                if (out.files.len() as i64) + (out.over_size.len() as i64) >= opts.max_files_per_project {
-                    out.capped = true;
-                    break; // 触顶即停：剩下的文件不进清单，也没有行，由作业摘要点名项目
                 }
                 out.files.push(scanned);
             }
@@ -1680,7 +1723,7 @@ pub fn scan_root(root: &Path, opts: &ScanOptions) -> ScanOutcome {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_scan`
-Expected: `8 passed`；全量 → `71 passed; 0 failed`
+Expected: `10 passed`；全量 → `73 passed; 0 failed`
 
 `missing_root_is_reported_instead_of_panicking` 若拿不到 `walk_errors`（walkdir 对不存在的根只吐一条 IOErr，确实会进错误流），就检查是不是 `Z:/` 被解析成了别的形态；**不要**改成断言「空清单即通过」——那会放过「根目录不可达却静默」这个真实故障。
 
@@ -2074,7 +2117,7 @@ pub fn list_docs(
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_store`
-Expected: `6 passed`；全量 → `77 passed; 0 failed`
+Expected: `6 passed`；全量 → `79 passed; 0 failed`
 
 - [ ] **Step 5: 提交**
 
@@ -2293,7 +2336,7 @@ pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<Doc
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_store`
-Expected: `12 passed`（Task 7 的 6 + 本任务 6）；全量 → `83 passed; 0 failed`
+Expected: `12 passed`（Task 7 的 6 + 本任务 6）；全量 → `85 passed; 0 failed`
 
 若 `fts5_syntax...` 里 `hits(&c, "*")` 报错而不是空，说明 `query_expression("*", false)` 回了 `Some`——事实 8 要求纯标点被过滤后回 `None`；回到 Task 2 修过滤器，**不要**在这里加特判。
 
@@ -2784,7 +2827,7 @@ pub fn start(
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_job`
-Expected: `5 passed`；全量 → `88 passed; 0 failed`
+Expected: `5 passed`；全量 → `90 passed; 0 failed`
 
 `cancel_stops_the_pass_early` 若一次跑完（`done == 60`），原因是第一次回调就置位、而检查点在下一轮开头 —— 断言 `done < 60` 应当成立。若始终不成立，先确认 `PROGRESS_EVERY` 与回调时机，不要靠加 `sleep` 让它「看起来对」。
 
@@ -3276,7 +3319,7 @@ index_docs_fts      FTS5 虚表：name_tokens + body_tokens，tokenize=unicode61
 
 `docs/开发进度.md` 新增 `## M3 验收证据`，按 M2 那节的格式写全：
 
-- `cargo test --lib`：`88 passed; 0 failed`，按模块拆一行（`db` / `project` / `ledger` / `vault` / `search` / `tokenize` / `extract` / `index_scan` / `index_store` / `index_job` 各几条，数字从实际输出抄，不要推算）。
+- `cargo test --lib`：`90 passed; 0 failed`，按模块拆一行（`db` / `project` / `ledger` / `vault` / `search` / `tokenize` / `extract` / `index_scan` / `index_store` / `index_job` 各几条，数字从实际输出抄，不要推算）。
 - `cargo clippy --lib --all-targets -- -D warnings` 结果。
 - `npm run build` 的模块数与耗时。
 - Step 3 的逐条真机断言结果（只写「几条命中 / matchedBy 是什么 / 布尔值」，不抄正文）。
