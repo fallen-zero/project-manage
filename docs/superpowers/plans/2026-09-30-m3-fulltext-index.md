@@ -2605,6 +2605,12 @@ mod tests {
         AtomicBool::new(false)
     }
 
+    /// 库里的行数。重建用例要拿它证明「磁盘上没了的旧行跟着掉」，
+    /// 光看 `doc_hits` 不够：命中原问句可能只是因为那行根本没被写过。
+    fn doc_rows(conn: &Connection) -> i64 {
+        conn.query_row("SELECT count(*) FROM index_docs WHERE project_id = 'p1'", [], |r| r.get(0)).unwrap()
+    }
+
     /// 一轮 pass 要把结局各归其位：ok / skipped(too_large) / skipped(empty_text，空白抽取) / 未支持不建行 / 排除目录不进。
     /// 同时验证「pass 结束后可检索」这条端到端性质（内存库 + 真文件）。
     #[test]
@@ -2685,22 +2691,33 @@ mod tests {
         assert!(done > 0, "至少要真的开始过，否则这条测试什么都没证明");
     }
 
-    /// 重建：先把该项目的行与 FTS 清掉再写，所以第二趟不该出现 unchanged，旧内容也不会残留。
+    /// 重建：先把该项目的行与 FTS 清掉再写。两件事都要钉住 ——
+    /// ① 内容变了的文件必须重读；② 磁盘上已经没了的旧行不能留。
+    /// ②才是 `clear_project` 唯一承重的场景：`write_doc` 的 `ON CONFLICT DO UPDATE` 会自己
+    /// 换掉同路径旧正文，所以「同一文件改了内容」根本测不到它，只有「这一轮不再出现的旧行」测得到。
     #[test]
     fn rebuild_rewrites_everything_and_leaves_no_stale_tokens() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path()).unwrap();
         let p = dir.path().join("合同.txt");
         std::fs::write(&p, "第一版 验收".as_bytes()).unwrap();
+        let gone = dir.path().join("归档说明.txt");
+        std::fs::write(&gone, "这份要归档 验收".as_bytes()).unwrap();
         let conn = db::open_in_memory().unwrap();
         seeded_project(&conn, "p1", dir.path());
         run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(doc_rows(&conn), 2, "第一趟两行都该在库里");
+        assert_eq!(crate::index_store::doc_hits(&conn, "归档", 20).unwrap().len(), 1,
+            "正面照控：被删的那个文件第一趟确实进了索引，否则后面的 0 命中什么都没证明");
 
         std::fs::write(&p, "第二版 报价".as_bytes()).unwrap();
+        std::fs::remove_file(&gone).unwrap();
         let summary = run_pass(&conn, &opts(), None, true, &no_cancel(), &mut |_| {}).unwrap();
         assert_eq!(summary.results[0].ok, 1, "重建必须重读：{:?}", summary.results[0]);
         assert_eq!(crate::index_store::doc_hits(&conn, "验收", 20).unwrap().len(), 0, "旧正文要跟着清掉");
         assert_eq!(crate::index_store::doc_hits(&conn, "报价", 20).unwrap().len(), 1);
+        assert_eq!(crate::index_store::doc_hits(&conn, "归档", 20).unwrap().len(), 0, "磁盘上没了的旧行不能留");
+        assert_eq!(doc_rows(&conn), 1, "库里的行数也要跟着掉");
     }
 
     /// 根目录没挂载是日常（移动盘/网络盘）。它只能让该项目自己标 root_missing，
@@ -3054,7 +3071,7 @@ Expected: `5 passed`；全量 → `92 passed; 0 failed`
 - 删掉循环内取消分支的 `results.push(acc);` → 只有 `cancel_stops_the_pass_early` 红（panic 文案见上）。控制方已实测这一条。
 - 删掉 `Ok(body) if body.trim().is_empty()` 那一臂（让空白正文重新走 `Ok`）→ 只有 `run_pass_indexes_a_generated_tree_and_separates_outcomes` 红，且**先红在 `ok` 计数**（测试里 `ok` 的断言排在 `skipped` 前，实测文案 `left: 3 / right: 2`；`skipped` 同时从 2 变 1，只是轮不到报）。控制方已实测。
 - 上面那条变异的**第二半**（控制方已实测）：同一处变异下 `cargo clippy --lib -- -D warnings` 以 101 退出，报 `variant \`Empty\` is never constructed`（`index_store.rs:22`）。这就是为什么 `Empty` 臂必须落在生产分支里 —— 删了枚举级豁免后，没有生产构造点它就不干净。
-- 删掉 `if rebuild && !root_missing { clear_project(conn, &target.project_id)?; }` → 只有 `rebuild_rewrites_everything_and_leaves_no_stale_tokens` 红（旧正文残留）。
+- 删掉 `if rebuild && !root_missing { clear_project(conn, &target.project_id)?; }` 整块 → 只有 `rebuild_rewrites_everything_and_leaves_no_stale_tokens` 红，实测文案 `旧正文要跟着清掉 / left: 1 / right: 0`。**这条是修复轮补出来的**：原版用例只准备一个文件、两轮之间路径不变，而 `write_doc` 是 `ON CONFLICT (project_id,path) DO UPDATE` + 按 rowid 先删 FTS 再插，旧正文本来就被子替换 —— 所以原版这处变异 **5 条全绿**（实现者实测），`clear_project` 在 `run_pass` 里零承重。夹具后来加的「第一趟在库里、第二趟磁盘上没了」那个文件才是它唯一能被测到的场景，同时补了 `doc_hits("归档") == 1` 的正面照控和 `doc_rows` 的行数断言。控制方已双向实测：夹具到位后，带 `clear_project` 绿、删掉它红且只红这一条。
 - （可选加测）把增量分支 `!rebuild && current_rowid(...).is_some()` 改成恒 false → `second_pass_skips_unchanged_files` 必红。
 
 **已被探针否掉的担心，别自己去「修」**：`//!` 模块 doc 里那个 `- ` bullet 列表**不触发** `doc list item without indentation`（原版逐字编译，两道闸 exit 0）。Task 8 那次中招的是「编号列表后面紧跟不缩进的正文行」，形态不同。
