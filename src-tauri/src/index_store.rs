@@ -129,7 +129,6 @@ pub struct StatusCount {
     pub count: i64,
 }
 
-#[allow(dead_code)] // caller 在 Task 10 的状态统计 IPC，落地时删掉本行
 pub fn status_counts(conn: &Connection, project_id: &str) -> AppResult<Vec<StatusCount>> {
     let mut stmt = conn.prepare(
         "SELECT index_status, count(*) FROM index_docs WHERE project_id = ?1 GROUP BY index_status
@@ -154,7 +153,6 @@ pub struct DocRow {
     pub indexed_at: Option<String>,
 }
 
-#[allow(dead_code)] // caller 在 Task 10 的文件清单 IPC，落地时删掉本行
 pub fn list_docs(
     conn: &Connection,
     project_id: &str,
@@ -239,7 +237,6 @@ fn run_select(conn: &Connection, expr: &str, limit: i64, matched_by: &'static st
 /// `limit` 原样进 SQL，这里不校验也不补默认值：SQLite 里负数 LIMIT = 不限行、0 = 无行，
 /// clamp 属于调用方的系统边界（Task 10 的 IPC：`limit.unwrap_or(50).clamp(1, 200)`）。
 /// 刻意不做第二道校验 —— 本项目只在边界校验一次，两道 clamp 会漂成两个数。
-#[allow(dead_code)] // caller 在 Task 10 的检索 IPC，落地时删掉本行
 pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<DocHit>> {
     let q = query.trim();
     if q.is_empty() {

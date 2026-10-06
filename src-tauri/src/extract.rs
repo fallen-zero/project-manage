@@ -219,7 +219,6 @@ const SUPPORTED: &[&str] = &[
     "py", "js", "ts", "bat", "sh", "docx", "pptx", "xlsx", "xls", "pdf",
 ];
 
-#[allow(dead_code)] // caller 在 Task 10 的 IPC（UI 要念这张表），落地时删掉本行
 pub fn supported_exts() -> &'static [&'static str] {
     SUPPORTED
 }

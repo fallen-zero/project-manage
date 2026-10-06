@@ -297,7 +297,6 @@ pub struct IndexShared {
 }
 
 impl IndexShared {
-    #[allow(dead_code)] // 构造点在 Task 10 的 AppState::manage，落地时删掉本行
     pub fn new() -> Self {
         Self {
             cancel: AtomicBool::new(false),
@@ -325,7 +324,6 @@ fn report_failure(emit: &mut impl FnMut(Progress), shared: &IndexShared, msg: St
 /// 薄壳：自己开一条连接（不能借用 AppState 里那条 —— 一轮索引要几分钟，
 /// 拿着 Mutex<Connection> 会把界面上所有 IPC 全卡住），把进度回调换成 emit。
 /// WAL + busy_timeout 已在 db::after_open 里配好，两个连接一读一写是允许的。
-#[allow(dead_code)] // caller 在 Task 10 的 index_start IPC，落地时删掉本行
 pub fn start(
     app: AppHandle,
     data_dir: PathBuf,

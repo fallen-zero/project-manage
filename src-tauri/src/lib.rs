@@ -11,7 +11,7 @@ mod tokenize;
 mod vault;
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -28,6 +28,8 @@ struct AppState {
     data_dir: PathBuf,
     /// 解锁后的主密钥只活在进程内存里：锁屏/退出即丢，重新解锁靠主密码或恢复码。
     mk: Mutex<Option<MasterKey>>,
+    /// 索引作业跨线程共享：running/cancel 是原子量，summary 是上一轮的结论。
+    index: Arc<index_job::IndexShared>,
 }
 
 fn db(state: &AppState) -> AppResult<MutexGuard<'_, rusqlite::Connection>> {
@@ -70,6 +72,17 @@ struct DbStatus {
     fts5_available: bool,
 }
 
+/// 探测本构建有没有编进 FTS5。从 `db_status` 里抽出来复用：
+/// `index_overview` 也要在同一个口径上回答「这台机器能不能建全文索引」。
+fn fts5_available(conn: &rusqlite::Connection) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM pragma_compile_options WHERE compile_options LIKE '%FTS5%'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .is_ok()
+}
+
 /// 供前端展示的运行态，也是 IPC 往返的最小验证。
 #[tauri::command]
 fn db_status(state: State<'_, AppState>) -> AppResult<DbStatus> {
@@ -81,20 +94,14 @@ fn db_status(state: State<'_, AppState>) -> AppResult<DbStatus> {
         |r| r.get(0),
     )?;
     // FTS5 是全文检索的地基，这里显式探测而不是假设 bundled 构建一定带它
-    let fts5_available = conn
-        .query_row(
-            "SELECT 1 FROM pragma_compile_options WHERE compile_options LIKE '%FTS5%'",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .is_ok();
+    let has_fts = fts5_available(&conn);
 
     Ok(DbStatus {
         data_dir: state.data_dir.display().to_string(),
         db_file: db::db_path(&state.data_dir).display().to_string(),
         journal_mode,
         schema_version,
-        fts5_available,
+        fts5_available: has_fts,
     })
 }
 
@@ -391,6 +398,129 @@ fn ledger_note_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
     ledger::delete_note(&conn, &id)
 }
 
+/// 起一轮索引。线程壳与 `app.emit` 的连通性只能由真机验证（Task 12），
+/// 这里只保证两个错误码能被界面念出来：`index_running` / `index_spawn_failed`。
+#[tauri::command]
+fn index_start(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+    rebuild: bool,
+) -> AppResult<()> {
+    index_job::start(app, state.data_dir.clone(), state.index.clone(), project_id, rebuild)
+}
+
+/// 只置 cancel 标志，不做复位：`start` 开头有 `cancel.store(false)`，
+/// 所以「空闲时点了取消」不会把下一轮也取消掉。
+#[tauri::command]
+fn index_cancel(state: State<'_, AppState>) -> AppResult<()> {
+    state.index.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectState {
+    project_id: String,
+    project_name: String,
+    root_path: String,
+    root_exists: bool,
+    ok: i64,
+    skipped: i64,
+    failed: i64,
+    pending: i64,
+    missing: i64,
+    total: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IndexOverview {
+    running: bool,
+    fts5_available: bool,
+    last_run: Option<index_job::RunSummary>,
+    /// 一轮彻底失败的原因串（`[code] message（hint）`）。Task 9 加 `IndexShared::last_error`
+    /// 就是为了这一刻 —— 没有这个字段，`report_failure` 写的缘由永远读不出来，
+    /// 界面上「按钮说失败了」和「这一轮为什么失败」就接不上。成功轮由 `start` 置回 None，
+    /// 所以这里不需要自己判断陈旧性。
+    last_error: Option<String>,
+    projects: Vec<ProjectState>,
+    exclude_dirs: Vec<String>,
+    max_file_bytes: i64,
+    max_files_per_project: i64,
+    supported_exts: Vec<&'static str>,
+}
+
+#[tauri::command]
+fn index_overview(state: State<'_, AppState>) -> AppResult<IndexOverview> {
+    let conn = db(&state)?;
+    let opts = index_scan::ScanOptions::load(&conn)?;
+    let targets = index_job::targets(&conn, None)?;
+    let mut projects = Vec::new();
+    for t in targets {
+        let counts = index_store::status_counts(&conn, &t.project_id)?;
+        let pick = |s: &str| counts.iter().find(|c| c.status == s).map(|c| c.count).unwrap_or(0);
+        projects.push(ProjectState {
+            total: counts.iter().map(|c| c.count).sum(),
+            project_id: t.project_id.clone(),
+            project_name: t.project_name.clone(),
+            // 只读探测：根目录没挂载时在界面上点名它，绝不创建或修改任何路径
+            root_exists: std::path::Path::new(&t.root_path).is_dir(),
+            root_path: t.root_path,
+            ok: pick("ok"),
+            skipped: pick("skipped"),
+            failed: pick("failed"),
+            pending: pick("pending"),
+            missing: pick("missing"),
+        });
+    }
+    Ok(IndexOverview {
+        running: state.index.running.load(std::sync::atomic::Ordering::SeqCst),
+        fts5_available: fts5_available(&conn),
+        // 上一轮结论只是展示用，拿不到锁就回 None，不因为 UI 刷新阻塞作业线程。
+        // 这里两处 lock() 都只碰 IndexShared 自己的 Mutex，而作业线程从不反向拿 AppState 的
+        // conn 锁（它自己 `db::open` 了一条连接），所以「持着 conn 守卫再拿 summary」不构成环路。
+        last_run: state.index.summary.lock().ok().and_then(|g| g.clone()),
+        last_error: state.index.last_error.lock().ok().and_then(|g| g.clone()),
+        projects,
+        exclude_dirs: opts.exclude_dirs,
+        max_file_bytes: opts.max_file_bytes as i64,
+        max_files_per_project: opts.max_files_per_project,
+        supported_exts: extract::supported_exts().to_vec(),
+    })
+}
+
+/// 某一项目的文件清单（分页）。`limit` 的 clamp 是 `index_store::list_docs` 唯一的边界校验，
+/// 别挪进 index_store —— 那一层还要用 `limit=0` 断「0 行结果」的既有语义。
+#[tauri::command]
+fn index_docs(
+    state: State<'_, AppState>,
+    project_id: String,
+    status: Option<String>,
+    limit: i64,
+    offset: i64,
+) -> AppResult<Vec<index_store::DocRow>> {
+    let conn = db(&state)?;
+    index_store::list_docs(
+        &conn,
+        &project_id,
+        status.as_deref().filter(|s| !s.is_empty()),
+        limit.clamp(1, 500),
+        offset.max(0),
+    )
+}
+
+/// 正文检索。密文列不参与：SQL 全在 `index_store::doc_hits` 里，这里不拼任何语句。
+#[tauri::command]
+fn search_docs(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<i64>,
+) -> AppResult<Vec<index_store::DocHit>> {
+    let conn = db(&state)?;
+    index_store::doc_hits(&conn, &query, limit.unwrap_or(50).clamp(1, 200))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -402,8 +532,9 @@ pub fn run() {
             let conn = db::open(&data_dir)?;
             app.manage(AppState {
                 conn: Mutex::new(conn),
-                data_dir,
+                data_dir: data_dir.clone(),
                 mk: Mutex::new(None),
+                index: Arc::new(index_job::IndexShared::new()),
             });
             Ok(())
         })
@@ -441,7 +572,12 @@ pub fn run() {
             ledger_link_delete,
             ledger_note_create,
             ledger_note_update,
-            ledger_note_delete
+            ledger_note_delete,
+            index_start,
+            index_cancel,
+            index_overview,
+            index_docs,
+            search_docs
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
