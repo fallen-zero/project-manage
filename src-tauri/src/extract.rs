@@ -486,15 +486,64 @@ mod tests {
         assert_eq!(e.code, "extract_unsupported", "图片属 M6 OCR，本版本明确不支持");
     }
 
-    /// 分派表和 supported_exts() 必须同源：UI 上写的「支持的类型」要是真的那一套。
+    /// 分派表和 supported_exts() 必须同源，而且**两个方向都要查**：
+    /// `SUPPORTED` 里出现 `kind_of` 分派不到的扩展名 = UI 承诺了搜不到的类型；
+    /// `TEXT_EXTS` 里出现 `SUPPORTED` 没有的扩展名 = 真能抽进索引、UI 却不列，用户根本想不到去搜。
+    /// 只查前一个方向的话，后者可以一直绿着漂移，而这正是本测试存在的理由。
     #[test]
     fn supported_exts_list_matches_the_dispatch_table() {
         for ext in supported_exts() {
             assert!(kind_of(ext).is_some(), "{ext} 在清单里却分派不到抽取器");
             assert_eq!(ext.to_lowercase(), *ext, "清单里的扩展名统一小写");
         }
+        // 反方向：分派表必须清单的子集。漏了这条，往 TEXT_EXTS 加一个 "log" 就是一次静默漂移。
+        for e in TEXT_EXTS {
+            assert!(supported_exts().contains(e), "{e} 能分派却不在 UI 清单里");
+        }
         for kind_ext in ["txt", "md", "csv", "docx", "pptx", "xlsx", "xls", "pdf"] {
             assert!(supported_exts().contains(&kind_ext), "{kind_ext} 缺清单");
+        }
+    }
+
+    /// 五个分派臂都要真的走一遍。这条存在的理由是一个具体失效：docx 如果被接成 `slides = true`，
+    /// `office_text` 找不到 `ppt/slides/*` 部件、返回 `Ok("")`，于是 12 条测试全绿而库里的正文是空的 ——
+    /// 属于「不报错、只是搜不到」那一类，只有把每种扩展名真的喂进 `extract_text` 才守得住。
+    /// `xls` 与 `xlsx` 共用 `DocKind::Workbook` 同一个 match 臂，路由由 `xlsx` 这一条覆盖
+    /// （本机造不出真 `.xls`，`rust_xlsxwriter` 只写 xlsx）。
+    #[test]
+    fn every_dispatch_arm_routes_to_its_own_extractor() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "分派正文text".as_bytes()).unwrap();
+        let docx = make_office(
+            dir.path(),
+            "a.docx",
+            "word/document.xml",
+            r#"<w:document xmlns:w="http://x"><w:body><w:p><w:r><w:t>分派正文word</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+        let pptx = make_office(
+            dir.path(),
+            "a.pptx",
+            "ppt/slides/slide1.xml",
+            r#"<p:sld xmlns:a="http://x" xmlns:p="http://y"><p:cSld><p:sp><p:txBody><a:p><a:r><a:t>分派正文slides</a:t></a:r></a:p></p:txBody></p:sp></p:cSld></p:sld>"#,
+        );
+        let xlsx = dir.path().join("a.xlsx");
+        {
+            let mut wb = rust_xlsxwriter::Workbook::new();
+            wb.add_worksheet().write(0, 0, "分派正文workbook").unwrap();
+            wb.save(&xlsx).unwrap();
+        }
+
+        // 四个标记互不相同，所以「接错抽取器」必然表现为拿到空串或 Err，而不是换了一种正文还看不出。
+        for (path, want) in [
+            (dir.path().join("a.md"), "分派正文text"),
+            (docx, "分派正文word"),
+            (pptx, "分派正文slides"),
+            (xlsx, "分派正文workbook"),
+            (fixture("sample-cn.pdf"), "验收"),
+        ] {
+            let text = extract_text(&path)
+                .unwrap_or_else(|e| panic!("{} 应能抽出正文，实际报错 {}", path.display(), e.code));
+            assert!(text.contains(want), "{} 分派到了错误的抽取器：{text:?}", path.display());
         }
     }
 }
