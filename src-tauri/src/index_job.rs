@@ -341,6 +341,12 @@ mod tests {
         AtomicBool::new(false)
     }
 
+    /// 库里的行数。重建用例要拿它证明「磁盘上没了的旧行跟着掉」，
+    /// 光看 `doc_hits` 不够：命中原问句可能只是因为那行根本没被写过。
+    fn doc_rows(conn: &Connection) -> i64 {
+        conn.query_row("SELECT count(*) FROM index_docs WHERE project_id = 'p1'", [], |r| r.get(0)).unwrap()
+    }
+
     /// 一轮 pass 要把结局各归其位：ok / skipped(too_large) / skipped(empty_text，空白抽取) / 未支持不建行 / 排除目录不进。
     /// 同时验证「pass 结束后可检索」这条端到端性质（内存库 + 真文件）。
     #[test]
@@ -421,22 +427,33 @@ mod tests {
         assert!(done > 0, "至少要真的开始过，否则这条测试什么都没证明");
     }
 
-    /// 重建：先把该项目的行与 FTS 清掉再写，所以第二趟不该出现 unchanged，旧内容也不会残留。
+    /// 重建：先把该项目的行与 FTS 清掉再写。两件事都要钉住 ——
+    /// ① 内容变了的文件必须重读；② 磁盘上已经没了的旧行不能留。
+    /// ②才是 `clear_project` 唯一承重的场景：`write_doc` 的 `ON CONFLICT DO UPDATE` 会自己
+    /// 换掉同路径旧正文，所以「同一文件改了内容」根本测不到它，只有「这一轮不再出现的旧行」测得到。
     #[test]
     fn rebuild_rewrites_everything_and_leaves_no_stale_tokens() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path()).unwrap();
         let p = dir.path().join("合同.txt");
         std::fs::write(&p, "第一版 验收".as_bytes()).unwrap();
+        let gone = dir.path().join("归档说明.txt");
+        std::fs::write(&gone, "这份要归档 验收".as_bytes()).unwrap();
         let conn = db::open_in_memory().unwrap();
         seeded_project(&conn, "p1", dir.path());
         run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(doc_rows(&conn), 2, "第一趟两行都该在库里");
+        assert_eq!(crate::index_store::doc_hits(&conn, "归档", 20).unwrap().len(), 1,
+            "正面照控：被删的那个文件第一趟确实进了索引，否则后面的 0 命中什么都没证明");
 
         std::fs::write(&p, "第二版 报价".as_bytes()).unwrap();
+        std::fs::remove_file(&gone).unwrap();
         let summary = run_pass(&conn, &opts(), None, true, &no_cancel(), &mut |_| {}).unwrap();
         assert_eq!(summary.results[0].ok, 1, "重建必须重读：{:?}", summary.results[0]);
         assert_eq!(crate::index_store::doc_hits(&conn, "验收", 20).unwrap().len(), 0, "旧正文要跟着清掉");
         assert_eq!(crate::index_store::doc_hits(&conn, "报价", 20).unwrap().len(), 1);
+        assert_eq!(crate::index_store::doc_hits(&conn, "归档", 20).unwrap().len(), 0, "磁盘上没了的旧行不能留");
+        assert_eq!(doc_rows(&conn), 1, "库里的行数也要跟着掉");
     }
 
     /// 根目录没挂载是日常（移动盘/网络盘）。它只能让该项目自己标 root_missing，
