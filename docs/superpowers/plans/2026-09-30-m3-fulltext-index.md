@@ -92,7 +92,7 @@
 - `src/router.tsx`、`src/components/app-shell.tsx` — 新路由与导航项。
 - `docs/技术方案.md`、`docs/开发进度.md` — 收口。
 
-测试基线：**动手前 `cargo test --lib` = 41 passed**（本轮已实测：`grep -c "#\[test\]"` 各模块 4+12+7+9+9 = 41，与实跑一致；临时探针已全部删除）。每个任务的 Expected 数字都从这条链往上加，最后到 **94**（+4 +5 +4 +4 +5 +10 +7 +7 +7 = 53 条新测试；Task 10/11/12 不新增 Rust 测试。Task 8 的 6→7 是复审补的 `query_guards_and_limit_pass_straight_through`；Task 9 的 5→7 是评审修复轮补的 `capped_and_scanned_total_survive_the_quota` 与 `running_flag_is_released_even_when_the_job_panics`）。
+测试基线：**动手前 `cargo test --lib` = 41 passed**（本轮已实测：`grep -c "#\[test\]"` 各模块 4+12+7+9+9 = 41，与实跑一致；临时探针已全部删除）。每个任务的 Expected 数字都从这条链往上加，最后到 **96**（+4 +5 +4 +4 +5 +10 +7 +7 +9 = 55 条新测试；Task 10/11/12 不新增 Rust 测试。Task 8 的 6→7 是复审补的 `query_guards_and_limit_pass_straight_through`；Task 9 的 5→9 是两轮评审修复补的 `capped_and_scanned_total_survive_the_quota`、`running_flag_is_released_even_when_the_job_panics`、`terminal_event_sums_scanned_and_done_separately`、`report_failure_leaves_a_reason_and_emits_one_error_event`）。
 
 ---
 
@@ -2567,9 +2567,9 @@ git commit -m "feat: M3 两段全文检索并钉住密文不进索引的验收"
 - **一轮彻底失败必须留下原因**：`db::open` / `ScanOptions::load` / `run_pass` 三个出口原来都塌成同一个 `finish(None)`，把 `AppError` 当场丢掉，Task 10 的 IPC 只能看到 `summary == None`，分不清「从没跑过」「库打不开」「settings 坏了」「中途报错」。现在三处都走 `report_failure`：写 `last_error` + emit 一次 `state == "error"` 的终止事件。存的是 `format!("{e}")`（`AppError` 的 `Display` 自带 `[code] message（hint）`）而不是 `AppError` 本体 —— 它只 derive 了 `Debug`、没有 `Clone`，而这里要跨线程留一份。代价：机器码混在串里，Task 10 若要按 code 分支就得改存三元组，届时再说。
 - **成功/取消也要发终止事件**：`run_pass` 只在项目边界发进度，只订阅事件的前端拿不到「这一轮结束了」的信号，只能反过来轮询 summary。`terminal(...)` 就是那一条轮级事件，`project_id` 是空串 —— 它不属于任何一个项目，Task 11 别拿它当 key。
 
-**分层理由：** `run_pass` 不依赖 Tauri，收 `&Connection` + 回调，所以「扫 + 抽 + 写 + 取消 + 增量跳过」全部能在内存库 + tempdir 上测。`start` 只是「开一条连接、把回调换成 `app.emit`、维护 running/cancel」的薄壳，这一层的正确性由 Task 12 的真机验证负责，本任务不给它写假测试。
+**分层理由：** `run_pass` 不依赖 Tauri，收 `&Connection` + 回调，所以「扫 + 抽 + 写 + 取消 + 增量跳过」全部能在内存库 + tempdir 上测。`start` 只是「开一条连接、把回调换成 `app.emit`、维护 running/cancel」的薄壳，这一层的正确性由 Task 12 的真机验证负责，本任务不给它写假测试。**但 `start` 里被抽出来的三个 helper 不在这个豁免范围内**：`RunningGuard` 的复位、`terminal` 的求和、`report_failure` 的「留原因 + 发一条事件 + 冲摘要」都不需要 `AppHandle`，所以各有一条直接单测（修复轮 2 的复审就是抓这一条：Important 2 的修复当时在测试层面零守护）。
 
-- [ ] **Step 1: 写失败测试（7 条）**
+- [ ] **Step 1: 写失败测试（9 条）**
 
 ```rust
 #[cfg(test)]
@@ -2824,6 +2824,73 @@ mod tests {
         assert_eq!(after.results[0].scanned_total, 0);
         assert_eq!(doc_rows(&conn2, "p9"), 1, "根不可达时 rebuild 不该动它已有的行");
     }
+
+    /// 轮级终止事件的求和（修复轮 2 复审补的守护）。`terminal` 是纯函数、不要 `AppHandle`，
+    /// 而 Task 11 的摘要条数全靠它 —— 它写错就是「界面说 19 个、状态统计说 17 个」这类当场对不上。
+    /// 两个 `ProjectResult` 的数字**刻意全部互不相同**，且 `scanned_total` 之和不等于 `done_total()`
+    /// 之和：否则 `total` 与 `done` 两个字段被互换时这条也绿。`walk_errors` 给非零值是为了钉住
+    /// 「遍历错误不参与这两条计数」。
+    #[test]
+    fn terminal_event_sums_scanned_and_done_separately() {
+        let r1 = ProjectResult {
+            project_id: "p1".into(), project_name: "一号".into(),
+            scanned_total: 12, ok: 4, skipped: 3, failed: 1, unchanged: 2,
+            walk_errors: 5, capped: true, root_missing: false,
+        };
+        let r2 = ProjectResult {
+            project_id: "p2".into(), project_name: "二号".into(),
+            scanned_total: 7, ok: 5, skipped: 1, failed: 0, unchanged: 1,
+            walk_errors: 0, capped: false, root_missing: true,
+        };
+        let e = terminal("done", &[r1, r2], None);
+        assert_eq!(e.state, "done");
+        assert_eq!(e.total, 19, "total 是 scanned_total 之和：{} vs {}", e.total, 19);
+        assert_eq!(e.done, 17, "done 是 ok+skipped+failed+unchanged 之和");
+        assert_eq!(e.ok, 9);
+        assert_eq!(e.skipped, 4);
+        assert_eq!(e.failed, 1);
+        assert_eq!(e.project_id, "", "终止事件不属于某一个项目，Task 11 别拿它当 key");
+        assert_eq!(e.project_name, "");
+        assert_eq!(e.current, "");
+        assert_eq!(e.error, None, "成功轮的终止事件不该带原因");
+    }
+
+    /// Important 2 的落地证据。`start` 的线程体要 `AppHandle`、本任务测不到，但 `report_failure`
+    /// 收的是 `&IndexShared` 和一个 `FnMut` 闭包，**不需要** `AppHandle` —— 所以「失败留下一条可读的
+    /// 原因 + 发且只发一条 error 终止事件 + 把上一轮的摘要冲掉」这三件事全部可以直接钉住。
+    /// 没有这条，Important 2 的修复在测试层面是零守护的：三个失败出口都不可达，界面上「按钮说失败、
+    /// 事件说没有」只能等 Task 12 真机才发现。
+    /// `events.len() == 1` 挡的是「重复发事件」；`total == 0` 挡的是「把上一轮的计数塞进 error 事件」。
+    #[test]
+    fn report_failure_leaves_a_reason_and_emits_one_error_event() {
+        let shared = IndexShared::new();
+        {
+            // 先放一份「上一轮成功」的摘要：失败轮必须把它冲掉，否则界面会拿旧摘要当本轮结果。
+            let mut saved = shared.summary.lock().unwrap();
+            *saved = Some(RunSummary {
+                state: "done",
+                results: vec![ProjectResult {
+                    project_id: "p1".into(), project_name: "一号".into(),
+                    scanned_total: 3, ok: 3, skipped: 0, failed: 0, unchanged: 0,
+                    walk_errors: 0, capped: false, root_missing: false,
+                }],
+                started_at: "2026-09-30T00:00:00Z".into(),
+                finished_at: "2026-09-30T00:01:00Z".into(),
+            });
+        }
+        let mut events: Vec<Progress> = Vec::new();
+        report_failure(&mut |p| events.push(p), &shared, "[db_open_failed] 打不开库".to_owned());
+
+        assert_eq!(events.len(), 1, "只发一条轮级事件，发两遍 Task 11 的进度条会抖");
+        assert_eq!(events[0].state, "error", "{:?}", events[0]);
+        assert_eq!(events[0].error.as_deref(), Some("[db_open_failed] 打不开库"),
+            "事件里的原因必须和 last_error 是同一个串");
+        assert_eq!(events[0].project_id, "");
+        assert_eq!(events[0].total, 0, "失败轮的轮级计数是 0，不是上一轮的残留");
+        assert!(shared.summary.lock().unwrap().is_none(), "失败轮不该留下半截摘要");
+        assert_eq!(shared.last_error.lock().unwrap().as_deref(), Some("[db_open_failed] 打不开库"),
+            "Task 10 的 IPC 全靠这一条才分得清「从没跑过」和「跑挂了」");
+    }
 }
 ```
 
@@ -2831,6 +2898,8 @@ mod tests {
 
 Run: `cd src-tauri && cargo test --lib index_job`
 Expected: `unresolved module or crate` / `cannot find function run_pass`
+
+**这条 Expected 只对「第一次落地」成立。** 修复轮里 `run_pass`/`targets` 早已入库，RED 只会命中本轮新引入的符号 —— 控制方实测：修复轮 2 的 RED 只有 1 条 `error[E0433]: cannot find type RunningGuard`（实现者如实回报、没去补桩凑文案）。**修复轮 3 更特殊：它只往既有的 `terminal`/`report_failure` 上加两条测试，实现早已存在，所以 Step 2 根本不会红。** 控制方实测：把这两条测试直接插到 `a9ed008` 的实现上就是 `9 passed`。这一轮的 TDD 证据不在 RED，而在 Step 4 的变异 8 与 9（改实现必红）—— 照实回报 Step 2 的输出即可，**不要为了让文案对上预告去补桩、改断言，或先删实现再跑一次假装红**。
 
 - [ ] **Step 3: 写实现**
 
@@ -2840,7 +2909,8 @@ Expected: `unresolved module or crate` / `cannot find function run_pass`
 //! - `start` 把回调换成 Tauri 事件，并负责 running/cancel 两个标志的生命周期（`RunningGuard`
 //!   的 Drop 复位、`spawn` 起不来时返回错误而不是 panic）。它的线程体不在本任务的测试范围里
 //!   （要 `AppHandle`），正确性由 Task 12 的真机验证承担 —— 别在这里写只能证明 mock 的测试；
-//!   但 `RunningGuard` 的复位语义是可测的，`running_flag_is_released_even_when_the_job_panics` 钉它。
+//!   但 `start` 里抽出来的 helper 都不要 `AppHandle`，各自有直接单测：`RunningGuard` 的复位语义、
+//!   `terminal` 的跨项目求和、`report_failure` 的「留原因 + 发一条 error 事件 + 冲掉旧摘要」。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -3227,23 +3297,25 @@ pub fn start(
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_job`
-Expected: `7 passed`；全量 → `94 passed; 0 failed`
+Expected: `9 passed`；全量 → `96 passed; 0 failed`
 
-`cancel_stops_the_pass_early` 若一次跑完（`done == 60`），原因是第一次回调就置位、而检查点在下一轮开头 —— 断言 `done < 60` 应当成立。若始终不成立，先确认 `PROGRESS_EVERY` 与回调时机，不要靠加 `sleep` 让它「看起来对」。（控制方探针实测：原版文本缺 `results.push(acc)` 时这条不是「跑完」而是**当场 panic** `index out of bounds: the len is 0 but the index is 0`；补上那行后全绿，`done` 落在 20 —— 那次实测时本模块是 5 条测试，修订后 7 条，这条断言本身没变。）
+`cancel_stops_the_pass_early` 若一次跑完（`done == 60`），原因是第一次回调就置位、而检查点在下一轮开头 —— 断言 `done < 60` 应当成立。若始终不成立，先确认 `PROGRESS_EVERY` 与回调时机，不要靠加 `sleep` 让它「看起来对」。（控制方探针实测：原版文本缺 `results.push(acc)` 时这条不是「跑完」而是**当场 panic** `index out of bounds: the len is 0 but the index is 0`；补上那行后全绿，`done` 实测落在 20。这条断言从第 1 版到现在一字未改。）
 
 **报告里要交的变异证据（每条只该红一条）**：
 
-以下 1–5 条控制方已在修订版夹具上逐条实测，红的那一条与文案都照抄：
+以下 1–5、8–9 条控制方都在**当前这版夹具（9 条测试）**上逐条实测过，红的那一条与文案照抄；跑法是「先 `cp` 备份 → 改 → `cargo test --lib index_job` → 用备份还原」，每条还原后再跑下一条。
 
 1. 删掉循环内取消分支的 `results.push(acc);` → 只有 `cancel_stops_the_pass_early` 红（panic 文案见上）。
 2. 删掉 `Ok(body) if body.trim().is_empty()` 那一臂（让空白正文重新走 `Ok`）→ 只有 `run_pass_indexes_a_generated_tree_and_separates_outcomes` 红，且**先红在 `ok` 计数**（测试里 `ok` 的断言排在 `skipped` 前，实测文案 `left: 3 / right: 2`；`skipped` 同时从 2 变 1，只是轮不到报）。这条变异的**第二半**：同一处改动下 `cargo clippy --lib -- -D warnings` 以 101 退出，报 `variant \`Empty\` is never constructed`（`index_store.rs:22`）。这就是为什么 `Empty` 臂必须落在生产分支里 —— 删了枚举级豁免后，没有生产构造点它就不干净。
-3. 删掉 `if rebuild && !root_missing { clear_project(conn, &target.project_id)?; }` 整块 → 实测 `6 passed; 1 failed`，只红 `rebuild_rewrites_everything_and_leaves_no_stale_tokens`，文案 `旧正文要跟着清掉 / left: 1 / right: 0`。**这条是修复轮补出来的**：原版用例只准备一个文件、两轮之间路径不变，而 `write_doc` 是 `ON CONFLICT (project_id,path) DO UPDATE` + 按 rowid 先删 FTS 再插，旧正文本来就被子替换 —— 所以原版这处变异 **5 条全绿**（实现者实测），`clear_project` 在 `run_pass` 里零承重。夹具后来加的「第一趟在库里、第二趟磁盘上没了」那个文件才是它唯一能被测到的场景，同时补了正面照控和 `doc_rows` 的行数断言。
-4. 删掉 `acc.capped = outcome.capped;` 那行 → 实测 `6 passed; 1 failed`，只红 `capped_and_scanned_total_survive_the_quota`（`assert!(r.capped, …)`）。
-5. 把 `RunningGuard` 的 `Drop` 里那句 `running.store(false, …)` 注释掉 → 实测 `6 passed; 1 failed`，只红 `running_flag_is_released_even_when_the_job_panics`。**不要**改成靠 `impl Drop` 之外别的地方复位来「更方便」：这条用例存在的唯一理由就是「一次 panic 把 `running` 永久留在 true，界面上再也起不动第二轮」。
+3. 删掉 `if rebuild && !root_missing { clear_project(conn, &target.project_id)?; }` 整块 → 实测 `8 passed; 1 failed`，只红 `rebuild_rewrites_everything_and_leaves_no_stale_tokens`，文案 `旧正文要跟着清掉 / left: 1 / right: 0`。**这条是修复轮补出来的**：原版用例只准备一个文件、两轮之间路径不变，而 `write_doc` 是 `ON CONFLICT (project_id,path) DO UPDATE` + 按 rowid 先删 FTS 再插，旧正文本来就被子替换 —— 所以原版这处变异 **5 条全绿**（实现者实测），`clear_project` 在 `run_pass` 里零承重。夹具后来加的「第一趟在库里、第二趟磁盘上没了」那个文件才是它唯一能被测到的场景，同时补了正面照控和 `doc_rows` 的行数断言。
+4. 删掉 `acc.capped = outcome.capped;` 那行 → 实测 `8 passed; 1 failed`，只红 `capped_and_scanned_total_survive_the_quota`（`assert!(r.capped, …)`）。
+5. 把 `RunningGuard` 的 `Drop` 里那句 `running.store(false, …)` 注释掉 → 实测 `8 passed; 1 failed`，只红 `running_flag_is_released_even_when_the_job_panics`。**不要**改成靠 `impl Drop` 之外别的地方复位来「更方便」：这条用例存在的唯一理由就是「一次 panic 把 `running` 永久留在 true，界面上再也起不动第二轮」。
+8. 把 `terminal` 里的 `total: sum(|r| r.scanned_total),` 换成 `total: sum(|r| r.done_total()),` → 实测 `8 passed; 1 failed`，只红 `terminal_event_sums_scanned_and_done_separately`（`total` 变 17、期望 19）。**这就是测试里两个项目的 `scanned_total` 之和（19）必须不同于 `done_total()` 之和（17）的原因** —— 两个数一样时这条变异照样绿。
+9. 删掉 `report_failure` 里写 `last_error` 的那个 `if let Ok(mut g)` 块 → 实测 `8 passed; 1 failed`，只红 `report_failure_leaves_a_reason_and_emits_one_error_event`。**这条是修复轮 2 复审抓出来的缺口**：Important 2 的修复（失败要留下可读原因）当时在测试层面零守护 —— `start` 的线程体要 `AppHandle` 测不到，但 `report_failure` 收的是 `&IndexShared` + 一个 `FnMut`，**不需要** `AppHandle`，所以三件事（写原因、发且只发一条 error 事件、冲掉上一轮摘要）全部可以直接钉住。
 
 已登记的**不可检测项**（控制方实测过，别浪费时间去「修好它」）：
 
-6. 把 `} else if !rebuild` 改成 `} else if true` → 实测 **7 条全绿**。原因写在 rebuild 用例的注释里：rebuild 趟开头 `clear_project` 已删光该项目的行，`current_rowid` 必然回 None，所以这个短路在 rebuild 趟里不可观测；而增量趟里 `!rebuild` 恒真，去掉它同样没有可观测差别。它和第 3 条覆盖的是同一段风险，第 3 条已经能红，所以这里不额外造夹具。
+6. 把 `} else if !rebuild` 改成 `} else if true` → 实测 **9 条全绿**（在 7 条测试的那版上也同样全绿）。原因写在 rebuild 用例的注释里：rebuild 趟开头 `clear_project` 已删光该项目的行，`current_rowid` 必然回 None，所以这个短路在 rebuild 趟里不可观测；而增量趟里 `!rebuild` 恒真，去掉它同样没有可观测差别。它和第 3 条覆盖的是同一段风险，第 3 条已经能红，所以这里不额外造夹具。
 
 可选加测（控制方未跑，实现者若跑请交红绿两次的输出）：
 
@@ -3261,7 +3333,9 @@ grep -c "allow(dead_code)" src/extract.rs       # 期望 1（supported_exts，ca
 grep -c "allow(dead_code)" src/index_job.rs     # 期望 2（start、IndexShared::new）
 ```
 
-四道数字全对上再提交。**`git add` 必须带上那三个被收掉豁免的文件** —— 原版只列了 `index_job.rs` 与 `lib.rs`，那样会把 7 行豁免删除留在工作树里不入库，提交后的树上 `grep -c` 与计划对不上（Task 8 犯过同一条，已修过一次）：
+四道数字全对上再提交（**修复轮里这四道数字不变**：测试在 `#[cfg(test)]` 下，不影响不带 `--all-targets` 的可达性判定；控制方在 9 条测试的版本上复核过仍是 3 / 0 / 1 / 2）。**`git add` 必须带上那三个被收掉豁免的文件** —— 原版只列了 `index_job.rs` 与 `lib.rs`，那样会把 7 行豁免删除留在工作树里不入库，提交后的树上 `grep -c` 与计划对不上（Task 8 犯过同一条，已修过一次）。
+
+**修复轮的提交范围与前缀**：上面那份 `git add` 清单是「首次落地」的清单。修复轮里其它文件零 diff 时**只加真正改过的那个文件**，用 `git status --short` 自己确认，别照着五文件清单敲（控制方实测：`a9ed008` 只含 `index_job.rs`）。提交前缀按轮次性质写：新增能力用 `feat:`，收评审意见用 `fix:`，只加测试不动实现用 `test:`。下面那句是首次落地的原文，修复轮请照此改写，**不要 amend 已提交的轮次**。
 
 ```bash
 git add src-tauri/src/index_job.rs src-tauri/src/lib.rs \
@@ -3750,7 +3824,7 @@ index_docs_fts      FTS5 虚表：name_tokens + body_tokens，tokenize=unicode61
 
 `docs/开发进度.md` 新增 `## M3 验收证据`，按 M2 那节的格式写全：
 
-- `cargo test --lib`：`94 passed; 0 failed`，按模块拆一行（`db` / `project` / `ledger` / `vault` / `search` / `tokenize` / `extract` / `index_scan` / `index_store` / `index_job` 各几条，数字从实际输出抄，不要推算）。
+- `cargo test --lib`：`96 passed; 0 failed`（Task 9 落地后的基线，按模块拆一行核对；若在 Task 10/11 期间数字变了，以实跑为准并把差异写进报告，不要为了对上 96 去动测试），按模块拆一行（`db` / `project` / `ledger` / `vault` / `search` / `tokenize` / `extract` / `index_scan` / `index_store` / `index_job` 各几条，数字从实际输出抄，不要推算）。
 - `cargo clippy --lib --all-targets -- -D warnings` 结果。
 - `npm run build` 的模块数与耗时。
 - Step 3 的逐条真机断言结果（只写「几条命中 / matchedBy 是什么 / 布尔值」，不抄正文）。
