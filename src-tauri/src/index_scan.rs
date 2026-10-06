@@ -103,12 +103,16 @@ pub fn scan_root(root: &Path, opts: &ScanOptions) -> ScanOutcome {
             }
             Ok(entry) => {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if entry.file_type().is_dir()
+                if entry.depth() > 0
+                    && entry.file_type().is_dir()
                     && opts.exclude_dirs.iter().any(|d| d.eq_ignore_ascii_case(&name))
                 {
                     it.skip_current_dir();
                     continue;
                 }
+                // `entry.depth() > 0` 不是可有可无的：少了它，用户把项目根指到一个真名叫
+                // `build`/`dist`/`target` 的目录时，根会在 depth 0 被剪掉，得到「0 个文件、
+                // 0 条错误、没有触顶标记」的静默空索引 —— 正是 capped 这条要求要防的那类。
                 if !entry.file_type().is_file() {
                     continue;
                 }
@@ -116,15 +120,18 @@ pub fn scan_root(root: &Path, opts: &ScanOptions) -> ScanOutcome {
                     continue;
                 };
                 if kind_of(&scanned.ext).is_none() {
-                    continue; // 未支持类型不建行，见测试里的说明
+                    continue; // 未支持类型不建行，也不占配额，见测试里的说明
+                }
+                // 配额必须打在「分大小两桶之前」：超限文件同样会各落一行 skipped，同样撑表。
+                // 放在 oversize 分支之后，上限对「全是超限大文件的项目」根本不生效 ——
+                // 走完整棵树、在内存里攒几十万个 ScannedFile，Task 7 还要逐条落 too_large 行。
+                if (out.files.len() as i64) + (out.over_size.len() as i64) >= opts.max_files_per_project {
+                    out.capped = true;
+                    break; // 触顶即停：剩下的文件不进清单，也没有行，由作业摘要点名项目
                 }
                 if scanned.size > opts.max_file_bytes {
                     out.over_size.push(scanned);
                     continue;
-                }
-                if (out.files.len() as i64) + (out.over_size.len() as i64) >= opts.max_files_per_project {
-                    out.capped = true;
-                    break; // 触顶即停：剩下的文件不进清单，也没有行，由作业摘要点名项目
                 }
                 out.files.push(scanned);
             }
@@ -185,6 +192,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         tree(dir.path());
         let out = scan_root(dir.path(), &opts(&[]));
+        assert!(!out.files.is_empty(), "整棵树什么都没扫出来时，下面那条 all() 是空转的真");
         assert!(out.files.iter().all(|f| f.ext != "png" && f.ext != "zip"), "{:?}",
             out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
     }
@@ -213,6 +221,41 @@ mod tests {
         let out = scan_root(dir.path(), &o);
         assert_eq!(out.files.len(), 10, "触顶后不该继续收：{}", out.files.len());
         assert!(out.capped, "触顶必须显式标记，否则用户以为项目就这么点文件");
+    }
+
+    /// 配额要盖住超限那一桶：一个「全是 30 万个超限大文件」的项目，按原顺序走，上限根本不生效
+    /// —— 走完整棵树、在内存里攒几十万个 ScannedFile，Task 7 还要逐条落 too_large 行。
+    /// 这条断的是两桶之和的总量，所以 `files`/`over_size` 各自几条不重要，重要的是不许超过 cap。
+    #[test]
+    fn oversize_files_consume_the_per_project_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..12 {
+            touch(dir.path(), &format!("图纸/图{i}.txt"), &[b'a'; 10]);
+        }
+        let mut o = opts(&[]);
+        o.max_file_bytes = 5; // 12 个文件全部超限
+        o.max_files_per_project = 10;
+        let out = scan_root(dir.path(), &o);
+        assert!(out.files.is_empty(), "全部超限不该有可抽取行：{}", out.files.len());
+        assert_eq!(out.over_size.len(), 10, "超限行也要撞配额就停：收了 {}", out.over_size.len());
+        assert!(out.capped, "只有超限文件的项目触顶同样要标记");
+    }
+
+    /// 根目录自己的名字命中排除清单时不许剪掉整棵树：少掉 `entry.depth() > 0` 会得到
+    /// 「0 个文件、0 条 walk_errors、capped=false」的静默空索引，用户完全看不出原因。
+    #[test]
+    fn a_root_named_like_an_excluded_dir_is_still_scanned() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("build"); // 用户把项目根指到了一个名叫 build 的目录
+        touch(&root, "交付/验收说明.docx", b"x");
+        let out = scan_root(&root, &opts(&["node_modules", "dist", "build"]));
+        assert_eq!(
+            out.files.iter().map(|f| f.file_name.as_str()).collect::<Vec<_>>(),
+            vec!["验收说明.docx"],
+            "根目录名不该在 depth 0 触发剪枝：walk_errors={:?}",
+            out.walk_errors
+        );
+        assert!(!out.capped);
     }
 
     /// 根目录不存在（移动盘没挂载）是常态：回 walk_errors，不 panic、不返回 Err。
