@@ -92,7 +92,7 @@
 - `src/router.tsx`、`src/components/app-shell.tsx` — 新路由与导航项。
 - `docs/技术方案.md`、`docs/开发进度.md` — 收口。
 
-测试基线：**动手前 `cargo test --lib` = 41 passed**（本轮已实测：`grep -c "#\[test\]"` 各模块 4+12+7+9+9 = 41，与实跑一致；临时探针已全部删除）。每个任务的 Expected 数字都从这条链往上加，最后到 **85**（+4 +5 +4 +4 +5 +5 +6 +6 +5 = 44 条新测试；Task 10/11/12 不新增 Rust 测试）。
+测试基线：**动手前 `cargo test --lib` = 41 passed**（本轮已实测：`grep -c "#\[test\]"` 各模块 4+12+7+9+9 = 41，与实跑一致；临时探针已全部删除）。每个任务的 Expected 数字都从这条链往上加，最后到 **88**（+4 +5 +4 +4 +5 +8 +6 +6 +5 = 47 条新测试；Task 10/11/12 不新增 Rust 测试）。
 
 ---
 
@@ -1377,7 +1377,7 @@ git commit -m "feat: M3 PDF 抽取与扩展名分派入口，附真中文 PDF fi
 - Test: 同文件 `mod tests`
 
 **Interfaces:**
-- Consumes: `walkdir::WalkDir`（**没有 `WalkBuilder`**，事实 20）、`crate::extract::kind_of`、`rusqlite::Connection`（读 `settings`）。只 `use kind_of`：`supported_exts` 不进本任务的代码，写成 `use crate::extract::{kind_of, supported_exts};` 会撞 `unused_imports`（它的 caller 在 Task 10）。
+- Consumes: `walkdir::WalkDir`（**没有 `WalkBuilder`**，事实 20）、`crate::extract::kind_of`、`rusqlite::Connection`（读 `settings`，区分「无行」与「查询失败」要用 `rusqlite::OptionalExtension`）、`crate::error::AppResult`（`From<rusqlite::Error>` 已经把库错误映射成码 `db_failed`，见 `error.rs:42-50`，不要另造错误码）。只 `use kind_of`：`supported_exts` 不进本任务的代码，写成 `use crate::extract::{kind_of, supported_exts};` 会撞 `unused_imports`（它的 caller 在 Task 10）。
 - Produces:
   - `pub struct ScanOptions { pub exclude_dirs: Vec<String>, pub max_file_bytes: u64, pub max_files_per_project: i64 }`
   - `impl ScanOptions { pub fn load(conn: &Connection) -> AppResult<ScanOptions> }`
@@ -1385,7 +1385,20 @@ git commit -m "feat: M3 PDF 抽取与扩展名分派入口，附真中文 PDF fi
   - `pub struct ScanOutcome { pub files: Vec<ScannedFile>, pub over_size: Vec<ScannedFile>, pub walk_errors: Vec<String>, pub capped: bool }`
   - `pub fn scan_root(root: &Path, opts: &ScanOptions) -> ScanOutcome`
 
-- [ ] **Step 1: 写失败测试（5 条）**
+**派发前必须做的死代码账**（控制方已用一次性探针实测，探针文件与 `lib.rs` 的 `mod _probe;` 均已删净；实现者照下面的结论落，不要重新发明）：
+
+探针形态：`src-tauri/src/lib.rs` 里用 `mod index_scan;`（**私有模块**，沿用现有 8 条 `mod` 的写法，不要为了绕 lint 改成 `pub mod`），把 Step 3 的实现原文放进去、不带 `mod tests`，跑 `cargo check --lib`。
+
+- **事实 A** —— 一条豁免都不加时报 6 条：`ScanOptions`/`ScannedFile`/`ScanOutcome` 三个 `struct is never constructed`，加 `ScanOptions::load`、`scan_root` 两条 `never used`，再加 `to_scanned`。
+- **事实 B** —— 只给 `scan_root` 加 `#[allow(dead_code)]`，`to_scanned` 与三个 struct 的告警**全部消失**。豁免项自己就是可达根，下游不逐个加（Task 5 记过同一条规律，本模块再验一次）。
+- **事实 C** —— 同一次探针新报 `fields `path`, `file_name`, and `mtime` are never read`（挂在 `ScannedFile`，探针行号 37）。本模块只读 `ext` 与 `size`，那三条要等 Task 7 的 `write_doc`（`file.path` / `index_text(&file.file_name)` / `file.mtime` 都在它的 INSERT 里）。
+- **事实 D** —— `ScanOutcome` 的四个字段**都不报**，包括只赋值不收的 `capped`。计划先前那条「assign-only 字段算不算未读」的待实测项到此有答案：**不算**，别给它加豁免。
+- **结论**：本模块要落的豁免共 3 个位置（`scan_root`、`ScanOptions::load` 各一条，caller 在 Task 9；`ScannedFile` 的 `path`/`file_name`/`mtime` 三条字段级，Task 7 落地时删）。用字段级而不是 struct 级，是因为 `ext`/`size` 现在真的被读，struct 级豁免会把它们一起罩住，Task 7 若漏读就没人报警。
+- **探针顺带证伪了两条预检判断**：`unnecessary_wraps` **不会**打在计划原来那版只回 `Ok` 的 `load` 上，`while_let_on_iterator` **不会**打在 `while let Some(entry) = it.next()` 上。本模块只有 dead_code 这一类闸要过。
+- **`load` 仍要改写，理由不是 lint**（控制方裁定）：原文 `unwrap_or_else(|_| default.to_owned())` 把「库读失败」和「设置行不存在」压成同一条路径，坏库/锁库时静默按 20 MB 与 50000 跑完整轮，用户看不到任何信号 —— 与本仓库对 `journal_mode` 的处理是同一条红线：能区分就必须区分。改法见 Step 3，钉住它的是 `settings_query_failure_propagates_instead_of_defaulting`。控制方实测：新版三条测试全绿、两道 clippy 闸 exit 0；把 `get` 改回吞错误的写法，该测试立刻红在 `called `Result::unwrap_err()` on an `Ok` value: ScanOptions { ..., max_file_bytes: 20971520, ... }`。
+- **不要顺手把「数字解析失败」也改成 Err**：M3 没有任何写这三行的入口（Task 11 只读展示），做成 Err 要连 Task 10/11 的设置写入口与校验一起动，超出本任务范围。保留 `unwrap_or` 默认值，并在注释里写明这是有意为之。
+
+- [ ] **Step 1: 写失败测试（8 条）**
 
 ```rust
 #[cfg(test)]
@@ -1477,6 +1490,45 @@ mod tests {
         assert!(out.files.is_empty());
         assert!(!out.walk_errors.is_empty(), "不可达根目录要留下痕迹：{:?}", out.walk_errors);
     }
+
+    /// 上限要真的能从 settings 改出来，这条同时钉住三件事：键名没写错、逗号的 trim 与空段处理、
+    /// 数字解析。种子值和 spec 默认值字节相同，所以「读回种子值等于默认值」那种写法守不住键名笔误
+    /// —— 键名写错了照样退默认值、照样绿，所以这里先把值改成与默认值不同再断言。
+    #[test]
+    fn load_reads_the_settings_rows_not_the_hardcoded_defaults() {
+        let conn = crate::db::open_in_memory().unwrap();
+        conn.execute("UPDATE settings SET value = '12345' WHERE key = 'index_max_file_bytes'", [])
+            .unwrap();
+        conn.execute("UPDATE settings SET value = '7' WHERE key = 'index_max_files_per_project'", [])
+            .unwrap();
+        conn.execute("UPDATE settings SET value = 'x, y,,cache' WHERE key = 'index_exclude_dirs'", [])
+            .unwrap();
+        let o = ScanOptions::load(&conn).unwrap();
+        assert_eq!(o.max_file_bytes, 12345);
+        assert_eq!(o.max_files_per_project, 7);
+        assert_eq!(o.exclude_dirs, vec!["x".to_owned(), "y".to_owned(), "cache".to_owned()]);
+    }
+
+    /// 行缺失（老库没跑过 v4 的迁移、或用户手动删过）才退 spec 默认值。
+    #[test]
+    fn missing_setting_row_falls_back_to_spec_default() {
+        let conn = crate::db::open_in_memory().unwrap();
+        conn.execute("DELETE FROM settings WHERE key = 'index_max_file_bytes'", [])
+            .unwrap();
+        let o = ScanOptions::load(&conn).unwrap();
+        assert_eq!(o.max_file_bytes, 20_971_520, "只有「无行」这一种情况该退默认值");
+    }
+
+    /// 与上一条配对：查询本身失败（库损坏、被锁、表不在）绝不能退默认值，必须把 Err 交回上层。
+    /// 少这条，谁把 load 改回 unwrap_or_else(|_| default) 也不会有任何测试变红 —— 而表现是
+    /// 「上限悄悄按 20 MB 跑完一整轮」，正是本仓库在 journal_mode 上拒绝过的静默降级。
+    #[test]
+    fn settings_query_failure_propagates_instead_of_defaulting() {
+        let conn = crate::db::open_in_memory().unwrap();
+        conn.execute("DROP TABLE settings", []).unwrap();
+        let e = ScanOptions::load(&conn).unwrap_err();
+        assert_eq!(e.code, "db_failed", "读库失败要沿用 error.rs 既有的库错误码：{}", e.message);
+    }
 }
 ```
 
@@ -1495,6 +1547,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+use crate::error::AppResult;
 use crate::extract::kind_of;
 
 #[derive(Debug, Clone)]
@@ -1505,30 +1558,45 @@ pub struct ScanOptions {
 }
 
 impl ScanOptions {
-    /// settings 缺失时退回 spec 的默认值；空字符串不当成「排除全部」也不当成「不排除」。
-    pub fn load(conn: &Connection) -> crate::error::AppResult<ScanOptions> {
-        let get = |key: &str, default: &str| -> String {
-            conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))
-                .unwrap_or_else(|_| default.to_owned())
+    /// 「设置行不存在」退回 spec 默认值；「查询失败」是另一回事，必须原样抛出去。
+    /// 两者都用 `unwrap_or_else` 吞掉的写法见过一次，坏库时会静默按 20 MB 上限跑完整轮。
+    #[allow(dead_code)] // caller 在 Task 9 的 index_job，落地时删掉本行
+    pub fn load(conn: &Connection) -> AppResult<ScanOptions> {
+        use rusqlite::OptionalExtension;
+        let get = |key: &str, default: &str| -> AppResult<String> {
+            let row: Option<String> = conn
+                .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0))
+                .optional()?;
+            Ok(row.unwrap_or_else(|| default.to_owned()))
         };
+        // 数字解析失败仍退默认值：M3 没有写这三行的入口（Task 11 只读展示），
+        // 要把它做成 Err 得连设置写入口与校验一起动，不在本任务范围。
+        let list = get("index_exclude_dirs", "node_modules,dist,build,target,__pycache__,.git")?;
+        let bytes = get("index_max_file_bytes", "20971520")?;
+        let cap = get("index_max_files_per_project", "50000")?;
         Ok(ScanOptions {
-            exclude_dirs: get("index_exclude_dirs", "node_modules,dist,build,target,__pycache__,.git")
+            exclude_dirs: list
                 .split(',')
                 .map(|s| s.trim().to_owned())
                 .filter(|s| !s.is_empty())
                 .collect(),
-            max_file_bytes: get("index_max_file_bytes", "20971520").parse().unwrap_or(20_971_520),
-            max_files_per_project: get("index_max_files_per_project", "50000").parse().unwrap_or(50_000),
+            max_file_bytes: bytes.parse().unwrap_or(20_971_520),
+            max_files_per_project: cap.parse().unwrap_or(50_000),
         })
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ScannedFile {
+    // 这三条要等 Task 7 的 write_doc 才读（file.path / index_text(&file.file_name) / file.mtime）。
+    // 用字段级而不是 struct 级豁免：ext 与 size 本模块真的在读，struct 级会把它们一起罩住。
+    #[allow(dead_code)] // reader 在 Task 7 的 write_doc，落地时删掉本行
     pub path: String,
+    #[allow(dead_code)] // reader 在 Task 7 的 write_doc，落地时删掉本行
     pub file_name: String,
     pub ext: String,
     pub size: u64,
+    #[allow(dead_code)] // reader 在 Task 7 的 write_doc，落地时删掉本行
     pub mtime: i64,
 }
 
@@ -1560,6 +1628,7 @@ fn to_scanned(entry: &walkdir::DirEntry) -> Option<ScannedFile> {
     })
 }
 
+#[allow(dead_code)] // caller 在 Task 9 的 index_job，落地时删掉本行
 pub fn scan_root(root: &Path, opts: &ScanOptions) -> ScanOutcome {
     let mut out = ScanOutcome::default();
     let mut it = walkdir::WalkDir::new(root)
@@ -1610,16 +1679,28 @@ pub fn scan_root(root: &Path, opts: &ScanOptions) -> ScanOutcome {
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_scan`
-Expected: `5 passed`；全量 → `68 passed; 0 failed`
+Expected: `8 passed`；全量 → `71 passed; 0 failed`
 
 `missing_root_is_reported_instead_of_panicking` 若拿不到 `walk_errors`（walkdir 对不存在的根只吐一条 IOErr，确实会进错误流），就检查是不是 `Z:/` 被解析成了别的形态；**不要**改成断言「空清单即通过」——那会放过「根目录不可达却静默」这个真实故障。
 
-- [ ] **Step 5: 提交**
+三条 `load` 测试都不该用 `unwrap_or` 之类的容错把它们变松：`settings_query_failure_propagates_instead_of_defaulting` 是本任务唯一守住「读库失败 ≠ 缺设置」这条区分的证据，报告里要给它一条变异取证（把 `get` 改回 `unwrap_or_else(|_| default.to_owned())`，确认它红、并抄下 panic 文案）。
+
+- [ ] **Step 5: 跑两道 clippy 闸**
+
+```bash
+cd src-tauri && cargo clippy --lib -- -D warnings && cargo clippy --lib --all-targets -- -D warnings
+```
+
+Expected: 两道都 exit 0。`--lib` 那道专门验本模块的死代码账：漏加 `scan_root`/`load` 任一条豁免就当场红；给 `ScanOutcome`（含 `capped`）或给 struct `ScannedFile` 整体加豁免**不会**红，但那是把 `ext`/`size` 一起罩住的过度豁免，按上面的账删到只剩字段级三条。
+
+- [ ] **Step 6: 提交**
 
 ```bash
 git add src-tauri/src/index_scan.rs src-tauri/src/lib.rs
 git commit -m "feat: M3 目录扫描：排除规则剪枝、大小与项目上限、错误不中断"
 ```
+
+只 `git add` 这两个文件，**不要 `git add -A`**（工作区里可能有别的未跟踪产物）。
 
 ---
 
@@ -1632,6 +1713,7 @@ git commit -m "feat: M3 目录扫描：排除规则剪枝、大小与项目上�
 
 **Interfaces:**
 - Consumes: Task 1 的两张表、Task 2 的 `tokenize::index_text`、Task 6 的 `ScannedFile`、`uuid::Uuid`
+- **顺带收掉的豁免**：Task 6 在 `ScannedFile` 的 `path`/`file_name`/`mtime` 三条字段上各留了一条 `#[allow(dead_code)] // reader 在 Task 7 的 write_doc`。本任务的 `write_doc` 一旦真的读它们（`file.path`、`index_text(&file.file_name)`、`file.mtime`），把那三行删掉 —— 漏删不会红，只会变成永久豁免，所以 Step 的 clippy 闸之外要再跑一次 `grep -n "allow(dead_code)" src/index_scan.rs` 确认只剩 `scan_root` 与 `load` 两条（它们的 caller 在 Task 9）。
 - Produces:
   - `pub enum DocOutcome { Ok(String), Empty, Skipped(&'static str), Failed(String) }`（`Ok` 带正文，其它三种都不写 FTS 行）
   - `pub fn write_doc(conn: &Connection, project_id: &str, file: &ScannedFile, outcome: DocOutcome) -> AppResult<i64>` → 回 `doc_rowid`
@@ -1991,7 +2073,7 @@ pub fn list_docs(
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_store`
-Expected: `6 passed`；全量 → `74 passed; 0 failed`
+Expected: `6 passed`；全量 → `77 passed; 0 failed`
 
 - [ ] **Step 5: 提交**
 
@@ -2210,7 +2292,7 @@ pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<Doc
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_store`
-Expected: `12 passed`（Task 7 的 6 + 本任务 6）；全量 → `80 passed; 0 failed`
+Expected: `12 passed`（Task 7 的 6 + 本任务 6）；全量 → `83 passed; 0 failed`
 
 若 `fts5_syntax...` 里 `hits(&c, "*")` 报错而不是空，说明 `query_expression("*", false)` 回了 `Some`——事实 8 要求纯标点被过滤后回 `None`；回到 Task 2 修过滤器，**不要**在这里加特判。
 
@@ -2233,9 +2315,9 @@ git commit -m "feat: M3 两段全文检索并钉住密文不进索引的验收"
 **Interfaces:**
 - Consumes: `index_scan::{ScanOptions, scan_root}`、`extract::extract_text`、`index_store::{write_doc, current_rowid, clear_project, DocOutcome}`、`db::open`、`tauri::Emitter`、`std::sync::atomic::{AtomicBool, Ordering}`
   - `extract_text` 的 `Err` 实际有**三个**码名，不是两个：`extract_unsupported`、`extract_failed`，加上 `AppError::io` 带来的 `fs_failed`（读文件本身失败，典型是扫描到抽取之间文件被删/被占用）。下面的 `match` 用「`extract_unsupported` 单列、其余一律 `Failed`」的写法，所以 `fs_failed` 会落进 `failed` 而不是 `missing` —— 这是有意的：`missing` 描述的是对账结论（库里有一行、磁盘上没有了），归 M5 的启动对账写，抽取这一轮不判它。别在 Task 9 里顺手把它改成 `missing`。
+- **顺带收掉的豁免**（`run_pass` 是这三个 `pub` 项的第一个非测试 caller）：`extract.rs` 里 `extract_text` 上面那条 `#[allow(dead_code)] // caller 在 Task 9`、`index_scan.rs` 里 `scan_root` 与 `ScanOptions::load` 上面各一条同形豁免，本任务落地时一并删掉。漏删不会红，只会变成永久豁免，所以 Step 里要跑 `grep -n "allow(dead_code)" src/extract.rs src/index_scan.rs` —— 期望结果：`extract.rs` 只剩 `supported_exts` 那一条（caller 在 Task 10），`index_scan.rs` 应该**一条都不剩**。
 - Produces:
   - `pub struct ScanTarget { pub project_id: String, pub project_name: String, pub root_path: String }`
-  - `pub fn targets(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<ScanTarget>>`
   - `pub struct Progress { pub state: &'static str, pub project_id: String, pub project_name: String, pub total: i64, pub done: i64, pub ok: i64, pub skipped: i64, pub failed: i64, pub current: String }`（camelCase Serialize）
   - `pub struct ProjectResult { pub project_id: String, pub project_name: String, pub scanned_total: i64, pub ok: i64, pub skipped: i64, pub failed: i64, pub unchanged: i64, pub walk_errors: i64, pub capped: bool, pub root_missing: bool }`
   - `pub struct RunSummary { pub state: &'static str, pub results: Vec<ProjectResult>, pub started_at: String, pub finished_at: String }`
@@ -2701,7 +2783,7 @@ pub fn start(
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_job`
-Expected: `5 passed`；全量 → `85 passed; 0 failed`
+Expected: `5 passed`；全量 → `88 passed; 0 failed`
 
 `cancel_stops_the_pass_early` 若一次跑完（`done == 60`），原因是第一次回调就置位、而检查点在下一轮开头 —— 断言 `done < 60` 应当成立。若始终不成立，先确认 `PROGRESS_EVERY` 与回调时机，不要靠加 `sleep` 让它「看起来对」。
 
@@ -3193,7 +3275,7 @@ index_docs_fts      FTS5 虚表：name_tokens + body_tokens，tokenize=unicode61
 
 `docs/开发进度.md` 新增 `## M3 验收证据`，按 M2 那节的格式写全：
 
-- `cargo test --lib`：`85 passed; 0 failed`，按模块拆一行（`db` / `project` / `ledger` / `vault` / `search` / `tokenize` / `extract` / `index_scan` / `index_store` / `index_job` 各几条，数字从实际输出抄，不要推算）。
+- `cargo test --lib`：`88 passed; 0 failed`，按模块拆一行（`db` / `project` / `ledger` / `vault` / `search` / `tokenize` / `extract` / `index_scan` / `index_store` / `index_job` 各几条，数字从实际输出抄，不要推算）。
 - `cargo clippy --lib --all-targets -- -D warnings` 结果。
 - `npm run build` 的模块数与耗时。
 - Step 3 的逐条真机断言结果（只写「几条命中 / matchedBy 是什么 / 布尔值」，不抄正文）。
