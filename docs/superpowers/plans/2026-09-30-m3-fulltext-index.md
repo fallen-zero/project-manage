@@ -1775,6 +1775,10 @@ git commit -m "feat: M3 目录扫描：排除规则剪枝、大小与项目上�
 - **裁定：本任务不产出 `delete_doc`**（控制方派发前核出的计划缺陷，理由是「豁免必须有落点」）。原 Interfaces 列了它，但整份计划里**没有任何生产调用点**：Task 9 的 `run_pass` 只用 `clear_project`/`current_rowid`/`write_doc`，Task 10 的 IPC 只 Consumes `doc_hits`/`list_docs`/`status_counts`；而「库里有一行、磁盘上没有了」的 `missing` 判定按 Task 9 Interfaces 的既有裁定归 M5 的启动对账。留着一个全 M3 无人调用的 `pub fn`，它的 `#[allow(dead_code)]` 就没有删掉的那天 —— 与本仓库对 `over_project_cap` 的裁定同形（宁可删掉宣称，不留假的可观测性）。代价：M5 落地对账时重新补这十行和一条测试。**「删主表不删虚表会留孤儿行」这条不变量不会因为少这个函数而失去守护** —— `clear_project` 走的是同一处两点删，测试照钉，且改成跨项目对照后它还多钉了一件事：清场不能顺手把别的项目清掉。
 - **按 Task 7 评审补的三处（评审 Important 1 + Minor 2/3/5，控制方裁定纳入本任务）**：
   ① `indexed_at` 原来**零断言**（`grep -n indexed_at` 只命中实现行）—— `CASE WHEN ?7 = 'ok'` 那支一旦和 `status` 的绑定漂移，7 条测试全绿而 Task 10 的清单里索引时间整列为空，正是本项目要消灭的「不报错、只是看不见」。改法不加第 8 条测试（不动聚合链）：在第 1 条里断 ok 行 `indexed_at.is_some()`，把第 3 条里 `C:/d.docx` 的三元组查询带上 `indexed_at` 并断 `None`。
+  复审把这条判为 ADDRESSED，同时指出**残余的一半**：`indexed_at = excluded.indexed_at`（DO UPDATE 那支）
+  当时仍无断言 —— 删掉它 7 条全绿，而 Task 9 真会走到「上次 skipped/failed、这次抽出正文」的重写路径，
+  结果是**一行可搜索却永远没有索引时间**的行，正是这条 finding 要防的形态。故第 3 条末尾追加一次
+  `C:/d.docx` 的 ok 重写并断 `indexed_at.is_some()`（仍不加第 8 条测试）。
   ② `status_counts` 补 `ORDER BY index_status`：返回型直接喂 Task 10 的 IPC，Group By 的默认顺序是实现细节，Task 11 的状态列表会跟着查询计划漂。测试用 `contains` 断言，不依赖顺序，加了不会红。
   ③ 模块 doc 补第 3 条不变量：本模块的写函数**自己开事务**，调用方不得再包一层（`unchecked_transaction()` 跳过重入检查，外层 `commit()` 会被内层提前触发）。Task 9 逐文件调 `write_doc`，这条写在接口上比等它运行时炸。
 - **顺带收掉的注释**：`index_scan.rs:49-50` 那两行「这三条要等 Task 7 的 `write_doc` 才读……用字段级而不是 struct 级豁免」描述的正是本轮删掉的三条豁免，改成过去式不如直接删（本仓库默认不写注释，这条 WHY 已不成立）。Files 清单已同步。
@@ -1905,6 +1909,12 @@ mod tests {
             .query_row("SELECT error_msg FROM index_docs WHERE path = 'C:/b.docx'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(err.as_deref(), Some("解包失败"));
+        // skipped 行重写成 ok：`indexed_at = excluded.indexed_at` 这一支必须真的把时间带进来。
+        write_doc(&c, "p1", &file("C:/d.docx"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        let upgraded: Option<String> = c
+            .query_row("SELECT indexed_at FROM index_docs WHERE path = 'C:/d.docx'", [], |r| r.get(0))
+            .unwrap();
+        assert!(upgraded.is_some(), "skipped 行重写成 ok 之后必须补上索引时间");
     }
 
     #[test]
@@ -2002,9 +2012,10 @@ Expected: `unresolved module`
 //!    出现已经不存在的文件。
 //! 2. 只有 `DocOutcome::Ok` 会往虚表写东西。skipped/failed 只留状态行 —— 「为什么搜不到」
 //!    的答案在行上，不在正文里，也就不该出现在搜索结果里。
-//! 3. 本模块每个写函数**自己开事务**（`unchecked_transaction()` 跳过重入检查，调用方再包一层
-//!    会让内层 `commit()` 提前提交外层事务）。Task 9 的 `run_pass` 逐文件调 `write_doc`，
-//!    不要在外面套事务，也不要指望「一轮一个事务」的提速。
+//! 3. 本模块每个写函数**自己开事务**（`unchecked_transaction()` 直接下 `BEGIN DEFERRED`，
+//!    rusqlite 0.40.2 里没有重入检查，所以调用方再包一层会让内层 `BEGIN` 当场失败：
+//!    `cannot start a transaction within a transaction` → `db_failed`）。Task 9 的 `run_pass`
+//!    逐文件调 `write_doc`，不要在外面套事务，也不要指望「一轮一个事务」的提速。
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
