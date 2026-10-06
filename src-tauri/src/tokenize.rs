@@ -39,7 +39,6 @@ pub fn index_text(text: &str) -> String {
 ///
 /// 前缀查询的关键约束：`*` 必须写在引号外面。`"维保"*` 能命中索引里的「维保期」，
 /// `"维保*"` 里的 `*` 只是词内一个字面字符，永远命不中。
-#[allow(dead_code)] // 同 index_text：Task 8 的 doc_hits 才把这段表达式喂给 MATCH
 pub fn query_expression(query: &str, prefix: bool) -> Option<String> {
     let terms: Vec<String> = jieba()
         .cut(query, true)
@@ -77,7 +76,6 @@ pub(crate) fn is_cjk(c: char) -> bool {
 /// `snippet()` 回的是我们插入空格连接起来的词条串，直接展示会读成「甲 方 要 求」。
 /// 规则只有一条：空格相邻任一侧是 CJK 就删掉。Latin 之间的空格原样保留，
 /// 数字与中文之间也删（「800 毫秒」→「800毫秒」）。省略号 `⋯` 两侧不带空格，故不受影响。
-#[allow(dead_code)] // 同 index_text：Task 8 用它清洗 snippet() 出来的摘要
 pub fn clean_snippet(raw: &str) -> String {
     let chars: Vec<char> = raw.chars().collect();
     let mut out = String::with_capacity(raw.len());

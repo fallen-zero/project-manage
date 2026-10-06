@@ -12,9 +12,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::index_scan::ScannedFile;
-use crate::tokenize::index_text;
+use crate::tokenize::{index_text, query_expression};
 
 /// `Ok(String)` 携带抽取到的正文，交给这里决定要不要落 FTS。
 #[allow(dead_code)] // 构造点在 Task 9 的 index_job；本任务只有测试构造它，落地时删掉本行
@@ -186,6 +186,76 @@ pub fn list_docs(
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocHit {
+    pub doc_id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub path: String,
+    /// 已按 `clean_snippet` 收回 CJK 空格的摘要，命中词用 [ ] 包住
+    pub snippet: String,
+    /// exact | prefix：放宽过的命中要能被界面标出来，否则用户会以为是 bug
+    pub matched_by: &'static str,
+    pub score: f64,
+}
+
+const SELECT_SQL: &str = "SELECT d.id, d.project_id, p.name, d.path,
+       snippet(index_docs_fts, 1, '[', ']', '⋯', 12), bm25(index_docs_fts)
+  FROM index_docs_fts f
+  JOIN index_docs d   ON d.doc_rowid = f.rowid
+  JOIN projects p    ON p.id = d.project_id
+ WHERE index_docs_fts MATCH ?1
+   AND d.index_status = 'ok'
+   AND p.deleted_at IS NULL
+ ORDER BY bm25(index_docs_fts)
+ LIMIT ?2";
+
+fn run_select(conn: &Connection, expr: &str, limit: i64, matched_by: &'static str) -> AppResult<Vec<DocHit>> {
+    let mut stmt = conn.prepare(SELECT_SQL)?;
+    let rows = stmt.query_map(params![expr, limit], |r| {
+        Ok(DocHit {
+            doc_id: r.get(0)?,
+            project_id: r.get(1)?,
+            project_name: r.get(2)?,
+            path: r.get(3)?,
+            snippet: crate::tokenize::clean_snippet(&r.get::<_, String>(4)?),
+            score: r.get(5)?,
+            matched_by,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// 两段式（中文分词检索的核心取舍）：第一段「精确」要求词形完全一致，结果最准；
+/// 第二段「前缀」只在 0 命中时放宽成 `"维保"*`，把被切成「维保期」这种长词的情况捞回来。
+/// 只做第一段会表现为「功能没坏但搜不到」，直接只做第二段则精度差。
+/// 两段用同一个 `query_expression`，即同一套预处理，见 tokenize.rs 的头注释。
+#[allow(dead_code)] // caller 在 Task 10 的检索 IPC，落地时删掉本行
+pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<DocHit>> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    if q.chars().count() > 128 {
+        return Err(AppError::new(
+            "invalid_input",
+            "正文检索关键词过长",
+            Some("请用短词搜正文；要找某个具体文件，去 /index 页按项目翻清单"),
+        ));
+    }
+    if let Some(expr) = query_expression(q, false) {
+        let hits = run_select(conn, &expr, limit, "exact")?;
+        if !hits.is_empty() {
+            return Ok(hits);
+        }
+        if let Some(loose) = query_expression(q, true) {
+            return run_select(conn, &loose, limit, "prefix");
+        }
+    }
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
@@ -397,5 +467,113 @@ mod tests {
         write_doc(&c, "p1", &g, DocOutcome::Failed("解包失败".into())).unwrap();
         assert_eq!(current_rowid(&c, "p1", &g.path, g.size as i64, g.mtime).unwrap(), None,
             "上次失败的行必须重试");
+    }
+
+    /// 摘要 + 得分 + 命中来源，是 M4 首屏结果页要直接渲染的东西。
+    fn hits(conn: &Connection, q: &str) -> Vec<DocHit> {
+        doc_hits(conn, q, 50).unwrap()
+    }
+
+    fn seeded_with_docs() -> Connection {
+        let c = conn();
+        seed_project(&c, "p1");
+        write_doc(&c, "p1", &file("C:/x/合同验收说明.docx"), DocOutcome::Ok("甲方要求验收指标见合同附件".into())).unwrap();
+        write_doc(&c, "p1", &file("C:/x/维保期说明.docx"), DocOutcome::Ok("维保期为十二个月".into())).unwrap();
+        write_doc(&c, "p1", &file("C:/x/报价单.xlsx"), DocOutcome::Ok("里面只有付款条件与验收流程".into())).unwrap();
+        c
+    }
+
+    #[test]
+    fn chinese_word_hits_body_and_name_with_a_readable_snippet() {
+        let c = seeded_with_docs();
+        let got = hits(&c, "验收");
+        assert_eq!(got.len(), 2, "{:?}", got.iter().map(|h| &h.path).collect::<Vec<_>>());
+        assert!(got.iter().all(|h| h.matched_by == "exact"), "精确段就该命中：{:?}", got.iter().map(|h| h.matched_by).collect::<Vec<_>>());
+        let hit = &got[0];
+        assert_eq!(hit.project_name, "政务云迁移", "结果要带项目名，供 M4 分组");
+        assert!(hit.snippet.contains('[') && hit.snippet.contains(']'), "摘要要标出命中词：{}", hit.snippet);
+        assert!(!hit.snippet.contains(" 甲 方"), "摘要不该是散开的字：{}", hit.snippet);
+    }
+
+    /// 事实 5：复合词的子词查询靠 cut_for_search 才能命中。
+    #[test]
+    fn compound_and_subword_queries_hit() {
+        let c = seeded_with_docs();
+        assert_eq!(hits(&c, "付款条件").len(), 1);
+        assert_eq!(hits(&c, "付款 条件").len(), 1, "子词没进索引的话这条会空");
+        assert_eq!(hits(&c, "合同附件").len(), 1);
+    }
+
+    /// 事实 6：「维保」在库里是「维保期」的一部分，精确段够不着，必须落到前缀段。
+    #[test]
+    fn prefix_stage_reports_itself_so_the_ui_can_explain_the_looser_match() {
+        let c = seeded_with_docs();
+        let got = hits(&c, "维保");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].matched_by, "prefix", "放宽过的命中要能说清：{:?}", got[0]);
+        assert!(got[0].path.contains("维保期说明"), "夹具名见事实 6 的夹具限制");
+    }
+
+    #[test]
+    fn fts5_syntax_in_the_query_cannot_widen_the_result_set() {
+        let c = seeded_with_docs();
+        // 语法词被引号包成普通词：这三条都应该是 0 或窄结果，绝不等于「全表命中」。
+        assert!(hits(&c, "验收 OR 报价").is_empty(), "OR 只是普通字符，整条要求两词都在");
+        assert!(hits(&c, "*").is_empty(), "单星号不该等于全表命中");
+        assert!(hits(&c, "NEAR(验收 报价)").is_empty());
+        assert_eq!(hits(&c, "验收").len(), 2, "对照组：同一库上正常查询是有结果的");
+    }
+
+    #[test]
+    fn soft_deleted_project_docs_drop_out_of_hits() {
+        let c = seeded_with_docs();
+        assert!(!hits(&c, "验收").is_empty());
+        c.execute("UPDATE projects SET deleted_at = datetime('now') WHERE id = 'p1'", []).unwrap();
+        assert!(hits(&c, "验收").is_empty(), "项目软删除后其文档不该再出现在结果里");
+    }
+
+    /// M3 的验收点。spec 明写「密文列不参与任何检索」，且要求结构性排除而不是查询后过滤：
+    /// 台账的密文列从来没有进入 write_doc 的入参路径（正文只来自磁盘文件的抽取结果），
+    /// 所以这条测的是「整条管线跑完后，敏感字段的明文在索引里彻底不存在」。
+    #[test]
+    fn cipher_column_plaintext_never_reaches_the_fts_index() {
+        use crate::{ledger, vault};
+
+        let c = seeded_with_docs();
+        let code = vault::generate_recovery_code().unwrap();
+        let mk = vault::initialize(&c, "主密码-至少八位", &code).unwrap();
+        let secret = "机密串-Zhang@2026";
+        ledger::create_credential(
+            &c,
+            &mk,
+            "p1",
+            &ledger::CredentialInput {
+                env_id: None,
+                title: "运维后台".to_owned(),
+                username: Some(secret.to_owned()),
+                password: Some(secret.to_owned()),
+                url: Some("https://ops.example.gov.cn".to_owned()),
+                note: Some("交付时用".to_owned()),
+            },
+        )
+        .unwrap();
+
+        // 1) 用敏感字段的明文检索，一条都不该命中
+        assert!(hits(&c, secret).is_empty(), "敏感字段明文进不了 FTS");
+        // 2) 结构性检查：整张虚表里连这个字符串的片段都搜不到（不依赖分词是否切开）
+        let needle = "%Zhang@2026%";
+        for col in ["body_tokens", "name_tokens"] {
+            let n: i64 = c
+                .query_row(
+                    &format!("SELECT count(*) FROM index_docs_fts WHERE {col} LIKE ?1"),
+                    params![needle],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 0, "{col} 里不该存在敏感值：{n}");
+        }
+        // 3) 反向对照：同一行的明文列 note（交付时用）走的是库内字段检索，
+        //    而 FTS 这边只有磁盘文件正文，两边互不污染
+        assert_eq!(hits(&c, "付款条件").len(), 1);
     }
 }
