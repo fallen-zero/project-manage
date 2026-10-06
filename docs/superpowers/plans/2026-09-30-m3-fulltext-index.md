@@ -2238,7 +2238,7 @@ git commit -m "feat: M3 索引写入层：两点写、同路径复用 rowid、�
 **Interfaces:**
 - Consumes: Task 2 的 `query_expression` / `clean_snippet`、Task 1 的两张表、`crate::ledger` 与 `crate::vault`（只为验收测试造密文行）
 - **顺带收掉的豁免**：Task 2 留在 `tokenize.rs` 的 `query_expression` 与 `clean_snippet` 两条 `#[allow(dead_code)]`（同一条 `index_text` 的豁免已在 Task 7 收掉，Task 7 落地后该文件剩 2 条）。本任务的 `doc_hits` 是这两个函数的第一个非测试调用点，两条必须删干净：提交前 `grep -c "allow(dead_code)" src/tokenize.rs` 期望 **0**。
-- **本任务自己的死代码账要现算**：`doc_hits` 的生产 caller 在 Task 10，所以它会带一条新豁免；具体几条以 `cargo clippy --lib -- -D warnings` 实跑为准（`DocHit` 由带豁免的 `doc_hits` 抵达，按本仓库三次实测不需要单独挂）。派发前控制方会用一次性探针把数字钉死，实现者不必猜。
+- **本任务自己的死代码账（控制方一次性探针实测，跑完已还原，工作树干净）**：不带豁免时 `cargo clippy --lib -- -D warnings` 报 **4 条** —— `doc_hits` never used、`run_select` never used、`SELECT_SQL` constant never used、`DocHit` never constructed。**只给 `doc_hits` 挂一条豁免，4 条全消失**（第 4 次证实「allow 项即额外可达根」：`doc_hits` 一旦可达，它调用的 `run_select`、那个 const、以及返回型 `DocHit` 一起被罩住，`SELECT_SQL` 这条计划原本没算到）。同时 `tokenize.rs` 那两条豁免删掉之后**不会**报 `query_expression`/`clean_snippet`，因为它们的调用点在 `doc_hits`/`run_select` 里，可达性顺着新豁免走 —— 探针还顺带暴露 `is_cjk` 也是同一条链（只在没挂豁免的中间态报出来，挂上即消失）。所以**本任务落 1 条豁免**：`grep -c "allow(dead_code)" src/index_store.rs` 从 6 变 **7**，`src/tokenize.rs` 变 **0**。
 - Produces:
   - `pub struct DocHit { pub doc_id: String, pub project_id: String, pub project_name: String, pub path: String, pub snippet: String, pub matched_by: &'static str, pub score: f64 }`（`#[serde(rename_all = "camelCase")]`）
   - `pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<DocHit>>`
@@ -2404,11 +2404,11 @@ fn run_select(conn: &Connection, expr: &str, limit: i64, matched_by: &'static st
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// 两段式（中文分词检索的核心取舍）：
-/// 1. 精确段：`"维保"` 要求词形完全一致，结果最准。
-/// 2. 前缀段：0 命中时才放宽成 `"维保"*`，把被切成「维保期」这种长词的情况捞回来。
-/// 只做第 1 段会表现为「功能没坏但搜不到」；直接只做第 2 段则精度差。
+/// 两段式（中文分词检索的核心取舍）：第一段「精确」要求词形完全一致，结果最准；
+/// 第二段「前缀」只在 0 命中时放宽成 `"维保"*`，把被切成「维保期」这种长词的情况捞回来。
+/// 只做第一段会表现为「功能没坏但搜不到」，直接只做第二段则精度差。
 /// 两段用同一个 `query_expression`，即同一套预处理，见 tokenize.rs 的头注释。
+#[allow(dead_code)] // caller 在 Task 10 的检索 IPC，落地时删掉本行
 pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<DocHit>> {
     let q = query.trim();
     if q.is_empty() {
@@ -2434,21 +2434,44 @@ pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<Doc
 }
 ```
 
-`AppError` 需要引入：`use crate::error::AppError;`（本任务前 `index_store.rs` 只引了 `AppResult`，改成 `use crate::error::{AppError, AppResult};`）。
+引入要动**两行**（控制方探针实测，少任一条都当场红）：
+- `use crate::error::AppResult;` → `use crate::error::{AppError, AppResult};`（`AppError::new` 在本任务的超长查询分支第一次被用到）。
+- `use crate::tokenize::index_text;` → `use crate::tokenize::{index_text, query_expression};`。上面 Step 3 的代码里 `query_expression(q, false)` 是**非限定调用**，不补这条就是 `E0425 cannot find function`，整个模块不编译（计划原版只提了 `AppError`，漏了这条）。`clean_snippet` 在代码里写的是全限定 `crate::tokenize::clean_snippet`，不需要进 `use`。
+
+另外上面那段 `///` 说明原来写成 `/// 1. …` / `/// 2. …` 的编号列表，后面紧跟两条不缩进的正文行 ——
+`cargo clippy --lib -- -D warnings` 会以 `doc list item without indentation` **报错**（不是提示，是 -D 之后的 error），
+探针实测两条。改成不用编号的散文写法即可，语义一字未减。
 
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd src-tauri && cargo test --lib index_store`
 Expected: `13 passed`（Task 7 的 7 + 本任务 6）；全量 → `86 passed; 0 failed`
 
-若 `fts5_syntax...` 里 `hits(&c, "*")` 报错而不是空，说明 `query_expression("*", false)` 回了 `Some`——事实 8 要求纯标点被过滤后回 `None`；回到 Task 2 修过滤器，**不要**在这里加特判。
+若 `fts5_syntax...` 里 `hits(&c, "*")` 报错而不是空，说明 `query_expression("*", false)` 回了 `Some`——事实 8 要求纯标点被过滤后回 `None`；回到 Task 2 修过滤器，**不要**在这里加特判。（控制方探针实测：这条不报错、回空，`snippet(...)`/`bm25(...)`/`"维保"*` 前缀段/`p.deleted_at IS NULL` 四个 FTS5 行为都和计划预期一致，13 条全绿。）
 
-- [ ] **Step 5: 提交**
+**报告里要交的变异证据（至少两条，每条只该红一条）**：
+- 去掉 `AND p.deleted_at IS NULL` → `soft_deleted_project_docs_drop_out_of_hits` 必红（其余不敏感）。
+- 去掉两段式里的前缀段（`if let Some(loose) = ...` 那一支）→ `prefix_stage_reports_itself...` 必红。
+这两条是本任务唯一「看不见就全绿」的失效面（漏了前缀段表现为「维保」搜不到而测试不会自己喊），所以不许只交「13 passed」就当验证过。
+
+- [ ] **Step 5: 跑两道 clippy 闸 + 豁免对账**
 
 ```bash
-git add src-tauri/src/index_store.rs
+cd src-tauri && cargo clippy --lib -- -D warnings && cargo clippy --lib --all-targets -- -D warnings
+grep -c "allow(dead_code)" src/tokenize.rs
+grep -c "allow(dead_code)" src/index_store.rs
+```
+
+Expected：两道闸 exit 0；`tokenize.rs` **0**（本任务收掉最后两条，漏删不会红，只会变永久豁免）；`index_store.rs` **7**（Task 7 的 6 条 + `doc_hits` 这条新的）。控制方探针实测这组数字。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add src-tauri/src/index_store.rs src-tauri/src/tokenize.rs
 git commit -m "feat: M3 两段全文检索并钉住密文不进索引的验收"
 ```
+
+**两个文件一起提交**：本任务删掉 `tokenize.rs` 的两条豁免，漏 add 就等于把改动丢在工作树里（计划原版只 add 了 `index_store.rs`，控制方按 Files 与 Interfaces 改正）。`git status` 复核只应有这两个文件，禁止 `git add -A`。
 
 ---
 
