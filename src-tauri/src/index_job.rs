@@ -638,4 +638,71 @@ mod tests {
         assert_eq!(after.results[0].scanned_total, 0);
         assert_eq!(doc_rows(&conn2, "p9"), 1, "根不可达时 rebuild 不该动它已有的行");
     }
+
+    /// 轮级终止事件的求和（修复轮 2 复审补的守护）。`terminal` 是纯函数、不要 `AppHandle`，
+    /// 而 Task 11 的摘要条数全靠它 —— 它写错就是「界面说 19 个、状态统计说 17 个」这类当场对不上。
+    /// 两个 `ProjectResult` 的数字**刻意全部互不相同**，且 `scanned_total` 之和不等于 `done_total()`
+    /// 之和：否则 `total` 与 `done` 两个字段被互换时这条也绿。`walk_errors` 给非零值是为了钉住
+    /// 「遍历错误不参与这两条计数」。
+    #[test]
+    fn terminal_event_sums_scanned_and_done_separately() {
+        let r1 = ProjectResult {
+            project_id: "p1".into(), project_name: "一号".into(),
+            scanned_total: 12, ok: 4, skipped: 3, failed: 1, unchanged: 2,
+            walk_errors: 5, capped: true, root_missing: false,
+        };
+        let r2 = ProjectResult {
+            project_id: "p2".into(), project_name: "二号".into(),
+            scanned_total: 7, ok: 5, skipped: 1, failed: 0, unchanged: 1,
+            walk_errors: 0, capped: false, root_missing: true,
+        };
+        let e = terminal("done", &[r1, r2], None);
+        assert_eq!(e.state, "done");
+        assert_eq!(e.total, 19, "total 是 scanned_total 之和：{} vs {}", e.total, 19);
+        assert_eq!(e.done, 17, "done 是 ok+skipped+failed+unchanged 之和");
+        assert_eq!(e.ok, 9);
+        assert_eq!(e.skipped, 4);
+        assert_eq!(e.failed, 1);
+        assert_eq!(e.project_id, "", "终止事件不属于某一个项目，Task 11 别拿它当 key");
+        assert_eq!(e.project_name, "");
+        assert_eq!(e.current, "");
+        assert_eq!(e.error, None, "成功轮的终止事件不该带原因");
+    }
+
+    /// Important 2 的落地证据。`start` 的线程体要 `AppHandle`、本任务测不到，但 `report_failure`
+    /// 收的是 `&IndexShared` 和一个 `FnMut` 闭包，**不需要** `AppHandle` —— 所以「失败留下一条可读的
+    /// 原因 + 发且只发一条 error 终止事件 + 把上一轮的摘要冲掉」这三件事全部可以直接钉住。
+    /// 没有这条，Important 2 的修复在测试层面是零守护的：三个失败出口都不可达，界面上「按钮说失败、
+    /// 事件说没有」只能等 Task 12 真机才发现。
+    /// `events.len() == 1` 挡的是「重复发事件」；`total == 0` 挡的是「把上一轮的计数塞进 error 事件」。
+    #[test]
+    fn report_failure_leaves_a_reason_and_emits_one_error_event() {
+        let shared = IndexShared::new();
+        {
+            // 先放一份「上一轮成功」的摘要：失败轮必须把它冲掉，否则界面会拿旧摘要当本轮结果。
+            let mut saved = shared.summary.lock().unwrap();
+            *saved = Some(RunSummary {
+                state: "done",
+                results: vec![ProjectResult {
+                    project_id: "p1".into(), project_name: "一号".into(),
+                    scanned_total: 3, ok: 3, skipped: 0, failed: 0, unchanged: 0,
+                    walk_errors: 0, capped: false, root_missing: false,
+                }],
+                started_at: "2026-09-30T00:00:00Z".into(),
+                finished_at: "2026-09-30T00:01:00Z".into(),
+            });
+        }
+        let mut events: Vec<Progress> = Vec::new();
+        report_failure(&mut |p| events.push(p), &shared, "[db_open_failed] 打不开库".to_owned());
+
+        assert_eq!(events.len(), 1, "只发一条轮级事件，发两遍 Task 11 的进度条会抖");
+        assert_eq!(events[0].state, "error", "{:?}", events[0]);
+        assert_eq!(events[0].error.as_deref(), Some("[db_open_failed] 打不开库"),
+            "事件里的原因必须和 last_error 是同一个串");
+        assert_eq!(events[0].project_id, "");
+        assert_eq!(events[0].total, 0, "失败轮的轮级计数是 0，不是上一轮的残留");
+        assert!(shared.summary.lock().unwrap().is_none(), "失败轮不该留下半截摘要");
+        assert_eq!(shared.last_error.lock().unwrap().as_deref(), Some("[db_open_failed] 打不开库"),
+            "Task 10 的 IPC 全靠这一条才分得清「从没跑过」和「跑挂了」");
+    }
 }
