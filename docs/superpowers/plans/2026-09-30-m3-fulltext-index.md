@@ -2543,7 +2543,13 @@ git commit -m "feat: M3 两段全文检索并钉住密文不进索引的验收"
 - Consumes: `index_scan::{ScanOptions, scan_root}`、`extract::extract_text`、`index_store::{write_doc, current_rowid, clear_project, DocOutcome}`、`db::open`、`tauri::Emitter`、`std::sync::atomic::{AtomicBool, Ordering}`
   - `extract_text` 的 `Err` 实际有**三个**码名，不是两个：`extract_unsupported`、`extract_failed`，加上 `AppError::io` 带来的 `fs_failed`（读文件本身失败，典型是扫描到抽取之间文件被删/被占用）。下面的 `match` 用「`extract_unsupported` 单列、其余一律 `Failed`」的写法，所以 `fs_failed` 会落进 `failed` 而不是 `missing` —— 这是有意的：`missing` 描述的是对账结论（库里有一行、磁盘上没有了），归 M5 的启动对账写，抽取这一轮不判它。别在 Task 9 里顺手把它改成 `missing`。
 - **`capped` 的语义（Task 6 修复轮改过扫描侧，这里按新语义接）**：`scan_root` 的单项目配额是在分「可抽取 / 超限」两桶**之前**判的，所以 `ScanOutcome.capped = true` 说的是「`files` + `over_size` 合计撞到 `max_files_per_project`，至少还有一个受支持的文件被丢掉」，而不是「可抽取清单被截断」。接法：`ProjectResult.scanned_total` 取两桶之和（它就是本轮会产生多少行），`capped` 原样透传；`break` 之后剩下的文件既没有行也没有计数，`ScanOutcome` 里**没有**被丢弃的条数字段，因此摘要只能说「截断了」而不能说「还差 M 个」—— 这是有意的，别为了凑那个数字去给 `ScanOutcome` 加字段。超限那一桶同样会被截，Task 11 的文案要按这个写（见 Task 11 Step 4）。
-- **顺带收掉的豁免**（`run_pass` 是这三个 `pub` 项的第一个非测试 caller）：`extract.rs` 里 `extract_text` 上面那条 `#[allow(dead_code)] // caller 在 Task 9`、`index_scan.rs` 里 `scan_root` 与 `ScanOptions::load` 上面各一条同形豁免，本任务落地时一并删掉。漏删不会红，只会变成永久豁免，所以 Step 里要跑 `grep -n "allow(dead_code)" src/extract.rs src/index_scan.rs` —— 期望结果：`extract.rs` 只剩 `supported_exts` 那一条（caller 在 Task 10），`index_scan.rs` 应该**一条都不剩**；`index_store.rs` 里 Task 7 落的六条豁免中`write_doc`/`current_rowid`/`clear_project`/`DocOutcome` 四条由本任务的 `run_pass` 收掉（上面那行 `use crate::index_store::{clear_project, current_rowid, write_doc, DocOutcome};` 就是它们的非测试调用点），剩 `status_counts`/`list_docs` 两条归 Task 10 —— 所以 Task 9 提交前的期望是 `grep -c "allow(dead_code)" src/index_store.rs` 回 **2**。`delete_doc` 不存在（Task 7 已按裁定移除），别去找它。
+- **顺带收掉的豁免**（`run_pass` 是这三处 `pub` 项的第一个非测试 caller）：`extract.rs` 里 `extract_text` 上面那条 `#[allow(dead_code)] // caller 在 Task 9`、`index_scan.rs` 里 `scan_root` 与 `ScanOptions::load` 上面各一条同形豁免，本任务落地时一并删掉。漏删不会红，只会变成永久豁免，所以 Step 里要跑 `grep -n "allow(dead_code)" src/extract.rs src/index_scan.rs` —— 期望结果：`extract.rs` 只剩 `supported_exts` 那一条（caller 在 Task 10），`index_scan.rs` 应该**一条都不剩**。
+  `index_store.rs` 这边由 `run_pass` 收掉四条：`write_doc`、`current_rowid`、`clear_project`、以及挂在 `enum DocOutcome` 本体上那条（`use crate::index_store::{clear_project, current_rowid, write_doc, DocOutcome};` 就是它们的非测试调用点）。**删掉枚举级豁免后必须让 `run_pass` 真的构造 `Empty`**（见 Step 3 的 `Ok(body) if body.trim().is_empty()` 那一臂）：探针实测不带那一臂时闸 1 报 `variant \`Empty\` is never constructed`（`index_store.rs:22`），因为 lib 侧只有 match 没有构造 —— Task 7 当年就是为这件事在枚举本体挂的豁免（见 Task 7 Interfaces 的死代码账）。这条臂不是为豁免加的，它同时补掉一个真 bug：`acc.ok += 1` 遇上空白正文时，`write_doc` 落库是 `skipped/empty_text`、内存计数器却记成 ok，两个口径在 Task 11 的界面上会当场对不上。
+  **Task 9 提交前的期望是 `grep -c "allow(dead_code)" src/index_store.rs` 回 3**（`status_counts`、`list_docs` 归 Task 10，`doc_hits` 是 Task 8 落的、它的 caller 同样在 Task 10）。计划原版写的「回 2」是**在 Task 8 落 `doc_hits` 之前算的**，属陈旧数字，控制方探针实测更正为 3。`delete_doc` 不存在（Task 7 已按裁定移除），别去找它。
+- **本任务自己要落的新豁免（控制方一次性探针实测，跑完已还原）**：`index_job.rs` 里 `start` 与 `IndexShared::new` **各需一条**，共 **2** 条。
+  - 只写实现、一条豁免都不挂时，`cargo clippy --lib -- -D warnings` 报 **39 条** `error: … is never used / never constructed`。原因不是「`start` 没人调」这么简单：`start` 是 `run_pass` 在 lib 侧唯一的非测试调用者，而 `cargo clippy --lib` 不带 `--all-targets`、不编译 `#[cfg(test)]`，所以 `start` 一死，`run_pass` → `targets`/`progress_for`/`truncate`/`now`/`PROGRESS_EVENT`/`PROGRESS_EVERY`/`ScanTarget`/`Progress`/`ProjectResult`/`done_total`/`RunSummary` 整串跟着死，并且顺着调用把 `extract.rs` 全模块 12 条（含 `extract_text`/`kind_of`/`DocKind`/`TEXT_EXTS`）、`index_scan.rs` 3 条（`ScanOptions`/`load`/`ScannedFile`）一起拖出来 —— 「allow 项是额外可达根」（本仓库第 6 次证实）反过来用就是：删掉旧根必须先立新根。
+  - **只给 `start` 挂一条**，39 条塌成 **2 条**：剩 `associated function \`new\` is never used`（`IndexShared::new`，构造点在 Task 10 的 `AppState::manage`）与上面那条 `DocOutcome::Empty`。所以 `new` 要自己挂一条，注明 caller 在 Task 10。**别顺手给 `IndexShared` 结构体也挂**：它的三个字段全被 `start` 用过，探针实测不报。
+- **`//!` 模块 doc 用 `- ` bullet 列表是安全的**（控制方探针实测：原版那四行按 Step 3 逐字编译，两道闸 exit 0）。Task 8 撞到的 `doc list item without indentation` 是「编号列表后面紧跟不缩进的正文行」，与本处的列表结尾不同 —— 别把这段改成散文「以防万一」。
 - Produces:
   - `pub struct ScanTarget { pub project_id: String, pub project_name: String, pub root_path: String }`
   - `pub fn targets(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<ScanTarget>>`
@@ -2590,6 +2596,7 @@ mod tests {
         std::fs::write(dir.join("合同/验收说明.txt"), "甲方要求验收指标".as_bytes()).unwrap();
         std::fs::write(dir.join("维保.txt"), "维保期为十二个月".as_bytes()).unwrap();
         std::fs::write(dir.join("大图.txt"), vec![b'a'; 300]).unwrap(); // 配合下面的小上限
+        std::fs::write(dir.join("空扫描.txt"), "   \n\t".as_bytes()).unwrap(); // 抽取成功但正文空白
         std::fs::write(dir.join("图片.png"), b"\x89PNG").unwrap();
         std::fs::write(dir.join("合同/node_modules/x.txt"), "不该被索引".as_bytes()).unwrap();
     }
@@ -2598,7 +2605,7 @@ mod tests {
         AtomicBool::new(false)
     }
 
-    /// 一轮 pass 要把四种结局各归其位：ok / skipped(too_large) / 未支持不建行 / 排除目录不进。
+    /// 一轮 pass 要把结局各归其位：ok / skipped(too_large) / skipped(empty_text，空白抽取) / 未支持不建行 / 排除目录不进。
     /// 同时验证「pass 结束后可检索」这条端到端性质（内存库 + 真文件）。
     #[test]
     fn run_pass_indexes_a_generated_tree_and_separates_outcomes() {
@@ -2614,11 +2621,22 @@ mod tests {
         assert_eq!(summary.state, "done");
         let one = &summary.results[0];
         assert_eq!(one.ok, 2, "两个正常文本文件应入库：{one:?}");
-        assert_eq!(one.skipped, 1, "超限文件应记 skipped：{one:?}");
+        assert_eq!(one.skipped, 2, "超限与空白抽取各一行都该记 skipped：{one:?}");
         assert_eq!(one.failed, 0);
-        assert_eq!(one.scanned_total, 3, "未支持与排除目录不该计数：{one:?}");
+        assert_eq!(one.scanned_total, 4, "未支持与排除目录不该计数：{one:?}");
         assert!(!events.is_empty(), "至少要有一次进度回调");
-        assert_eq!(events.last().unwrap().done, 3);
+        assert_eq!(events.last().unwrap().done, 4);
+        // 计数器与库里的行必须同一个口径：空白抽取在 index_docs 上是 skipped/empty_text，不是 ok。
+        // 少这条断言，`acc.ok += 1` 与 write_doc 落库的 status 各自漂移也不会有人喊 ——
+        // 而 Task 11 的界面要同时读这两个数（摘要读计数器、状态统计读 status_counts）。
+        let blank: (String, Option<String>) = conn
+            .query_row(
+                "SELECT index_status, skip_reason FROM index_docs WHERE path LIKE '%空扫描.txt'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(blank, ("skipped".to_string(), Some("empty_text".to_string())), "空白抽取的行口径要和计数器一致：{blank:?}");
 
         let hits = crate::index_store::doc_hits(&conn, "验收", 20).unwrap();
         assert_eq!(hits.len(), 1, "pass 之后必须搜得到：{hits:?}");
@@ -2872,6 +2890,11 @@ pub fn run_pass(
         for (file, oversize) in queue {
             if cancel.load(Ordering::Relaxed) {
                 on_progress(progress_for(&target, &acc, "cancelled", &file.path));
+                // 半成品也要交出去：少这一行，取消时返回的 `results` 是**空表**，
+                // 摘要里连被取消的那个项目都不在，Task 11 的界面只能显示「什么都没做」。
+                // 探针实测原版没有这行时 `cancel_stops_the_pass_early` 当场 panic：
+                // `index out of bounds: the len is 0 but the index is 0`。
+                results.push(acc);
                 return Ok(RunSummary { state: "cancelled", results, started_at, finished_at: now(conn) });
             }
             let handled = if oversize {
@@ -2886,6 +2909,15 @@ pub fn run_pass(
                 false
             } else {
                 match extract_text(std::path::Path::new(&file.path)) {
+                    Ok(body) if body.trim().is_empty() => {
+                        // 扫描件没文字层是日常（spec 明写「抽出为空属于正常，不是失败」）。
+                        // 库里那行由 write_doc 落成 skipped/empty_text，计数器就必须也加到 skipped 上，
+                        // 否则 Task 11 的摘要说「N 个成功」而状态统计里它是 skipped，两个口径当场对不上。
+                        // 顺带把 DocOutcome::Empty 变成有生产构造点（删枚举级豁免后它不然会报
+                        // `variant Empty is never constructed`，见 Interfaces 的死代码账）。
+                        write_doc(conn, &target.project_id, &file, DocOutcome::Empty)?;
+                        acc.skipped += 1;
+                    }
                     Ok(body) => {
                         write_doc(conn, &target.project_id, &file, DocOutcome::Ok(body))?;
                         acc.ok += 1;
@@ -2953,6 +2985,7 @@ pub struct IndexShared {
 }
 
 impl IndexShared {
+    #[allow(dead_code)] // 构造点在 Task 10 的 AppState::manage，落地时删掉本行
     pub fn new() -> Self {
         Self { cancel: AtomicBool::new(false), running: AtomicBool::new(false), summary: Mutex::new(None) }
     }
@@ -2961,6 +2994,7 @@ impl IndexShared {
 /// 薄壳：自己开一条连接（不能借用 AppState 里那条 —— 一轮索引要几分钟，
 /// 拿着 Mutex<Connection> 会把界面上所有 IPC 全卡住），把进度回调换成 emit。
 /// WAL + busy_timeout 已在 db::after_open 里配好，两个连接一读一写是允许的。
+#[allow(dead_code)] // caller 在 Task 10 的 index_start IPC，落地时删掉本行
 pub fn start(
     app: AppHandle,
     data_dir: PathBuf,
@@ -3014,13 +3048,32 @@ pub fn start(
 Run: `cd src-tauri && cargo test --lib index_job`
 Expected: `5 passed`；全量 → `92 passed; 0 failed`
 
-`cancel_stops_the_pass_early` 若一次跑完（`done == 60`），原因是第一次回调就置位、而检查点在下一轮开头 —— 断言 `done < 60` 应当成立。若始终不成立，先确认 `PROGRESS_EVERY` 与回调时机，不要靠加 `sleep` 让它「看起来对」。
+`cancel_stops_the_pass_early` 若一次跑完（`done == 60`），原因是第一次回调就置位、而检查点在下一轮开头 —— 断言 `done < 60` 应当成立。若始终不成立，先确认 `PROGRESS_EVERY` 与回调时机，不要靠加 `sleep` 让它「看起来对」。（控制方探针实测：原版文本缺 `results.push(acc)` 时这条不是「跑完」而是**当场 panic** `index out of bounds: the len is 0 but the index is 0`；补上那行后 5 条全绿，`done` 落在 20。）
 
-- [ ] **Step 5: clippy + 提交**
+**报告里要交的变异证据（至少三条，每条只该红一条）**：
+- 删掉循环内取消分支的 `results.push(acc);` → 只有 `cancel_stops_the_pass_early` 红（panic 文案见上）。控制方已实测这一条。
+- 删掉 `Ok(body) if body.trim().is_empty()` 那一臂（让空白正文重新走 `Ok`）→ 只有 `run_pass_indexes_a_generated_tree_and_separates_outcomes` 红，且**先红在 `ok` 计数**（测试里 `ok` 的断言排在 `skipped` 前，实测文案 `left: 3 / right: 2`；`skipped` 同时从 2 变 1，只是轮不到报）。控制方已实测。
+- 上面那条变异的**第二半**（控制方已实测）：同一处变异下 `cargo clippy --lib -- -D warnings` 以 101 退出，报 `variant \`Empty\` is never constructed`（`index_store.rs:22`）。这就是为什么 `Empty` 臂必须落在生产分支里 —— 删了枚举级豁免后，没有生产构造点它就不干净。
+- 删掉 `if rebuild && !root_missing { clear_project(conn, &target.project_id)?; }` → 只有 `rebuild_rewrites_everything_and_leaves_no_stale_tokens` 红（旧正文残留）。
+- （可选加测）把增量分支 `!rebuild && current_rowid(...).is_some()` 改成恒 false → `second_pass_skips_unchanged_files` 必红。
+
+**已被探针否掉的担心，别自己去「修」**：`//!` 模块 doc 里那个 `- ` bullet 列表**不触发** `doc list item without indentation`（原版逐字编译，两道闸 exit 0）。Task 8 那次中招的是「编号列表后面紧跟不缩进的正文行」，形态不同。
+
+- [ ] **Step 5: 两道 clippy 闸 + 豁免对账 + 提交**
 
 ```bash
-cd src-tauri && cargo clippy --lib --all-targets -- -D warnings
-git add src-tauri/src/index_job.rs src-tauri/src/lib.rs
+cd src-tauri && cargo clippy --lib -- -D warnings && cargo clippy --lib --all-targets -- -D warnings
+grep -c "allow(dead_code)" src/index_store.rs   # 期望 3
+grep -c "allow(dead_code)" src/index_scan.rs    # 期望 0
+grep -c "allow(dead_code)" src/extract.rs       # 期望 1（supported_exts，caller 在 Task 10）
+grep -c "allow(dead_code)" src/index_job.rs     # 期望 2（start、IndexShared::new）
+```
+
+四道数字全对上再提交。**`git add` 必须带上那三个被收掉豁免的文件** —— 原版只列了 `index_job.rs` 与 `lib.rs`，那样会把 7 行豁免删除留在工作树里不入库，提交后的树上 `grep -c` 与计划对不上（Task 8 犯过同一条，已修过一次）：
+
+```bash
+git add src-tauri/src/index_job.rs src-tauri/src/lib.rs \
+        src-tauri/src/index_store.rs src-tauri/src/index_scan.rs src-tauri/src/extract.rs
 git commit -m "feat: M3 索引作业：可测的 run_pass 与后台线程 emit 包装"
 ```
 
