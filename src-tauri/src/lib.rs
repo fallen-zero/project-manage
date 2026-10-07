@@ -453,33 +453,50 @@ struct IndexOverview {
 
 #[tauri::command]
 fn index_overview(state: State<'_, AppState>) -> AppResult<IndexOverview> {
-    let conn = db(&state)?;
-    let opts = index_scan::ScanOptions::load(&conn)?;
-    let targets = index_job::targets(&conn, None)?;
-    let mut projects = Vec::new();
-    for t in targets {
-        let counts = index_store::status_counts(&conn, &t.project_id)?;
-        let pick = |s: &str| counts.iter().find(|c| c.status == s).map(|c| c.count).unwrap_or(0);
-        projects.push(ProjectState {
-            total: counts.iter().map(|c| c.count).sum(),
-            project_id: t.project_id.clone(),
-            project_name: t.project_name.clone(),
-            // 只读探测：根目录没挂载时在界面上点名它，绝不创建或修改任何路径
-            root_exists: std::path::Path::new(&t.root_path).is_dir(),
-            root_path: t.root_path,
-            ok: pick("ok"),
-            skipped: pick("skipped"),
-            failed: pick("failed"),
-            pending: pick("pending"),
-            missing: pick("missing"),
-        });
-    }
+    // 持锁段：只做库内的读。文件系统探测一条都不放进来 ——
+    // `AppState.conn` 是全 crate 唯一那把 `Mutex<Connection>`，`db_status` / `project_list` /
+    // `ledger_list` / `index_docs` / `search_docs` 全排在它后面；而未挂载的 SMB/网络盘上的
+    // `Path::is_dir()` 在 Windows 上能阻塞几十秒。持着它去 stat N 个根目录 = 一次界面刷新
+    // 卡住整条 IPC（Task 10 评审的 Important 1，代价实测过口径，不是推测）。
+    let (opts, targets, counts, has_fts) = {
+        let conn = db(&state)?;
+        let opts = index_scan::ScanOptions::load(&conn)?;
+        let targets = index_job::targets(&conn, None)?;
+        // 与 targets 同序收集，出锁后用 zip 配对，不另存一个 project_id 做查表。
+        let mut counts = Vec::with_capacity(targets.len());
+        for t in &targets {
+            counts.push(index_store::status_counts(&conn, &t.project_id)?);
+        }
+        (opts, targets, counts, fts5_available(&conn))
+    }; // conn 守卫到此离开作用域被 drop，下面再碰文件系统已经不持锁
+
+    // 出锁段：`is_dir()` 可以慢，但此时别的 IPC 进得来。
+    let projects = targets
+        .into_iter()
+        .zip(counts)
+        .map(|(t, counts)| {
+            let pick = |s: &str| counts.iter().find(|c| c.status == s).map(|c| c.count).unwrap_or(0);
+            ProjectState {
+                total: counts.iter().map(|c| c.count).sum(),
+                project_id: t.project_id,
+                project_name: t.project_name,
+                root_exists: std::path::Path::new(&t.root_path).is_dir(),
+                root_path: t.root_path,
+                ok: pick("ok"),
+                skipped: pick("skipped"),
+                failed: pick("failed"),
+                pending: pick("pending"),
+                missing: pick("missing"),
+            }
+        })
+        .collect();
+
     Ok(IndexOverview {
         running: state.index.running.load(std::sync::atomic::Ordering::SeqCst),
-        fts5_available: fts5_available(&conn),
+        fts5_available: has_fts,
         // 上一轮结论只是展示用，拿不到锁就回 None，不因为 UI 刷新阻塞作业线程。
-        // 这里两处 lock() 都只碰 IndexShared 自己的 Mutex，而作业线程从不反向拿 AppState 的
-        // conn 锁（它自己 `db::open` 了一条连接），所以「持着 conn 守卫再拿 summary」不构成环路。
+        // summary/last_error 是 IndexShared 自己的两把 Mutex。作业线程自持一条 `db::open` 的连接、
+        // 从不反向拿 AppState 的 conn，所以这里既不构成环路，也不再持着 conn 守卫。
         last_run: state.index.summary.lock().ok().and_then(|g| g.clone()),
         last_error: state.index.last_error.lock().ok().and_then(|g| g.clone()),
         projects,
@@ -490,8 +507,12 @@ fn index_overview(state: State<'_, AppState>) -> AppResult<IndexOverview> {
     })
 }
 
-/// 某一项目的文件清单（分页）。`limit` 的 clamp 是 `index_store::list_docs` 唯一的边界校验，
-/// 别挪进 index_store —— 那一层还要用 `limit=0` 断「0 行结果」的既有语义。
+/// 某一项目的文件清单（分页）。`limit` 的 clamp 是本路径唯一的边界校验：`list_docs`
+/// （`index_store.rs:156-183`，只有一条 prepared statement）拿到负数时，SQLite 的语义是「不限行」，
+/// 于是一次拉出整个项目（上限 50000 行）进 IPC 载荷。别把 clamp 挪进 `index_store.rs`：
+/// `doc_hits` 的既有测试正靠 `limit=0`/`limit=-1` 钉住 SQLite 的原语义
+/// （`index_store.rs:623`「负数 = 不限行」、`:624`「0 就是 0 行，不许悄悄变成默认值」），
+/// clamp 一旦下沉，那两条断言当场失去对象。
 #[tauri::command]
 fn index_docs(
     state: State<'_, AppState>,
@@ -532,7 +553,7 @@ pub fn run() {
             let conn = db::open(&data_dir)?;
             app.manage(AppState {
                 conn: Mutex::new(conn),
-                data_dir: data_dir.clone(),
+                data_dir,
                 mk: Mutex::new(None),
                 index: Arc::new(index_job::IndexShared::new()),
             });
