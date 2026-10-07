@@ -3670,16 +3670,18 @@ export interface DocHit {
 
 - [ ] **Step 2: API 封装**
 
-`src/lib/api.ts` 末尾追加（沿用文件里既有的 `invoke` 直调风格，不引入新抽象）：
+`src/lib/api.ts`：**两行 import 加在文件顶部现有的 import 块里**（现在是 `:1` `import { invoke } from "@tauri-apps/api/core";`、`:2-4` plugin 三行、`:5-15` 两个 `import type`），函数追加到文件末尾。ESM 允许 import 出现在模块任意顶层位置，但把一个 import 塞在一排 `export const` 中间会让这个文件的阅读顺序断一次，而它是全仓库唯一的 IPC 封装点。沿用文件里既有的 `invoke` 直调风格，不引入新抽象。
+
+顶部补：
 
 ```ts
-import type {
-  DocHit,
-  DocRow,
-  IndexOverview,
-  IndexProgress,
-} from "@/types/index";
+import { listen } from "@tauri-apps/api/event";
+import type { DocHit, DocRow, IndexOverview, IndexProgress } from "@/types/index";
+```
 
+末尾追加：
+
+```ts
 export const indexStart = (projectId?: string, rebuild = false) =>
   invoke<void>("index_start", { projectId: projectId ?? null, rebuild });
 export const indexCancel = () => invoke<void>("index_cancel");
@@ -3692,22 +3694,24 @@ export const onIndexProgress = (handler: (p: IndexProgress) => void) =>
   listen<IndexProgress>("index://progress", (e) => handler(e.payload));
 ```
 
-`listen` 要从 `@tauri-apps/api/event` 引入（文件顶部现在是 `import { invoke } from "@tauri-apps/api/core";`，加一行 `import { listen } from "@tauri-apps/api/event";`）。
+`index://progress` 就是 Rust 侧的 `index_job::PROGRESS_EVENT`（`index_job.rs:22`），两边都是字面量，没有共享常量 —— 这一条只能靠 Task 12 的真机点验确认连通，`tsc` 不会替你发现拼错的事件名。参数名按 camelCase 传（`projectId` / `rebuild` / `status` / `limit` / `offset` / `query`），Task 10 的 Rust 形参是 snake_case，Tauri 的自动转换在仓库里已有三处先例（`removeDir` → `dir_id`、`ledger_list` → `project_id`、`vault_init` → `main_password`），照此即可绑定。
 
 - [ ] **Step 3: store**
 
-`src/stores/index-job.ts`：
+`src/stores/index-job.ts`。**错误形状沿用本仓库既有约定**：六个现存 store（`app-store` / `ledger` / `local-search` / `projects` / `vault`，含 `src/lib/ipc.ts`）一律用 `toAppError(e)` 把 IPC 拒绝收成 `AppErrorShape = { code, message, hint }`，本页不要例外写成 `String(e)` —— 例外会让「按 code 分支」这件事在索引页变成不可能，而它恰恰是 `index_start` 唯一需要的分支（见下面 Step 4 的 `index_running`）。
 
 ```ts
-import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import { indexCancel, indexOverview, indexStart, onIndexProgress } from "@/lib/api";
+import { toAppError, type AppErrorShape } from "@/lib/ipc";
 import type { IndexOverview, IndexProgress } from "@/types/index";
 
 interface IndexJobState {
   overview: IndexOverview | null;
   progress: IndexProgress | null;
-  error: string | null;
+  /** IPC 调用本身被拒（`index_running` / `index_spawn_failed` / 参数校验）时才有值。
+   *  与 `overview.lastError` 是两件事：那个是**上一轮作业**失败的原因串，这个是**这一次点击**没被受理。 */
+  error: AppErrorShape | null;
   load: () => Promise<void>;
   start: (projectId?: string, rebuild?: boolean) => Promise<void>;
   cancel: () => Promise<void>;
@@ -3722,7 +3726,7 @@ export const useIndexJobStore = create<IndexJobState>((set) => ({
     try {
       set({ overview: await indexOverview(), error: null });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: toAppError(e) });
     }
   },
   start: async (projectId, rebuild) => {
@@ -3730,7 +3734,7 @@ export const useIndexJobStore = create<IndexJobState>((set) => ({
       await indexStart(projectId, rebuild);
       set({ error: null });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: toAppError(e) });
     }
   },
   cancel: async () => {
@@ -3738,7 +3742,6 @@ export const useIndexJobStore = create<IndexJobState>((set) => ({
   },
   subscribe: async () => {
     const unlisten = await onIndexProgress((p) => set({ progress: p }));
-    // 一轮结束后再拉一次总览，把 lastRun 与各项目计数换成库里的真值
     return () => unlisten();
   },
 }));
@@ -3748,11 +3751,15 @@ export const isTerminal = (p: IndexProgress | null) =>
   p === null ? false : p.state === "done" || p.state === "cancelled" || p.state === "error";
 ```
 
+`cancel` 这里刻意不 try/catch：`index_cancel` 只做一次原子置位、不返回错误（Task 10 的 `index_cancel` 体是 `store(true)` + `Ok(())`），给它包一层 catch 等于声明了一个不可能的失败路径。
+
 - [ ] **Step 4: 页面**
 
 `src/pages/index-status.tsx`。要点（都要写进去，它们就是 spec 的「可观测性」要求落地）：
 
 - 顶部一行按钮：`建立索引`（增量）、`全量重建`（`rebuild: true`）、`取消`（仅 `running` 时可点）。
+- **两条错误来源在界面上要分开摆，别混成一条红字**：`store.error`（`AppErrorShape`，**这一次点击没被受理**）与 `overview.lastError` / `progress.error`（**上一轮作业挂了**）。前者有 `code` 可分支，`index_running` 必须走中性提示（文案直接用 `message`「已有一轮索引在跑」+ `hint`），不能渲染成红色错误 —— 它的语义是「你点早了」而不是「坏了」；`index_spawn_failed` 才是真错误。后两者没有 code，整段念。
+- `running` 的显示口径以 `overview.running` 为准（它是 Rust 侧原子量的真值），不要用「收到过 running 事件」自己推断 —— 页面在作业中途挂载时，之前的进度事件它一条都没收到。
 - 进度条：`done / total`（total 来自当前项目的 `scannedTotal`，扫完才有，所以开始阶段显示「正在扫描…」而不是假百分比）。
 - **支持类型清单**：把 `overview.supportedExts` 原样列出，并配一句「清单之外的类型（图片、.doc/.ppt、压缩包）不会建行：图片等归 M6 OCR，.doc/.ppt 归 M7」。这是「为什么这个文件搜不到」的第一层答案。
 - **超限与排除**：显示 `maxFileBytes`（换算成 MB）、`maxFilesPerProject`、`excludeDirs`。
