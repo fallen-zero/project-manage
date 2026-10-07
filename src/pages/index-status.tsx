@@ -183,7 +183,15 @@ export function IndexStatusPage() {
               // 上一轮的项目名与文件，「失败发生在项目…」会把诊断指到别的轮次去。
               setLastRunning(null);
               useIndexJobStore.setState({ progress: null });
-              void start(undefined, false);
+              // IPC 一落地就再取一次总览。running 的唯一口径是 overview.running，而 load() 原本只在挂载与
+              // 终态事件两处跑，少这一步的话：从本页发起的那一整轮里 overview.running 全程停在 false ⇒
+              // 徽章念「空闲」、两个 start 按钮一直可点，而 取消 是 disabled={!running} —— 这次挂载里永远点不动，
+              // 用户从本页发起的作业没法从本页取消。这不是赌时序：index_job.rs:335 的
+              // running.swap(true, SeqCst) 在 spawn 之前、命令返回之前就完成，所以 `.then` 里读到的是 true；
+              // 轮次极短、线程已经跑完时读到 false 也是对的。被 index_running 拒绝时 store 的 start 把错误
+              // 收进 error、promise 照样 resolve，此时真值本来就是 true ⇒ 两个 start 按钮随即变灰，
+              // 也就没机会再点一次、把上面那行复位打在正在显示的进度上。
+              void start(undefined, false).then(() => load());
             }}
           >
             建立索引
@@ -197,7 +205,8 @@ export function IndexStatusPage() {
               // 同上：全量重建也要先复位，否则本轮头几秒念的是上一轮的数字。
               setLastRunning(null);
               useIndexJobStore.setState({ progress: null });
-              void start(undefined, true);
+              // 同上：start 落地后补一次 load()，让 overview.running 回到真值，徽章与取消按钮才跟得上这一轮。
+              void start(undefined, true).then(() => load());
             }}
           >
             全量重建
@@ -262,8 +271,12 @@ export function IndexStatusPage() {
         </CardHeader>
         <CardContent className="grid gap-2">
           {progress === null ? (
+            // 空态文案要跟着 running 分支：start 之后 progress 被复位成 null，而补的那次 load() 已把
+            // overview.running 置回 true。这时还写「点上方「建立索引」开始」，就和三格外的「索引进行中」徽章打架。
             <p className="text-xs text-muted-foreground">
-              本轮还没收到进度事件。{running ? "作业已在跑，等下一次回传。" : "点上方「建立索引」开始。"}
+              {running
+                ? "本轮已开始，正在等第一条进度事件。每处理 20 个文件才回传一次，所以头几秒这里是空的。"
+                : "本轮还没收到进度事件。点上方「建立索引」开始。"}
             </p>
           ) : (
             <>
