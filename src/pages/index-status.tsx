@@ -26,7 +26,7 @@ const DOCS_LIMIT = 200;
 const REASON_LABEL: Record<string, string> = {
   too_large: "超出单文件上限",
   empty_text: "抽取到的正文为空（扫描件没文字层属正常，不是失败）",
-  type_unsupported: "类型在清单内但抽取器未实现（清单与分派表漂移）",
+  type_unsupported: "类型在支持清单内，但当前版本没有对应的正文抽取器",
 };
 
 // 未认识的原因原样念出来，不静默吞掉：新加一档跳过原因时界面上至少还有个看得见的英文键。
@@ -83,6 +83,8 @@ export function IndexStatusPage() {
   const [lastRunning, setLastRunning] = useState<{ projectName: string; current: string } | null>(
     null,
   );
+  // 订阅本身失败的原因（listen 在非 Tauri 环境会 reject）：与「这一次点击没被受理」「上一轮挂了」并列的第三条来源。
+  const [subscribeError, setSubscribeError] = useState<AppErrorShape | null>(null);
   const terminalSeen = useRef<IndexProgress | null>(null);
 
   // 生命周期：挂载先取总览（running 的真值只在 IPC 里），再订阅进度；卸载一定 unlisten。
@@ -90,10 +92,16 @@ export function IndexStatusPage() {
     let alive = true;
     let unlisten: (() => void) | null = null;
     void load();
-    void subscribe().then((fn) => {
-      if (alive) unlisten = fn;
-      else fn(); // 订阅回来时页面已卸载，当场退订，不留悬空监听
-    });
+    void subscribe()
+      .then((fn) => {
+        if (alive) unlisten = fn;
+        else fn(); // 订阅回来时页面已卸载，当场退订，不留悬空监听
+      })
+      // 与本页其余异步路径同一口径记 toAppError：吞掉 reject 就等于「进度条一动不动，界面上半点提示都没有」，
+      // 而那正是本页最难自查的失效形态（浏览器里直接 npm run dev 时没有 __TAURI_INTERNALS__，listen 必拒）。
+      .catch((e) => {
+        if (alive) setSubscribeError(toAppError(e));
+      });
     return () => {
       alive = false;
       unlisten?.();
@@ -169,6 +177,12 @@ export function IndexStatusPage() {
             disabled={running}
             onClick={() => {
               setCancelRequested(false);
+              // 发 IPC 之前先复位进度：store 的 progress 只在事件回调里写、从不清，页面也不清的话，
+              // 点击到下一条 running 事件之间（PROGRESS_EVERY = 20，第 20 个已处理文件才回传）进度卡会
+              // 继续念上一轮的终态；更坏的是新轮在发出任何 running 事件前就失败，此时 lastRunning 还是
+              // 上一轮的项目名与文件，「失败发生在项目…」会把诊断指到别的轮次去。
+              setLastRunning(null);
+              useIndexJobStore.setState({ progress: null });
               void start(undefined, false);
             }}
           >
@@ -180,6 +194,9 @@ export function IndexStatusPage() {
             disabled={running}
             onClick={() => {
               setCancelRequested(false);
+              // 同上：全量重建也要先复位，否则本轮头几秒念的是上一轮的数字。
+              setLastRunning(null);
+              useIndexJobStore.setState({ progress: null });
               void start(undefined, true);
             }}
           >
@@ -219,6 +236,20 @@ export function IndexStatusPage() {
       {overview && !overview.fts5Available && (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
           本构建没有编进 SQLite FTS5，全文索引建不起来。这属于打包问题，不是数据问题。
+        </div>
+      )}
+
+      {/* 第三条来源：进度事件订阅没成功。作业本身照跑，只是这一页一条进度都收不到，所以摆在进度卡之前。 */}
+      {subscribeError && (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <div className="font-medium">进度事件订阅失败：这一页收不到进度，进度条不会动。</div>
+          <div className="mt-0.5 break-all" title={subscribeError.hint ?? undefined}>
+            {subscribeError.message}
+            {subscribeError.hint ? `（${subscribeError.hint}）` : ""}
+          </div>
+          <div className="mt-0.5 opacity-80">
+            索引作业本身不受影响；这多半说明当前不是 Tauri 运行时（在浏览器里直接开前端就是这样）。
+          </div>
         </div>
       )}
 
@@ -477,7 +508,7 @@ export function IndexStatusPage() {
                   ))}
                   {docs.length === DOCS_LIMIT && (
                     <li className="text-xs text-muted-foreground">
-                      只显示前 {DOCS_LIMIT} 行，其余用下方「试搜」按词找。
+                      已达本次 {DOCS_LIMIT} 行上限，可能还有更多。
                     </li>
                   )}
                 </ul>
