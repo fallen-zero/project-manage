@@ -3500,6 +3500,7 @@ fn index_overview(state: State<'_, AppState>) -> AppResult<IndexOverview> {
                 total: counts.iter().map(|c| c.count).sum(),
                 project_id: t.project_id,
                 project_name: t.project_name,
+                // 只读探测：根目录没挂载时在界面上点名它，绝不创建或修改任何路径
                 root_exists: std::path::Path::new(&t.root_path).is_dir(),
                 root_path: t.root_path,
                 ok: pick("ok"),
@@ -3778,13 +3779,15 @@ export const isTerminal = (p: IndexProgress | null) =>
 `src/pages/index-status.tsx`。要点（都要写进去，它们就是 spec 的「可观测性」要求落地）：
 
 - 顶部一行按钮：`建立索引`（增量）、`全量重建`（`rebuild: true`）、`取消`（仅 `running` 时可点）。
+- **两个 start 按钮在发 IPC 之前必须先把进度状态复位**（`setLastRunning(null)` 与 `useIndexJobStore.setState({ progress: null })`）。这不是打磨项是正确性：store 的 `progress`（Step 3 那份主体）只在事件回调里写、**从不清**，页面也不清，于是点完按钮到下一条 `running` 事件之间（`PROGRESS_EVERY = 20`，即第 20 个**已处理**文件才发）进度卡会继续渲染**上一轮的终态** —— 「已完成」徽章配上一轮的 `done / total`，恰好是用户最盯着看的那几秒；更坏的一支是新轮在发出任何 `running` 事件前就失败（`index_job.rs:351-359` 的 `db::open` / `ScanOptions::load` / `targets`，或第一个项目前 20 个文件内出错），此时 `progress.state === "error"` 而 `lastRunning` 还是上一轮那条，页面会把**上一轮的项目名和文件**念成「失败发生在项目「X」，正在处理 …」—— 把 Task 9 专门加的 `last_error` 诊断出口指错了地方。复位放在**页面**而不是塞进 store：Step 3 那份 store 主体是 IPC 契约的镜像，且 `start` 里塞复位会让「store 只有 load/start/cancel/subscribe 四个动作」这条约定变形。同根因的附带症状：`terminalSeen` 起 `null` 而 store 仍持上一轮终态，每次重挂载会多跑一次 `load()` —— 无害，但它证明这份进度状态该随挂载作用域走。
 - **两条错误来源在界面上要分开摆，别混成一条红字**：`store.error`（`AppErrorShape`，**这一次点击没被受理**）与 `overview.lastError` / `progress.error`（**上一轮作业挂了**）。前者有 `code` 可分支，`index_running` 必须走中性提示（文案直接用 `message`「已有一轮索引在跑」+ `hint`），不能渲染成红色错误 —— 它的语义是「你点早了」而不是「坏了」；`index_spawn_failed` 才是真错误。后两者没有 code，整段念。
 - `running` 的显示口径以 `overview.running` 为准（它是 Rust 侧原子量的真值），不要用「收到过 running 事件」自己推断 —— 页面在作业中途挂载时，之前的进度事件它一条都没收到。
 - 进度条：`done / total`（total 来自当前项目的 `scannedTotal`，扫完才有，所以开始阶段显示「正在扫描…」而不是假百分比）。
 - **支持类型清单**：把 `overview.supportedExts` 原样列出，并配一句「清单之外的类型（图片、.doc/.ppt、压缩包）不会建行：图片等归 M6 OCR，.doc/.ppt 归 M7」。这是「为什么这个文件搜不到」的第一层答案。
 - **超限与排除**：显示 `maxFileBytes`（换算成 MB）、`maxFilesPerProject`、`excludeDirs`。
 - 项目表：每个项目一行 —— 名称、根目录（不可达时红标 `rootExists=false`，文案「根目录当前不可达，通常是盘没挂载」）、`ok / skipped / failed` 三个数字（`pending` / `missing` 也在载荷里，为什么只念三个见下面那条）。选中一行后下方列出该项目的文件行（`indexDocs`），状态筛选下拉：全部 / ok / skipped / failed。
-- 每条文件行展示 `skipReason`（`too_large` / `empty_text`）与 `errorMsg` 的中文映射，例如 `too_large` → `超出单文件上限`。映射写成 `src/pages/index-status.tsx` 内的一个 `const REASON_LABEL: Record<string, string>`，不要为它建 store。**不要给 `over_project_cap` 留映射**：触顶后被丢弃的文件根本不建行（`scan_root` 在 `break` 之后什么都不返回，见 Task 6 的 `capped`），M3 没有任何写入方；留着等于告诉用户「这里本该有一行」，是假的可观测性。上限这件事由下一行的项目级 `capped` 标注回答。
+- 每条文件行展示 `skipReason`（**三档都有写入方**：`too_large` ← `index_job.rs:170`、`empty_text` ← `index_store.rs:36,41`、`type_unsupported` ← `index_job.rs:196`）与 `errorMsg` 的中文映射，例如 `too_large` → `超出单文件上限`，`type_unsupported` → `类型在支持清单内，但当前版本没有对应的正文抽取器`（**别写成「清单与分派表漂移」这类开发内部词**，这一栏是给用户看的）。映射写成 `src/pages/index-status.tsx` 内的一个 `const REASON_LABEL: Record<string, string>`，不要为它建 store；未命中映射的未知值原样显示（`REASON_LABEL[r] || r`），不要静默丢掉。**不要给 `over_project_cap` 留映射**：触顶后被丢弃的文件根本不建行（`scan_root` 在 `break` 之后什么都不返回，见 Task 6 的 `capped`），M3 没有任何写入方；留着等于告诉用户「这里本该有一行」，是假的可观测性。上限这件事由下一行的项目级 `capped` 标注回答。
+- 文件清单翻到上限时的文案**不许断言「其余还有 N 条」**：`list_docs` 只回行、不回总数，所以 `docs.length === 200` 既可能是「截断了」也可能「正好 200 条」。写「已达本次 200 行上限，可能还有更多」这种带不确定的说法。
 - **失败原因有两条来源，都要念，缺一不可**：`progress.error`（事件里那条，只在 `state === "error"` 非 null，实时）与 `overview.lastError`（IPC 里那条，页面切走再回来、或刷新后唯一还留下的证据）。所以收到终态事件后必须再 `load()` 一次（生命周期已写死），否则界面上「这一轮挂了」和「为什么挂」会分家。另两条边界：**`error` 终止事件不带计数** —— `report_failure` 发的是 `terminal("error", &[], ...)`，`total`/`done` 恒为 0、`results` 是空数组，「跑到第几个项目挂的」只能取失败前最后一条 `running` 事件的 `projectName` / `current`，别去 error 事件里找数字；`lastError` 是 `[code] message（hint）` 的整串，**直接整段显示**，不要按 code 分支（要分支就得先把 `AppError` 拆成三元组透出，那是另一件事）。
 - 项目表那五个计数里，**M3 只有 `ok / skipped / failed` 三个有写入方**（`write_doc` 的 `DocOutcome` 只映射这三个，`index_store.rs:33-43`）。`pending` 只是 `index_docs.index_status` 的列默认值（`db.rs:290`），`missing` 是 M5 对账预留的（`db.rs:374` 注明 CHECK 改不动、必须现在就在枚举里）—— 二者在 M3 恒为 0。**类型里保留这两个字段**（契约要与 CHECK 对齐），但页面上不要给它们占栏位，更不要写成「待处理 0 / 已丢失 0」这种看起来像结论的文案：那会让用户以为「0 个待处理 = 全处理完了」。
 - 上一轮摘要：`lastRun.results` 里逐项目显示 `scannedTotal / ok / skipped / failed / unchanged`，并显式标出 `capped`（文案用 `已达单项目文件上限，本轮只处理前 N 个（含超限跳过的行），其余文件本轮没有行`）与 `rootMissing`、`walkErrors`。**别把 `scannedTotal` 念成「索引了 N 个」**：Task 6 的配额是在分「可抽取 / 超限」两桶**之前**判的（见 Task 9 Interfaces 的 capped 语义），这 N 个里含 `too_large` 的 skipped 行，而真正能抽正文的文件可能反而被挤掉了。
@@ -3792,7 +3795,7 @@ export const isTerminal = (p: IndexProgress | null) =>
 - 敏感字段脱敏的既有约定不影响本页（本页没有任何密文列）。
 - 样式：全部用 Tailwind 工具类 + `@/components/ui` 里的 `Button`/`Card`/`Input`/`Select`/`Badge`；不新建样式文件。
 
-生命周期：`useEffect` 里先 `load()`，再 `subscribe()`；收到终态事件时再 `load()` 一次；卸载时调用 unlisten。
+生命周期：`useEffect` 里先 `load()`，再 `subscribe()`；收到终态事件时再 `load()` 一次；卸载时调用 unlisten。`subscribe()` 那个 promise **必须挂 `.catch` 并把原因落到页面上看得见的状态**：本页其余三条异步路径（`load` / `start` / 翻清单）都记 `toAppError`，唯独这里写成 `void subscribe().then(...)` 就是静默吞错 —— `listen` 在非 Tauri 环境（比如浏览器里直接 `npm run dev`，没有 `__TAURI_INTERNALS__`）会 reject，届时页面一条进度事件都收不到却半点提示都没有，而「进度条不动」正是本页最难自查的失效形态。
 
 - [ ] **Step 5: 路由与导航**
 
