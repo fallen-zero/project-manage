@@ -105,6 +105,32 @@ pub fn targets(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<Sca
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// 无根项目回收：把「登记中没有 root 行的项目不拥有任何索引行」这条不变量做成**每轮自动收敛**。
+/// 为什么必须有它（终审定向复审 I-1）：`run_pass` 只在轮次开头取一次 `targets()` 快照，作业运行中
+/// 注销根目录时 `project::remove_dir` 的 `clear_project` 先把行删掉，那一轮却仍拿着旧快照继续为
+/// 该项目的文件 `write_doc` ⇒ 「可被搜到的陈旧行」悄悄长回来，而没有 root 行的项目不再出现在
+/// `targets()` 里，`clear_project` 对它重新变成不可达。`db.rs:70` 的 `busy_timeout` 只兜撞锁，兜不住这种覆写。
+/// 为什么软删项目不在范围内（`p.deleted_at IS NULL` 这一条不许省掉也不许写反）：软删项目的行是
+/// **故意留着**给恢复用的，`index_store::SELECT_SQL` 已经用同一个条件把它们挡在检索外，
+/// sweep 若顺手清掉，就等于把「恢复项目」变成「重建几十 GB 索引」。这条由
+/// `the_sweep_spares_a_soft_deleted_project` 钉住。
+/// 收敛时机**不是即时**：本轮末尾清一次，sweep 之后才发生的注销要等下一轮末尾；
+/// 两条 cancel 早退路径不做额外写库（见 `run_pass` 末尾调用点的注释）。
+pub fn sweep_unrooted_projects(conn: &Connection) -> AppResult<usize> {
+    let ids: Vec<String> = conn
+        .prepare(
+            "SELECT p.id FROM projects p
+              WHERE p.deleted_at IS NULL
+                AND NOT EXISTS (SELECT 1 FROM project_dirs d WHERE d.project_id = p.id AND d.kind = 'root')",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    for id in &ids {
+        clear_project(conn, id)?;
+    }
+    Ok(ids.len())
+}
+
 /// 时间戳走 SQLite 的 `datetime('now')`：`chrono` 虽在 spec 第七节的清单里，但 Cargo.toml
 /// 目前没引（M0-M2 没用到），为一个字符串新增依赖不划算，且这样和 V1-V4 里 `created_at` 同源。
 fn now(conn: &Connection) -> String {
@@ -241,6 +267,15 @@ pub fn run_pass(
         results.push(acc);
     }
 
+    // 轮末回收（成因修法，见 `sweep_unrooted_projects` 的头注释）：把「没有 root 行的项目不拥有索引行」
+    // 这一条在本轮末尾收敛掉，历史残留与运行中注销被旧快照写回的那批行都走这里，用户不需要任何操作。
+    // 返回的被清项目数刻意丢弃：塞进 `RunSummary` 要连带改 `src/types/index.ts`、store、页面与 IPC 契约，
+    // 越出本轮范围；代价记在 `docs/开发进度.md` —— 界面上看不到「刚才替你回收了几行」。
+    // 上面两条 cancel 早退路径（循环开头那条、循环内 `cancelled` 那条）刻意不加 sweep：一轮被用户
+    // 取消时不做额外写库，垃圾行留给下一轮末尾收敛，这是取舍不是漏写。
+    // 而下面这行 `state` 即使算出 `"cancelled"` 也不属于那两条 —— 那是「循环跑完后才收到取消」，
+    // 本轮的活已经干完，所以 sweep 照常在返回之前执行，不要再为它补一个条件。
+    let _ = sweep_unrooted_projects(conn)?;
     let state = if cancel.load(Ordering::Relaxed) { "cancelled" } else { "done" };
     Ok(RunSummary { state, results, started_at, finished_at: now(conn) })
 }
@@ -796,7 +831,7 @@ mod tests {
     }
 
     /// 里程碑级红线「一个坏文件只废它自己、不打挂整轮」的 **pass 级**测试（终审 I2）。
-    /// 既有夹具 `tree()` 里没有任何文件能让 `extract_text` 返回 Err，所以 `:451` 的
+    /// 既有夹具 `tree()` 里没有任何文件能让 `extract_text` 返回 Err，所以 `:529` 的
     /// `assert_eq!(one.failed, 0)` 恒真：把 `run_pass` 的失败 arm 整段删掉改成 `?` 上抛，
     /// 原来的 96 条一个都不会红 —— 这条测试存在的全部理由就是让那段代码有东西守着。
     /// 断言全部写具体数字，且额外钉住三件事：坏文件**照样有一行**（不静默丢弃）、
@@ -852,5 +887,106 @@ mod tests {
         assert_eq!((last.done, last.ok, last.failed), (3, 2, 1), "项目边界的进度事件也要对得上：{last:?}");
         assert_eq!(crate::index_store::doc_hits(&conn, "验收", 20).unwrap().len(), 1, "其余文件仍可检索");
         assert_eq!(crate::index_store::fts_orphan_rows(&conn), 0, "一轮里有失败行也不该留下对不上主表的虚表行");
+    }
+
+    /// 不经磁盘扫描、直接给 `write_doc` 造入参。`path` 在这里只是**字符串键**（一行归属哪个路径），
+    /// 测试不会去创建或读取它 —— 红线要求的夹具落点只有 `tempfile::tempdir()` 与 `db::open_in_memory()`。
+    fn scanned(path: &str) -> crate::index_scan::ScannedFile {
+        crate::index_scan::ScannedFile {
+            path: path.to_owned(),
+            file_name: path.rsplit(['/', '\\']).next().unwrap_or(path).to_owned(),
+            ext: "txt".to_owned(),
+            size: 128,
+            mtime: 1_700_000_000,
+        }
+    }
+
+    /// 无根项目的残留行必须在轮末被自动回收（定向复审 I-1 的成因修法）。
+    /// p2 刻意做成**只有行、没有 root 行** —— 那正是「作业运行中注销根目录、`clear_project` 已经删过一遍，
+    /// 本轮却仍拿着 `targets()` 旧快照把行写回来」之后的形态；而 `targets()` 里不再有 p2，
+    /// 重建循环连一次都够不着它（「点一次全量重建就能回收」是错的），所以只能由轮末的 sweep 收敛。
+    /// 最后那条检索断言是关键项：只数行数会漏掉「虚表侧没删干净所以照样搜得到」。
+    #[test]
+    fn a_pass_reclaims_rows_left_by_an_unrooted_project() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("验收.txt"), "甲方要求验收指标".as_bytes()).unwrap();
+        std::fs::write(dir.path().join("报价.txt"), "报价单里写着验收流程".as_bytes()).unwrap();
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", dir.path());
+        conn.execute("INSERT INTO projects (id, name, status) VALUES ('p2', '已注销根目录的项目', '立项')", []).unwrap();
+        // 两行里一行带正文（会产生虚表行）、一行是 skipped（只有状态行）—— 两种形态都要被回收。
+        write_doc(&conn, "p2", &scanned("C:/已注销/遗留说明.txt"), DocOutcome::Ok("遗留正文 付款条件".into())).unwrap();
+        write_doc(&conn, "p2", &scanned("C:/已注销/遗留清单.txt"), DocOutcome::Skipped("too_large")).unwrap();
+
+        // 正面照控（跑之前）：p2 的行真的在库里、正文真的搜得到，否则下面两条「没了」是恒真的。
+        assert_eq!(doc_rows(&conn, "p2"), 2, "前提：p2 的两行都真的在库里");
+        assert_eq!(crate::index_store::doc_hits(&conn, "付款条件", 20).unwrap().len(), 1,
+            "前提：p2 的正文此刻确实可被搜到，否则末尾那条「搜不到」什么都没证明");
+
+        let summary = run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(summary.state, "done", "{:?}", summary.state);
+
+        assert_eq!(doc_rows(&conn, "p1"), 2, "有根项目的行一格不许动");
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收", 20).unwrap().len(), 2, "p1 的检索结果不许受影响");
+        assert_eq!(doc_rows(&conn, "p2"), 0, "无根项目的残留行必须在轮末被回收");
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM index_docs_fts", [], |r| r.get::<_, i64>(0)).unwrap(),
+            2,
+            "虚表侧只剩 p1 的那两行"
+        );
+        assert_eq!(crate::index_store::fts_orphan_rows(&conn), 0, "回收必须双侧对齐，不许留下孤儿虚表行");
+        assert!(crate::index_store::doc_hits(&conn, "付款条件", 20).unwrap().is_empty(),
+            "还搜得到就说明行没删干净 —— 这一格比行数断言更接近用户看到的失效形态");
+    }
+
+    /// sweep 不许顺手清掉软删项目的行：`p.deleted_at IS NULL` 这一条件的专属断言。
+    /// 软删是「先单人、预留多人」的删除语义，行留着才谈得上恢复；`index_store::SELECT_SQL` 已经靠
+    /// 同一个条件把它们挡在检索外，所以「搜不到」根本不需要靠删行来达成 —— 清掉只会把恢复变成重抽几十 GB。
+    /// 两个项目都软删、都留有行，但只有一个能守住那条变异：
+    /// - `p2` 留着 root 行（复审简报字面写的形状）：它靠 `NOT EXISTS (… kind = 'root')` 就被放行，
+    ///   把 `deleted_at IS NULL` 删掉它照样不动 ⇒ 对那次变异是恒绿的；
+    /// - `p3` 已经没有 root 行（先注销根、行被旧快照写回来、随后项目被软删）：只有它让
+    ///   `deleted_at IS NULL` 承重 —— 删掉那个条件，p3 当场被 sweep 清成 0 行，本用例红。
+    ///
+    /// 两条都走 `crate::project` 的既有函数（`remove_dir` / `delete_project`），不手写软删 SQL。
+    #[test]
+    fn the_sweep_spares_a_soft_deleted_project() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("验收.txt"), "甲方要求验收指标".as_bytes()).unwrap();
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", dir.path());
+
+        conn.execute("INSERT INTO projects (id, name, status) VALUES ('p2', '软删但留着根目录', '立项')", []).unwrap();
+        conn.execute("INSERT INTO project_dirs (id, project_id, kind, path) VALUES ('p2-d', 'p2', 'root', 'Z:/没挂载/根目录')", [])
+            .unwrap();
+        write_doc(&conn, "p2", &scanned("C:/软删/合同说明.txt"), DocOutcome::Ok("软删项目遗留 付款条件".into())).unwrap();
+        crate::project::delete_project(&conn, "p2").unwrap();
+
+        seeded_project(&conn, "p3", dir.path());
+        crate::project::remove_dir(&conn, "p3", "p3-d").unwrap(); // root 行没了（此刻库里还没行）
+        write_doc(&conn, "p3", &scanned("C:/软删/维保说明.txt"), DocOutcome::Ok("软删且无根遗留 付款条件".into())).unwrap();
+        crate::project::delete_project(&conn, "p3").unwrap();
+
+        assert_eq!(doc_rows(&conn, "p2"), 1, "前提：p2 的行在库里");
+        assert_eq!(doc_rows(&conn, "p3"), 1, "前提：p3 的行在库里");
+        let fts_before: i64 = conn
+            .query_row("SELECT count(*) FROM index_docs_fts", [], |r| r.get(0))
+            .unwrap();
+
+        let summary = run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(summary.state, "done", "{:?}", summary.state);
+        assert_eq!(summary.results.iter().filter(|r| r.project_id == "p1").count(), 1, "p1 照常进了本轮");
+        assert_eq!(doc_rows(&conn, "p1"), 1, "对照：活着的有根项目该有一行");
+
+        assert_eq!(doc_rows(&conn, "p2"), 1, "软删且留着 root 行：行不许动");
+        assert_eq!(doc_rows(&conn, "p3"), 1, "软删且没有 root 行：行同样不许被 sweep 清掉，那是留给恢复的");
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM index_docs_fts", [], |r| r.get::<_, i64>(0)).unwrap(),
+            fts_before + 1,
+            "虚表侧只该多出 p1 那一行，软删项目的两行都还在原地"
+        );
+        assert!(crate::index_store::doc_hits(&conn, "付款条件", 20).unwrap().is_empty(),
+            "软删项目的内容靠 deleted_at 过滤挡住，不是靠删行 —— 行在库里而搜不到才是对的");
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收", 20).unwrap().len(), 1, "活项目照常可搜");
     }
 }

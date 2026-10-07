@@ -340,8 +340,11 @@ fn replace_tags(conn: &Connection, project_id: &str, tags: &[String]) -> AppResu
 /// 改指新根 = 声明旧根那一套文件不再属于本项目，所以旧路径的索引行要跟着回收（终审 I3）：
 /// `index_job::targets()` 只认登记中的 root 行，旧根一被替换就永远不再进入任何一轮 pass，
 /// 于是 `clear_project`（唯一会双侧删的入口）对它不可达，旧根的文件会继续命中搜索。
-/// 并发前提（不额外加锁）：worker 用的是自己那条连接（见 `index_job::start` 的头注释），
-/// `db.rs:70` 已配 `busy_timeout = 5000`，所以作业运行中做一次删除是被允许的；本轮不引入跨连接互斥。
+/// 并发前提（不额外加锁）：worker 用的是自己那条连接（见 `index_job::start` 的头注释）。这里要分清两件事：
+/// **撞锁**由 `db.rs:70` 配的 `busy_timeout = 5000` 兜住；**覆写**不由它兜 —— 作业运行中改指新根时，
+/// 本轮 `run_pass` 手里还握着轮次开头那一次 `targets()` 快照，会在 `clear_project` 之后继续为旧根的文件写行，
+/// 刚回收的行被写回来。即时那一半由这里的 `clear_project` 负责，被写回来的那一半由
+/// `index_job::sweep_unrooted_projects` 在本轮末尾（最迟下一轮末尾）收敛；本轮不引入跨连接互斥。
 pub fn set_root_dir(conn: &Connection, project_id: &str, input: &DirInput) -> AppResult<ProjectDir> {
     let path = validate_path(&input.path)?;
     get_project(conn, project_id)?;
@@ -389,7 +392,12 @@ pub fn add_entry_dir(conn: &Connection, project_id: &str, input: &DirInput) -> A
 /// 页面既看不到它们也没有按钮能清。schema 层事后判断不了一行属于哪次登记
 /// （`index_docs` 没有任何列指向 `project_dirs.id`），所以只能在成因这一侧收口。
 /// `entry` 类目录从来不是索引作用域，删它不许动索引（`removing_an_entry_dir_keeps_the_index_rows` 钉住）。
-/// 并发前提同 `set_root_dir`：worker 用自己的连接，`db.rs:70` 的 `busy_timeout = 5000` 允许这一次删除。
+/// 并发前提同 `set_root_dir`，而且必须说全：`db.rs:70` 的 `busy_timeout = 5000` 只兜住**撞锁**，
+/// 兜不住**覆写** —— 作业运行中注销根目录，本轮 `run_pass` 仍握着轮次开头那一次 `targets()` 快照，
+/// 会在 `clear_project` 之后继续为该项目的文件写行，把刚删掉的行写回来（而 root 行一没，
+/// `targets()` 就不再列出该项目，重建循环此后每次也都够不着它）。
+/// 这里负责即时回收那一半，被写回来的那一半由 `index_job::sweep_unrooted_projects` 在本轮末尾
+/// （最迟下一轮末尾）收敛；软删项目的行不在 sweep 范围内，那是留给恢复的。
 pub fn remove_dir(conn: &Connection, project_id: &str, dir_id: &str) -> AppResult<()> {
     // 先读 kind 再删：删掉之后就问不出这一行原本是 root 还是 entry 了。
     let kind = conn
