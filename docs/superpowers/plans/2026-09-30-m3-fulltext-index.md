@@ -3365,7 +3365,8 @@ git commit -m "feat: M3 索引作业：可测的 run_pass 与后台线程 emit �
   - `search_docs(query: string, limit?: number) -> DocHit[]`
 
 **本任务新添的三条边界，Task 11/12 要按它们写（都是控制方核对过的既有行为，别当成笔误）：**
-- **两处 clamp 是底层函数唯一的边界校验**：`list_docs` 里 `limit<=0` 会走「精确段回 0 行 → 再发一次前缀段查询」的**两段回退 = 两次 SQL 往返**，`index_docs` 的 `limit.clamp(1, 500)` 与 `search_docs` 的 `limit.unwrap_or(50).clamp(1, 200)` 把它挡在 IPC 边界上；`offset` 只 `.max(0)`（不做上限）。别把 clamp 挪进 `index_store.rs`：那一层还要给测试用 `limit=0` 断「0 行结果」这个语义。
+- **两处 clamp 是底层函数唯一的边界校验**。语义实测于本机 SQLite 3.50.4：`LIMIT 0` = **0 行**、`LIMIT 负数` = **不限行**、`OFFSET 负数` 当 0。两条路径代价不同但都必须挡在 IPC 上：`list_docs`（`index_store.rs:156-183`，只有一条 prepared statement，`limit` 原样进 SQL）拿到负数时**一次拉出整个项目**（上限 50000 行）进 IPC 载荷；`doc_hits`（`index_store.rs:240`，两段回退在 `:252-259`）拿到 `LIMIT 0` 时精确段必空，于是**白跑一趟前缀段 = 两次 SQL 往返，仍然回 0 行**。所以 `index_docs` 的 `limit.clamp(1, 500)` 与 `search_docs` 的 `limit.unwrap_or(50).clamp(1, 200)` 是唯一的挡板；`offset` 只 `.max(0)`（不做上限）。别把 clamp 挪进 `index_store.rs`：那一层的既有测试就靠 `limit=0`/`limit=-1` 钉住这两个语义（`index_store.rs:623` 「负数 = 不限行」、`:624` 「0 就是 0 行，不许悄悄变成默认值」），挪上去这两条断言当场失去对象。
+  （**修订记录**：本条初版把「`limit<=0` → 两段回退 = 两次往返」记在 `list_docs` 名下，归因写错了对象 —— 两段回退属 `doc_hits`，`list_docs` 根本没有第二段。行为结论不变（clamp 仍是唯一挡板、仍不许下沉），Task 10 实现者实测纠正，控制方按源码与本库 `doc_hits` 的注释 `:237-239` 复核后改定。**Task 11 若要在界面上解释这两个 clamp，抄这一段，别抄旧简报。**)
 - **`last_error` 是字符串不是结构化错误**：内容是 `format!("{e}")`，形如 `[db_open_failed] 打不开库（hint…）`（`AppError` 只 derive `Debug`、没有 `Clone`，跨线程只能留串）。界面**整段念出来**就行；真要按照 code 分支（例如 `index_running` 不弹红、只提示），得先把它改成 `(code, message, hint)` 三元组再透出 —— 那是另一件事，别在本任务顺手改。
 - **`Progress` 的终止事件不属于任何项目**：`state` 取值是 `running | done | cancelled | error`，`error` 字段只在 `state == "error"` 有值，而 `terminal(...)` 发的那条 `project_id` / `project_name` / `current` 都是**空串**。Task 11 不能拿 `projectId` 当事件的 map key，也不能因为 `current` 是空串就判定「没在干活」。
 
