@@ -25,7 +25,7 @@ M3 已经交出两条互不相认的检索通路：`search_local` → `FieldHit[
 | D2 | 三段骨架，「项目」段的语义钉死为**项目档案本身的命中**（`source == "project"`），不是聚合轴；台账段与正文段各自段内按 `project_id` 聚簇，**不做跨段的项目合并** | 跨段合并会让同一项目的台账行与正文行比邻，而 `bm25` 与 LIKE 命中根本没有可比分数——§3.4 明令「不做假的归一化」。七段平铺（六段台账 + 正文）：改动最小，但命中跨 8 个项目时同一个东西的两类结果隔三屏远，「在哪个项目里」要用户自己拼。 |
 | D3 | 簇间排序**不用分数**：按该簇命中条数降序、并列按项目名升序；簇内保持来源自身的序（台账按现有 SQL 序、正文按 `bm25` 升序） | 按「簇内最强分数」排需要跨域可比分数，即 D2 否掉的那件事。 |
 | D4 | 预览入参**只有 `doc_id`**，`path` 由后端从 `index_docs` 取，且要求 `index_status = 'ok'` 才读盘 | 按 `path` 取 + 后端前缀校验：好处是未入库的文本也能点开看，代价是整条通路的安全全押在一条 `substr` 比较上，而 Windows 的盘符大小写 / 结尾分隔符 / 8.3 短名 / `\\?\` 前缀 / junction 全是绕过面，会把 M3 的 m5（路径从未归一化）从 Minor 升级成本轮必修 + 一次 schema 改动。按行 id 取，路径权威就收在库内，前端根本拿不到路径参数。 |
-| D5 | 列表摘要继续用 `snippet()`，观感问题（`cut_for_search` 复合词重复两次）在**展示清洗层**解决 | 加 `UNINDEXED` 正文列取原文摘要：要进 V5 迁移，而旧行的正文列只能重抽才能填上 ⇒ 所有已建索引一次全量重建（真实库是几十 GB 重扫），为一个观感问题付这个代价不成比例。接受现状不处理：用户会当成 bug。 |
+| D5 | 列表摘要继续用 `snippet()`，观感问题（`cut_for_search` 复合词重复两次）在**展示清洗层**解决，规则写成 `A B AB` 三连折叠 | 折「相邻同词」：那正是原文真重复（「数据 数据」）的形态，折了等于篡改用户正文。加 `UNINDEXED` 正文列取原文摘要：要进 V5 迁移，而旧行的正文列只能重抽才能填上 ⇒ 所有已建索引一次全量重建（真实库是几十 GB 重扫），为一个观感问题付这个代价不成比例。接受现状不处理：用户会当成 bug。 |
 | D6（控制方代定，可推翻） | `search_all` 一次往返跑完 6 段 LIKE + 1 条 FTS，**不**提前拆「正文先回、台账后回」的分段渲染 | 拆段多一条命令、多一处时序，而 spec §十-1 的「性能数字未做运行时验证」这笔账要在真机沙盒里量一次才有资格决定怎么拆。量法见第九节。 |
 | D7（控制方代定，可推翻） | `matchedBy` 不逐条标 `exact`，只给 `prefix` 的行一个小徽章，并在该段**第一次**出现放宽命中时补一行说明 | 逐条标 `exact` 是给绝大多数结果加噪音；完全不标则违反 §6.1「噪音由标注暴露给前端」。 |
 
@@ -40,8 +40,8 @@ pub struct SearchBundle {
     pub projects: Vec<FieldHit>,      // source == "project" 的命中，最多 10 条
     /// 被 `MAX_PROJECT_HITS` 截掉的条数。「项目」段是平铺列表，没有簇可挂计数。
     pub projects_hidden: usize,
-    pub ledger: ClusterSection<LedgerCluster>,
-    pub docs: ClusterSection<DocCluster>,
+    pub ledger: ClusterSection<Cluster<FieldHit>>,
+    pub docs: ClusterSection<Cluster<DocHit>>,
     pub relaxed: bool,                // 正文段里存在 matchedBy == "prefix" ⇒ 段级说明只出现一次
     /// COUNT(DISTINCT d.project_id)，谓词必须与 `index_store.rs` 的 SELECT_SQL 同口径：
     /// `d.index_status = 'ok' AND p.deleted_at IS NULL`。少半个谓词就会出现「文案说正文有索引、
@@ -52,13 +52,11 @@ pub struct SearchBundle {
 #[derive(Serialize)] #[serde(rename_all = "camelCase")]
 pub struct ClusterSection<C> { pub clusters: Vec<C>, pub hidden_clusters: usize }
 
+/// 两段的簇形状除 `items` 的元素类型外逐字段相同，因此只写一个泛型结构，不写两个同构结构。
+/// 泛型不影响线格式：serde 按 `T` 的具体实例化生成序列化，`rename_all` 照样生效。
 #[derive(Serialize)] #[serde(rename_all = "camelCase")]
-pub struct LedgerCluster { pub project_id: String, pub project_name: String,
-                           pub items: Vec<FieldHit>, pub hidden: usize }
-
-#[derive(Serialize)] #[serde(rename_all = "camelCase")]
-pub struct DocCluster    { pub project_id: String, pub project_name: String,
-                           pub items: Vec<DocHit>,  pub hidden: usize }
+pub struct Cluster<T> { pub project_id: String, pub project_name: String,
+                        pub items: Vec<T>, pub hidden: usize }
 
 #[derive(Serialize)] #[serde(rename_all = "camelCase")]
 pub struct DocPreview {
@@ -109,14 +107,14 @@ fn doc_preview(state: State<AppState>, doc_id: String, query: String) -> AppResu
 
 ## 六、模块与文件切分
 
-- `src-tauri/src/search.rs` —— 新增 `unified_bundle()` 与四个 DTO（`SearchBundle` / `ClusterSection<C>` / `LedgerCluster` / `DocCluster`；`DocPreview` 归 `doc_preview.rs`）；分组、聚簇、截断都在这里。不新建 `unified.rs`：架构图 §三 里 `search` 那一格写的就是「jieba 分词 → FTS5 查询 → 结果分组」，分组本来就是它的职责。
+- `src-tauri/src/search.rs` —— 新增 `unified_bundle()` 与三个 DTO（`SearchBundle` / `ClusterSection<C>` / `Cluster<T>`；`DocPreview` 归 `doc_preview.rs`，`DocHit`/`FieldHit` 复用既有）；分组、聚簇、截断都在这里。不新建 `unified.rs`：架构图 §三 里 `search` 那一格写的就是「jieba 分词 → FTS5 查询 → 结果分组」，分组本来就是它的职责。
 - `src-tauri/src/doc_preview.rs` —— 新文件，只放预览这一个能力。它自己**不含任何 `File::open`**，只调 `extract::extract_text`，所以「索引与检索对磁盘的唯一动作是读」这条红线仍可只 grep `extract.rs`（今天只有 `:44` 与 `:130` 两处）。
 - `src-tauri/src/extract.rs` —— 收 `panic_to_err`（`pub(crate)`）。
 - `src-tauri/src/index_job.rs` —— 删私有 `panic_to_err`，改引 `extract::panic_to_err`；`run_pass` 的调用点形状不变。
-- `src-tauri/src/tokenize.rs` —— `clean_snippet`（`:79`）增加一条「折叠紧邻重复词」；新增 `pub fn query_terms()`，`query_expression`（`:42`）改为调它（第五节第 4 条）；`MAX_QUERY_CHARS` 的家（第四节）。
+- `src-tauri/src/tokenize.rs` —— `clean_snippet`（`:79`）增加一条 **`A B AB` 三连折叠**：连续三个 token 满足「第三个恰等于前两个按原序拼接」时丢掉前两个子词，保留复合词；这三个 token 任一携带 `[` 或 `]` 高亮标记时整组不折（折叠会吃掉标记，而标记是 §6.1 要求暴露给前端的东西）。新增 `pub fn query_terms()`，`query_expression`（`:42`）改为调它（第五节第 4 条）；`MAX_QUERY_CHARS` 的家（第四节）。
 - `src-tauri/src/lib.rs` —— 两条命令 + `generate_handler!`。
 - `src/lib/api.ts` —— `searchAll`、`docPreview` 两个封装。
-- `src/types/search.ts` —— `SearchBundle` / `ClusterSection<T>` / `LedgerCluster` / `DocCluster` / `DocPreview`（`ranges` 写成 `[number, number][]`）；`SOURCE_ORDER` 的六段常量保留（`field_hits` 仍在用），段标题改在 `search-bundle.tsx` 里定义。
+- `src/types/search.ts` —— `SearchBundle` / `ClusterSection<T>` / `Cluster<T>` / `DocPreview`（`ranges` 写成 `[number, number][]`）；`SOURCE_ORDER` 的六段常量保留（`field_hits` 仍在用），段标题改在 `search-bundle.tsx` 里定义。
 - `src/stores/local-search.ts` —— `hits: FieldHit[]` 换成 `bundle: SearchBundle | null`，**保留现有那个自增 `seq` 守卫**（连打两个字时旧结果不许盖新结果）。
 - `src/pages/search.tsx` —— 只剩输入框、debounce（`DEBOUNCE_MS = 250` 不变）、store 接线、三种空态。
 - `src/components/search-bundle.tsx`（新）—— 三段 + 簇 + 「还有 N 条」。台账段改成按项目聚簇后，`source` 失去了原来「段标题」的位置，但不许因此消失：每条命中行左端渲染 `SOURCE_LABELS[h.source]` 作小徽章（`ui/badge.tsx` 已有），这样 `SOURCE_LABELS` 仍有唯一消费方，用户也仍看得出这条是环境地址还是备注。
@@ -132,7 +130,7 @@ fn doc_preview(state: State<AppState>, doc_id: String, query: String) -> AppResu
 | `invalid_input` | 查询超长（> `MAX_QUERY_CHARS`） | 与今天两条通路一致的文案，只把 128 这个数引自共享常量 |
 | `db_failed` | 任何 rusqlite 错误（走 `error.rs:42` 的 `From`） | 「数据库操作失败：{原生错误}」，hint 指向备份恢复 |
 | `preview_unavailable` | 行不存在，或 `index_status != 'ok'` | 「这条索引记录不能预览」+ hint 说明可能是已注销根目录/重建过 |
-| `preview_file_missing` | `extract_text` 回 `io` 类错误（文件改名/删除） | 「文件已不可达」+ hint 指向 `/index` 重建（真正的失效标记归 M5 reconcile） |
+| `preview_file_missing` | `extract_text` 回的是 `AppError::io` 那条路（`error.rs:21`，码为 **`fs_failed`**），即文件改名/删除/不可读 | `doc_preview` **不原样透出 `fs_failed`**：按 `err.code == "fs_failed"` 翻译成这条码，message「文件已不可达」+ hint 指向 `/index` 重建（真正的失效标记归 M5 reconcile）。这一层翻译是契约的一部分，前端只认 `preview_*` 两个码，不必知道 `extract` 内部的 io 码名。 |
 | `extract_failed` | 抽取失败，含 `panic_to_err` 兜住的 panic | 「这一份抽取不出来，列表里的摘要仍可用」 |
 
 原则：**预览失败只让对话框变红，绝不让整段结果消失**。搜索本身失败才走现有的页面顶部 error 行。
@@ -148,12 +146,15 @@ Rust 单测（内存库 `db::open_in_memory()` + 夹具只在 `tempfile::tempdir
 - 截断与三个计数，**分三个夹具**（正文段一次只取 200 条，一个夹具凑不出「21 簇 × 每簇 12 条」= 252 行）：① 簇数截断 = 21 个项目各 1 条正文命中，断 `docs.clusters.len() == 20` 且 `hidden_clusters == 1`；② 簇内截断 = 1 个项目 12 条命中，断 `items.len() == 10` 且 `hidden == 2`；③ 平铺截断 = 15 条 `source == "project"` 命中，断 `projects.len() == 10` 且 `projects_hidden == 5`。变异：把任一个计数写成 `0` ⇒ 红。这三个数是「不静默丢弃」的唯一证据，缺一个断言就等于那一级的截断没人守。
 - 空查询与超长查询都不加新守卫：`search_all` 不加第三道空判、也不加第四道长度校验，`field_hits`（`search.rs:87`）与 `doc_hits`（`index_store.rs:262`）的既有分支各自负责，本轮只把两处 `128` 字面量换成共享常量（同调于 `index_store.rs:256` 注释写的「只在边界校验一次」）。两条测试因此只断行为：空查询回 `Ok` 且三段皆空、`relaxed == false`；129 字回 `invalid_input`。变异：在聚合层补一道 `if q.is_empty() { Err(..) }` ⇒ 前者红。
 - `doc_preview` 的 ranges：大小写不敏感命中、CJK 无大小写命中、命中落在窗口外、多命中并窗、超过 3 窗 `truncated = true`、纯文件名命中时 `ranges` 为空。偏移单位单独钉两条：**不是字节偏移**（中文构造，字节偏移会翻 3 倍错位）、**不是码点偏移**（命中前放一个 BMP 外字符，UTF-16 码元比 char 多 1；这条是前端 `text.slice` 能对齐的唯一证据）。
-- `query_terms` 与 `query_expression` 同源：断 `query_terms("验收，")` 不含纯标点词，且 `query_expression` 拼出的词序与之一致。变异：让 `query_expression` 保留自己那份 `cut` 而不引 `query_terms` ⇒ 两条切词从此可以各改各的，这条测试是唯一的报警。
+- `query_terms` 的过滤行为：断 `query_terms("验收，")` 不含纯标点词、词序与 `cut` 返回序一致。**「两处同源」不写行为测试**——把 `query_expression` 里的 `cut` 复制一份进 `query_terms`，任何行为断言都照样绿，这条断言不可证伪；同源改由 grep 门禁守：`tokenize.rs` 内 `.cut(` 恰好出现 1 次（`index_text` 用的是 `.cut_for_search(`，与该模式不重叠）。谁把 `query_expression` 改回自带一份 `cut`，门禁就红。
+- `clean_snippet` 的三连折叠，三条一起存在才算守住：① 正向 `付款 条件 付款条件` → `付款条件`；② 反向 `数据 数据库` 不满足「第三个 = 前两个拼接」，一个字都不许动；③ 括号守卫 `[付款] 条件 付款条件` 不折（原样返回）。反向那条是防篡改的：真重复的正文（`甲方 甲方`）不属于任何一条规则，必须原样输出。
 - `doc_preview` 的三条失败态各一条，断 `code` 而不是断 message（防文案漂）。
 - 预览的 panic 边界：把 `doc_preview` 内部拆成接收抽取器参数的形式（生产传 `extract::extract_text`，测试传 `|_| panic!()`），断回 `extract_failed` 而不是进程终止。这是 M3 的 I2 教训——中间层没有测试等于没守。参数化协作者不是测试专用注入缝。
 - `clean_snippet` 折叠重复词：正向「付款条件付款条件」→「付款条件」；反向「数据 数据库」这类**不是紧邻同词**的输入不许被折。
 
-前端 vitest：store 的 `seq` 时序（慢的旧请求不许盖新的 bundle）、三段各自空态、三个截断计数各自渲染成「还有 N 条 / 还有 N 个项目未显示」（只显不展）、`relaxed` 只在正文段出现一次说明。
+前端断言用 **`node --test`**（仓库自带 Node 就有 test runner，`.ts` 由类型剥离直跑，控制方实测 `2 pass / exit 0`；`tsconfig.json` 已同时开着 `allowImportingTsExtensions` 与 `noEmit`，带 `.ts` 后缀的 import 不会被 tsc 判错），**且只测抽成纯函数的逻辑**：`src/lib/search-order.ts` 运行时无任何 value import（`import type` 会被擦除），承担 seq 守卫（慢的旧请求不许盖新 bundle）、三个截断计数各自产出「还有 N 条 / 还有 N 个项目未显示」、`relaxed` 只产出一条段级说明、某段为空则不产出该段。**JSX 本身不在这张网里** —— 渲染正确性由 `npm run build` 的 tsc 段加第九节真机点验负责，这一格在第十节点名。测试文件落仓库根 `tests/`（**在 `src/` 之外**）：`tsconfig.json` 的 `include` 只有 `["src"]`，而 devDependencies 没有 `@types/node`，一个 import `"node:test"` 的文件放进 `src/` 会让 `npm run build` 因解析不到该模块类型而红——测试文件本身不该是构建的依赖。运行命令固定为 `node --test "tests/**/*.test.ts"` 并断言确切的 `pass` 条数：实测「glob 没匹配到任何文件」时 `node --test` 回 **exit 0 / tests 0**，只看退出码等于没有门禁。
+
+> 本节初稿写的是「前端 vitest」。核对仓库后发现 M0→M3 从来没有测试运行器（`package.json` 无 test 脚本、`package-lock.json` 里 vitest 出现 0 次、`src/` 下无 `*.test.*`），为一个里程碑的装配判断新装 vitest + jsdom + @testing-library 不划算。2026-10-07 由需求方选定改走 `node --test` + 纯逻辑抽取，不新增依赖。
 
 `/index` 试验台不新增测试口径，但 `clean_snippet` 变了要确认它现有断言不因此漂。
 
@@ -193,6 +194,6 @@ M3 划给 M4 的账，逐项写明为什么不进来：
 ## 十一、风险
 
 1. `bm25` 与 LIKE 的召回口径不同，三段并列会让用户以为「排在前面的段更相关」——段序固定为「项目档案 / 台账条目 / 文件正文」并在页面上写一句「三类结果各自排序，不代表相关度高低」。
-2. `clean_snippet` 折叠紧邻重复词有误折叠风险，阳性/反向两条测试必须同时存在，且只折**完全相同**的相邻词。
+2. `clean_snippet` 的三连折叠有误折风险，所以规则收窄到「第三个 token 恰等于前两个按原序拼接」，且这三个 token 任一携带高亮标记就整组不折。正向、反向（不满足拼接关系）、括号守卫三条测试必须同时存在，再加一条「真重复正文 `甲方 甲方` 原样输出」兜住篡改风险。
 3. 预览按行 id 取，意味着「已注销根目录但行还在」的那批文件仍可能被预览到——M3 的轮末 `sweep_unrooted_projects` 会在本轮或下一轮末尾把它们清掉，清掉后 `doc_id` 就查不出行了。窗口期内可预览是已知且可接受的。
 4. 5 万行量级的 LIKE 全表扫是首屏新引入的每键开销，debounce 250 ms 挡不住一次全量扫描；第九节的实测就是为这一条准备的，实测不过关就要改方案。
