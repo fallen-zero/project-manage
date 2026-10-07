@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::error::{AppError, AppResult};
+use crate::index_store::clear_project;
 
 /// 全局统一的项目状态枚举（需求方确认：状态全局统一，不按项目自定义阶段模板）。
 pub const STATUSES: [&str; 8] = [
@@ -335,14 +336,32 @@ fn replace_tags(conn: &Connection, project_id: &str, tags: &[String]) -> AppResu
 }
 
 /// 设置或替换主根目录。一个项目只有一个 root，由部分唯一索引保证。
+///
+/// 改指新根 = 声明旧根那一套文件不再属于本项目，所以旧路径的索引行要跟着回收（终审 I3）：
+/// `index_job::targets()` 只认登记中的 root 行，旧根一被替换就永远不再进入任何一轮 pass，
+/// 于是 `clear_project`（唯一会双侧删的入口）对它不可达，旧根的文件会继续命中搜索。
+/// 并发前提（不额外加锁）：worker 用的是自己那条连接（见 `index_job::start` 的头注释），
+/// `db.rs:70` 已配 `busy_timeout = 5000`，所以作业运行中做一次删除是被允许的；本轮不引入跨连接互斥。
 pub fn set_root_dir(conn: &Connection, project_id: &str, input: &DirInput) -> AppResult<ProjectDir> {
     let path = validate_path(&input.path)?;
     get_project(conn, project_id)?;
+    let old = conn
+        .query_row(
+            "SELECT path FROM project_dirs WHERE project_id = ?1 AND kind = 'root'",
+            [project_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
     conn.execute("DELETE FROM project_dirs WHERE project_id = ?1 AND kind = 'root'", [project_id])?;
     conn.execute(
         "INSERT INTO project_dirs (id, project_id, kind, path, label, sort) VALUES (?1,?2,'root',?3,?4,0)",
         params![uuid::Uuid::new_v4().to_string(), project_id, path, normalize(input.label.clone())],
     )?;
+    // 只有「旧根存在且指向别处」才回收。同一路径重复登记不许清空索引：那会把一次
+    // 无意义的登记重写升级成几十 GB 的全量重抽。
+    if old.is_some_and(|old_path| old_path != path) {
+        clear_project(conn, project_id)?;
+    }
     find_dir(conn, project_id, &path)
 }
 
@@ -362,13 +381,37 @@ pub fn add_entry_dir(conn: &Connection, project_id: &str, input: &DirInput) -> A
     find_dir(conn, project_id, &path)
 }
 
+/// 注销一个登记目录。签名与返回类型都不变（`lib.rs` 的命令层与 M1 的既有测试都吃它）。
+///
+/// 注销**根目录**等于声明「这个项目不再包含它」，所以同步回收该项目的索引行（终审 I3）：
+/// root 行没了，`index_job::targets()` 里就不再出现该项目，`run_pass` 永远不会再对它调
+/// `clear_project`，旧根的 `index_docs` 与 FTS 行会永久停在 `ok` 并可被搜到 —— 而 `/index`
+/// 页面既看不到它们也没有按钮能清。schema 层事后判断不了一行属于哪次登记
+/// （`index_docs` 没有任何列指向 `project_dirs.id`），所以只能在成因这一侧收口。
+/// `entry` 类目录从来不是索引作用域，删它不许动索引（`removing_an_entry_dir_keeps_the_index_rows` 钉住）。
+/// 并发前提同 `set_root_dir`：worker 用自己的连接，`db.rs:70` 的 `busy_timeout = 5000` 允许这一次删除。
 pub fn remove_dir(conn: &Connection, project_id: &str, dir_id: &str) -> AppResult<()> {
+    // 先读 kind 再删：删掉之后就问不出这一行原本是 root 还是 entry 了。
+    let kind = conn
+        .query_row(
+            "SELECT kind FROM project_dirs WHERE id = ?1 AND project_id = ?2",
+            params![dir_id, project_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?;
+    // 读不到就按现有语义返回 not_found，行为不变（下面的 changed == 0 那条也原样留着）。
+    if kind.is_none() {
+        return Err(not_found(dir_id));
+    }
     let changed = conn.execute(
         "DELETE FROM project_dirs WHERE id = ?1 AND project_id = ?2",
         params![dir_id, project_id],
     )?;
     if changed == 0 {
         return Err(not_found(dir_id));
+    }
+    if kind.as_deref() == Some("root") {
+        clear_project(conn, project_id)?;
     }
     Ok(())
 }
@@ -513,5 +556,122 @@ mod tests {
         let a = list.iter().find(|x| x.id == a.id).unwrap();
         assert_eq!(a.dirs.len(), 1);
         assert_eq!(list.iter().find(|x| x.id == b.id).unwrap().dirs.len(), 0);
+    }
+
+    // ---- 终审 I3：索引行的生命周期以登记的 root 行为作用域 ----
+    // 两行都是测试专用，别提到模块顶层：`cargo clippy --lib` 不带 test cfg，顶层引入会被判 unused。
+    use crate::index_scan::ScannedFile;
+    use crate::index_store::{doc_hits, fts_orphan_rows, write_doc, DocOutcome};
+
+    fn scanned_file(path: &str) -> ScannedFile {
+        ScannedFile {
+            path: path.to_owned(),
+            file_name: path.rsplit(['/', '\\']).next().unwrap_or(path).to_owned(),
+            ext: "docx".to_owned(),
+            size: 1024,
+            mtime: 1_700_000_000,
+        }
+    }
+
+    /// (该项目的 index_docs 行数, 全库 index_docs_fts 行数)。两侧都要断：
+    /// FTS5 虚表没有外键，只数主表的话孤儿行照样能继续被 `SELECT_SQL` JOIN 出来（它是 JOIN 主表，
+    /// 主表行没了就连不上，但体积与 bm25 统计会被长期污染且没人能清）。
+    fn both_sides(conn: &Connection, project_id: &str) -> (i64, i64) {
+        (
+            conn.query_row("SELECT count(*) FROM index_docs WHERE project_id = ?1", [project_id], |r| r.get(0)).unwrap(),
+            conn.query_row("SELECT count(*) FROM index_docs_fts", [], |r| r.get(0)).unwrap(),
+        )
+    }
+
+    /// 登记一个 root 并手写两行索引（其中带正文的那行同时产生 FTS 行）。
+    /// 不需要真文件：`clear_project` 回收的是库里的行，作用域只看 project_id，本轮没有扫描发生。
+    /// 返回 (project_id, root 的 dir_id, 用于「注销前搜得到」的正文关键词)。
+    fn root_project_with_two_rows(conn: &Connection) -> (String, String, &'static str) {
+        let p = create_project(conn, &input("注销根项目")).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        set_root_dir(
+            conn,
+            &p.id,
+            &DirInput { path: root.path().display().to_string(), label: None, sort: None },
+        )
+        .unwrap();
+        let root_id: String = conn
+            .query_row("SELECT id FROM project_dirs WHERE project_id = ?1 AND kind = 'root'", [&p.id], |r| r.get(0))
+            .unwrap();
+        let base = root.path().display().to_string();
+        write_doc(conn, &p.id, &scanned_file(&format!("{base}\\验收说明.docx")), DocOutcome::Ok("甲方要求验收指标".into()))
+            .unwrap();
+        write_doc(conn, &p.id, &scanned_file(&format!("{base}\\维保期.docx")), DocOutcome::Skipped("too_large")).unwrap();
+        (p.id, root_id, "验收")
+    }
+
+    /// 注销根目录 = 声明这个项目不再包含它，所以双侧回收索引行（终审 I3 的成因修法）。
+    /// 少了 `remove_dir` 里的 `clear_project`：`targets()` 只认登记中的 root 行，该项目从此
+    /// 不再进入任何一轮 pass，旧根的 ok 行会永久留在库里继续命中搜索，而 `/index` 页既看不到
+    /// 也没有按钮能清 —— 这条断言就是那个「永久」的反面。
+    #[test]
+    fn removing_the_root_dir_drops_its_index_rows() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let (pid, root_id, keyword) = root_project_with_two_rows(&conn);
+        assert_eq!(both_sides(&conn, &pid), (2, 1), "前提：两行真在库里，其中一行带了正文");
+        assert_eq!(doc_hits(&conn, keyword, 20).unwrap().len(), 1, "注销前必须搜得到，否则后面的「搜不到」是假绿");
+
+        remove_dir(&conn, &pid, &root_id).unwrap();
+
+        assert_eq!(both_sides(&conn, &pid), (0, 0), "注销根目录要双侧回收：index_docs 与 index_docs_fts");
+        assert!(doc_hits(&conn, keyword, 20).unwrap().is_empty(), "旧根的正文不该继续命中搜索");
+        assert!(get_project(&conn, &pid).unwrap().dirs.is_empty(), "登记行照旧被删掉");
+        assert_eq!(fts_orphan_rows(&conn), 0, "回收不能留下对不上主表的虚表行（终审 m2 的全表不变量）");
+    }
+
+    /// 改指新根也要回收旧路径的行；同时钉住「同一路径重复登记不清空」这条判断不是顺手删掉的
+    /// —— 少了 `old != path` 那个条件，用户每次重新选同一个目录都会触发几十 GB 的全量重抽。
+    #[test]
+    fn repointing_the_root_drops_rows_of_the_old_path() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let (pid, _root_id, keyword) = root_project_with_two_rows(&conn);
+        assert_eq!(both_sides(&conn, &pid), (2, 1), "前提：两行真在库里");
+
+        let other = tempfile::tempdir().unwrap();
+        let new_path = other.path().display().to_string();
+        set_root_dir(&conn, &pid, &DirInput { path: new_path.clone(), label: None, sort: None }).unwrap();
+        assert_eq!(both_sides(&conn, &pid), (0, 0), "改指新根要把旧路径的行双侧回收");
+        assert!(doc_hits(&conn, keyword, 20).unwrap().is_empty(), "旧根的文件继续命中搜索就是 I3 的现场");
+
+        // 同一路径再登记一次：行数一格都不许动。
+        write_doc(&conn, &pid, &scanned_file(&format!("{new_path}\\新文件.docx")), DocOutcome::Ok("付款条件与验收流程".into()))
+            .unwrap();
+        let before = both_sides(&conn, &pid);
+        assert_eq!(before, (1, 1), "前提：新根下确实有一行带正文");
+        set_root_dir(&conn, &pid, &DirInput { path: new_path.clone(), label: Some("同一份".into()), sort: None }).unwrap();
+        assert_eq!(both_sides(&conn, &pid), before, "同一根路径重复登记不许清空索引");
+        assert_eq!(doc_hits(&conn, keyword, 20).unwrap().len(), 1, "重写后那一行仍要搜得到");
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM project_dirs WHERE project_id = ?1 AND kind = 'root'", [&pid], |r| r.get::<_, i64>(0)).unwrap(),
+            1,
+            "登记行还是一根，没被换成第二根"
+        );
+        assert_eq!(fts_orphan_rows(&conn), 0, "换指与重写都不该留下虚表孤儿行");
+    }
+
+    /// `entry` 类目录从来不是索引作用域（`targets()` 只挑 kind='root'），删它不许动索引。
+    /// 这条防的是将来把条件写成「删任何目录都清」——那种写法会让一次普通的快捷入口调整
+    /// 悄悄清掉整个项目的索引，而上一/下一条测试都测不到它。
+    #[test]
+    fn removing_an_entry_dir_keeps_the_index_rows() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let p = create_project(&conn, &input("快捷入口项目")).unwrap();
+        add_entry_dir(&conn, &p.id, &DirInput { path: "C:\\Windows".into(), label: None, sort: None }).unwrap();
+        let entry_id: String = conn
+            .query_row("SELECT id FROM project_dirs WHERE project_id = ?1 AND kind = 'entry'", [&p.id], |r| r.get(0))
+            .unwrap();
+        write_doc(&conn, &p.id, &scanned_file("C:/x/验收说明.docx"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        let before = both_sides(&conn, &p.id);
+        assert_eq!(before, (1, 1), "前提：这个项目有一行带正文的索引");
+
+        remove_dir(&conn, &p.id, &entry_id).unwrap();
+
+        assert_eq!(both_sides(&conn, &p.id), before, "删 entry 目录不许清掉索引行");
+        assert_eq!(doc_hits(&conn, "验收", 20).unwrap().len(), 1, "删 entry 之后正文照旧可搜");
     }
 }

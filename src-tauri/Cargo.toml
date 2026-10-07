@@ -42,9 +42,12 @@ calamine = "0.36.1"
 rust_xlsxwriter = "0.99.1"
 tempfile = "3.27.0"
 
+# 不许在这里写 panic = "abort"：abort 下 panic 不展开，`extract::pdf_text` 与
+# `index_job::panic_to_err` / worker 线程体里的 catch_unwind 在发布包里一个都抓不到，
+# 一个畸形文件就直接终止整个进程。由
+# `extract::tests::release_profile_does_not_abort_so_panic_guards_work` 钉住（终审 C1）。
 [profile.release]
 codegen-units = 1
 lto = true
 opt-level = 3
-panic = "abort"
 strip = true

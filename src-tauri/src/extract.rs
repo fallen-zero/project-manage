@@ -241,6 +241,10 @@ pub fn kind_of(ext: &str) -> Option<DocKind> {
 /// pdf-extract 内部依赖 lopdf，畸形结构有 panic 的前科；一轮索引不能因为一个坏文件整体失败。
 /// 注意：本机实测的假 PDF 头与截断文件都走的是 Err 分支（事实 18），
 /// 这里的 catch_unwind 防的是 panic 分支，那条分支在本机无法构造 —— 属已知缺口，不要当成已证。
+/// 两道边界是叠加的而不是重复：外层 `index_job::panic_to_err` 还兜着 docx/pptx/xlsx/txt 那三条
+/// 本文件没包的路径，所以这处**不许**被「反正外层有兜底」删掉，也不许改成去调 `index_job` 的私有助手
+/// （抽取层不该反向依赖作业层）。两者共同的前提是 release 保持 unwind，
+/// 见本文件 `release_profile_does_not_abort_so_panic_guards_work`（终审 C1）。
 fn pdf_text(path: &Path) -> AppResult<String> {
     let p = path.to_path_buf();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pdf_extract::extract_text(&p)));
@@ -542,6 +546,40 @@ mod tests {
             let text = extract_text(&path)
                 .unwrap_or_else(|e| panic!("{} 应能抽出正文，实际报错 {}", path.display(), e.code));
             assert!(text.contains(want), "{} 分派到了错误的抽取器：{text:?}", path.display());
+        }
+    }
+
+    /// 构建配置守护（终审 C1）。`cargo test` 跑的是 dev profile，而 `tauri build` 走 release：
+    /// `[profile.release]` 里只要出现 `panic = "abort"`，panic 就不展开，本文件 `pdf_text` 的
+    /// `catch_unwind`（以及 `index_job` 的两道边界）在发布包里**抓不到任何东西**，
+    /// 一个畸形文件直接终止整个应用 —— 而 96 条测试全绿完全看不见这件事。
+    /// 所以这条只能靠读 Cargo.toml 来钉：它断言的是「防线在发布构建里存在」这个前提本身。
+    /// 控制方用 `rustc 1.98.1` 单文件复现过：`-C panic=abort` 下 `catch_unwind` 两个标记都不打印、
+    /// 进程当场终止，`-C panic=unwind` 下 `CAUGHT=true` 并走到下一行。
+    #[test]
+    fn release_profile_does_not_abort_so_panic_guards_work() {
+        // 相对路径从 src-tauri/src/ 出发，指向 src-tauri/Cargo.toml（include_str! 以本文件为基准）。
+        let manifest = include_str!("../Cargo.toml");
+        let mut in_release_profile = false;
+        for raw in manifest.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // 遇到任何表头就重估归属：下一个 `[` 开头的行把我们带出 `[profile.release]`，
+            // 于是别人在别的表里（例如 `[profile.dev]`）写 panic 不会误红。
+            if line.starts_with('[') {
+                in_release_profile = line == "[profile.release]";
+                continue;
+            }
+            if in_release_profile {
+                let key = line.split('=').next().unwrap_or_default().trim();
+                assert_ne!(
+                    key, "panic",
+                    "release 里 `panic = \"abort\"` 会让 `catch_unwind` 抓不到任何东西，抽取层的兜底形同不存在；本项目要求 unwind。\
+                     见本文件 `pdf_text` 的注释与 `index_job::panic_to_err`（终审 C1）。"
+                );
+            }
         }
     }
 }

@@ -111,6 +111,23 @@ fn now(conn: &Connection) -> String {
     conn.query_row("SELECT datetime('now')", [], |r| r.get(0)).unwrap_or_default()
 }
 
+/// 把「可能 panic 的调用」统一转成 `AppResult`：panic → `Err(extract_failed)`，
+/// 于是 `run_pass` 的失败 arm 同时接住普通错误与 panic，红线的实现只有一条路径。
+/// 为什么必须有这一层：`技术方案.md` 2.2 把 `pdf-extract` **和 zip+XML 解析**并列列为 panic 源，
+/// 而抽取层里只有 `pdf_text` 自己包了 `catch_unwind`；docx/pptx/xlsx/txt 四条路径的 panic
+/// 原本会一路炸穿 `run_pass`。前提：release 保持 unwind（见
+/// `extract::tests::release_profile_does_not_abort_so_panic_guards_work`），否则这里抓不到任何东西。
+fn panic_to_err<T, F: FnOnce() -> T>(f: F, what: &str) -> AppResult<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(v) => Ok(v),
+        Err(_) => Err(AppError::new(
+            "extract_failed",
+            &format!("抽取器 panic，已兜住并跳过：{what}"),
+            Some("该文件本轮不索引；这类文件可换工具另存一份再登记"),
+        )),
+    }
+}
+
 pub fn run_pass(
     conn: &Connection,
     opts: &ScanOptions,
@@ -177,7 +194,12 @@ pub fn run_pass(
                 acc.unchanged += 1; // size + mtime 没变且上次 ok：连文件都不打开
                 false
             } else {
-                match extract_text(std::path::Path::new(&file.path)) {
+                // panic 边界打在调用点上：抽取层只有 `pdf_text` 自己包了 catch_unwind，
+                // docx/pptx/xlsx/txt 四条路径的 panic 原本会直接炸穿本轮。panic 转成 `Err` 之后
+                // 落进下面同一条失败 arm，于是「一个坏文件只废它自己」是代码事实而不是注释事实。
+                // `panic_to_err` 的 T 在这里就是 `AppResult<String>`（双层 Result），所以用
+                // and_then 拍平一层，好让下面四个 arm 的语义一个都不必改。
+                match panic_to_err(|| extract_text(std::path::Path::new(&file.path)), &file.path).and_then(|r| r) {
                     Ok(body) if body.trim().is_empty() => {
                         // 扫描件没文字层是日常（spec 明写「抽出为空属于正常，不是失败」）。
                         // 库里那行由 write_doc 落成 skipped/empty_text，计数器就必须也加到 skipped 上，
@@ -197,7 +219,8 @@ pub fn run_pass(
                         acc.skipped += 1;
                     }
                     Err(e) => {
-                        // 一个坏文件只废它自己：panic 已在 extract 层兜住，这里连 Err 也只落一行 failed。
+                        // 一个坏文件只废它自己：panic 已在本 pass 的调用点经 `panic_to_err` 兜成 Err，
+                        // 普通抽取错误本来就是 Err —— 两条都只落这一行 failed，整轮继续。
                         write_doc(
                             conn,
                             &target.project_id,
@@ -344,33 +367,53 @@ pub fn start(
     // 让 Task 10 的 IPC 能念出原因，而不是把 panic 丢进 Tauri 的命令线程里。
     let worker = Arc::clone(&shared);
     if let Err(e) = std::thread::Builder::new().name("index-job".to_owned()).spawn(move || {
-        let _guard = RunningGuard::enter(&worker);
+        // emit 放在被兜底闭包**外面**：panic 那条路径也要能用它发终态事件。
         let mut emit = |p: Progress| {
             let _ = app.emit(PROGRESS_EVENT, p);
         };
-        let conn = match db::open(&data_dir) {
-            Ok(c) => c,
-            Err(err) => return report_failure(&mut emit, &worker, format!("{err}")),
-        };
-        let opts = match ScanOptions::load(&conn) {
-            Ok(o) => o,
-            Err(err) => return report_failure(&mut emit, &worker, format!("{err}")),
-        };
-        match run_pass(&conn, &opts, project_id.as_deref(), rebuild, &worker.cancel, &mut emit) {
-            // state 由 run_pass 自己定（它末尾已经按 cancel 判过一次），这里不再重算第二遍。
-            // 注意是 `Ok(s)` 而不是 `Ok(mut s)`：少了「外面再算一遍 state」之后没人改它，
-            // 留着 `mut` 会被 `-D warnings` 打成 `variable does not need to be mutable`（控制方实测）。
-            Ok(s) => {
-                let event = terminal(s.state, &s.results, None);
-                if let Ok(mut g) = worker.summary.lock() {
-                    *g = Some(s);
+        // 线程体最外层的兜底（终审 I1 (b)）：任何 panic 都要产生一个终态事件。
+        // 少了这层，worker 炸掉时 RunningGuard 照样把 running 复位（后端不卡死），
+        // 但 report_failure 不会被执行 —— 没有终态事件、没有 last_error、summary 停在上一轮，
+        // 而前端 index-status.tsx:114-121 的复位链只认「收到终态事件」：徽章会永远停在
+        // 「索引进行中」，取消按钮只能把 cancelRequested 吃成 true、非 remount 解不开。
+        // 已核到这个前端失效形态，这就是补这层边界的全部理由。
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // 守卫留在被包的闭包**内部**：panic 展开时照样 Drop 复位 running
+            // （running_flag_is_released_even_when_the_job_panics 钉的就是这条）。
+            let _guard = RunningGuard::enter(&worker);
+            let conn = match db::open(&data_dir) {
+                Ok(c) => c,
+                Err(err) => return report_failure(&mut emit, &worker, format!("{err}")),
+            };
+            let opts = match ScanOptions::load(&conn) {
+                Ok(o) => o,
+                Err(err) => return report_failure(&mut emit, &worker, format!("{err}")),
+            };
+            match run_pass(&conn, &opts, project_id.as_deref(), rebuild, &worker.cancel, &mut emit) {
+                // state 由 run_pass 自己定（它末尾已经按 cancel 判过一次），这里不再重算第二遍。
+                // 注意是 `Ok(s)` 而不是 `Ok(mut s)`：少了「外面再算一遍 state」之后没人改它，
+                // 留着 `mut` 会被 `-D warnings` 打成 `variable does not need to be mutable`（控制方实测）。
+                Ok(s) => {
+                    let event = terminal(s.state, &s.results, None);
+                    if let Ok(mut g) = worker.summary.lock() {
+                        *g = Some(s);
+                    }
+                    if let Ok(mut g) = worker.last_error.lock() {
+                        *g = None;
+                    }
+                    emit(event);
                 }
-                if let Ok(mut g) = worker.last_error.lock() {
-                    *g = None;
-                }
-                emit(event);
+                Err(err) => report_failure(&mut emit, &worker, format!("{err}")),
             }
-            Err(err) => report_failure(&mut emit, &worker, format!("{err}")),
+        }));
+        // 没 panic 的四条出口各自都发过**且只发过**一个终态事件（三个 report_failure 加 Ok 分支的
+        // emit），所以这里只在 Err 时补发 —— 正常路径不会多出第二个终态事件。
+        if ran.is_err() {
+            report_failure(
+                &mut emit,
+                &worker,
+                "索引作业 panic：作业线程在未知位置炸掉，本轮未完成".to_owned(),
+            );
         }
     }) {
         // 线程根本没起来：闭包没跑过、守卫也没构造，`running` 只能在这里自己复位。
@@ -702,5 +745,112 @@ mod tests {
         assert!(shared.summary.lock().unwrap().is_none(), "失败轮不该留下半截摘要");
         assert_eq!(shared.last_error.lock().unwrap().as_deref(), Some("[db_open_failed] 打不开库"),
             "Task 10 的 IPC 全靠这一条才分得清「从没跑过」和「跑挂了」");
+    }
+
+    /// panic 边界的直测（终审 I1）。动机写在这里：`extract_text` 四条路径里只有 `pdf_text`
+    /// 在抽取层自己兜了 panic，docx/pptx/xlsx/txt 三条原本会直接炸穿本轮。
+    /// **少这一条，把 `panic_to_err` 里的 `catch_unwind` 删掉也不会红** —— 真实文件在本机
+    /// 构造不出 panic（那是 `开发进度.md` 的缺口 1），能构造的地方只有这里，所以这条直测不可替代。
+    /// 只断 code / 文案前缀 / 透传值，不回显任何抽取正文。
+    #[test]
+    fn panic_to_err_turns_a_panic_into_an_extract_failure() {
+        let boom = panic_to_err(
+            || panic!("抽取器在畸形文件上炸了 —— 这条用例的前提就是它要炸"),
+            "C:/坏文档.docx",
+        )
+        .unwrap_err();
+        assert_eq!(boom.code, "extract_failed", "panic 必须落成 extract_failed，才能走 pass 那条失败 arm：{}", boom.code);
+        assert!(boom.message.contains("panic"), "message 要能看出是 panic 被兜住的：{}", boom.message);
+        assert!(boom.message.contains("C:/坏文档.docx"), "message 要带上是哪个文件，否则 /index 清单无法定位：{}", boom.message);
+        assert!(boom.hint.is_some(), "要给界面一句可行动的建议");
+
+        // 正常路径原样透传：兜底不许把值吃掉（吃掉的话整轮会变成「全都 failed」而照样报 done）。
+        assert_eq!(panic_to_err(|| "正文两个词".to_owned(), "C:/好文件.txt").unwrap(), "正文两个词");
+        assert_eq!(panic_to_err(|| 7u8, "C:/好文件.txt").unwrap(), 7);
+    }
+
+    /// 造一个「扩展名在 SUPPORTED 清单内、内容畸形到抽取层必然回 Err(extract_failed)」的 docx：
+    /// zip 是真的，`word/document.xml` 的第一个标记就是一枚**悬空闭标签，且标签名长达 400 字**。
+    /// 为什么不用简报里建议的「往 .docx 里写非 zip 的垃圾字节」：垃圾字节走 `ZipArchive::new` 的
+    /// `解包失败：{e}`，而 zip 的 `ZipError::InvalidArchive(&'static str)` 不带任何动态内容，
+    /// 整条 message 只有几十字，于是 `length(error_msg) <= 300` 会退化成恒真 —— 删掉 `truncate` 也不会红。
+    /// 这里 quick-xml 会把那 400 字标签名回显进 `IllFormedError::UnmatchedEndTag` 的 Display
+    /// （`check_end_names = false` 关不掉它：它走的是「栈空时遇到闭标签」那条分支），
+    /// 原始 message 稳过 300 字，`truncate(&e.message, 300)` 因此被真的钉住。
+    fn broken_docx(dir: &Path, name: &str) -> PathBuf {
+        use std::io::Write;
+        let p = dir.join(name);
+        let mut w = zip::write::ZipWriter::new(std::fs::File::create(&p).unwrap());
+        let zopts = zip::write::SimpleFileOptions::default();
+        w.start_file("[Content_Types].xml", zopts).unwrap();
+        w.write_all(br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#)
+            .unwrap();
+        w.start_file("word/document.xml", zopts).unwrap();
+        let xml = format!(
+            "</{}><w:document xmlns:w=\"http://x\"><w:body><w:r><w:t>畸形正文</w:t></w:r></w:body></w:document>",
+            "y".repeat(400)
+        );
+        w.write_all(xml.as_bytes()).unwrap();
+        w.finish().unwrap();
+        p
+    }
+
+    /// 里程碑级红线「一个坏文件只废它自己、不打挂整轮」的 **pass 级**测试（终审 I2）。
+    /// 既有夹具 `tree()` 里没有任何文件能让 `extract_text` 返回 Err，所以 `:451` 的
+    /// `assert_eq!(one.failed, 0)` 恒真：把 `run_pass` 的失败 arm 整段删掉改成 `?` 上抛，
+    /// 原来的 96 条一个都不会红 —— 这条测试存在的全部理由就是让那段代码有东西守着。
+    /// 断言全部写具体数字，且额外钉住三件事：坏文件**照样有一行**（不静默丢弃）、
+    /// `error_msg` 被 `truncate` 截到 300 字以内、终态事件计数与摘要一致。
+    #[test]
+    fn a_failing_file_only_kills_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("验收.txt"), "甲方要求验收指标".as_bytes()).unwrap();
+        std::fs::write(dir.path().join("维保.txt"), "维保期为十二个月".as_bytes()).unwrap();
+        let bad = broken_docx(dir.path(), "坏文档.docx");
+        // 前提：坏文件确实是 Err(extract_failed)，而不是 Err(extract_unsupported)（那会落 Skipped）。
+        let probe = extract_text(&bad).unwrap_err();
+        assert_eq!(probe.code, "extract_failed", "夹具要落进失败 arm 而不是 skipped：{}", probe.code);
+        assert!(probe.message.chars().count() > 300,
+            "夹具的原始 message 必须长于 300 字，否则长度断言对 `truncate` 是恒真的：{}",
+            probe.message.chars().count());
+
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", dir.path());
+        let mut events = Vec::new();
+        let summary = run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |p| events.push(p.clone())).unwrap();
+
+        assert_eq!(summary.state, "done", "一个坏文件不能把本轮变成 error/取消：{}", summary.state);
+        let one = &summary.results[0];
+        assert_eq!(one.failed, 1, "{one:?}");
+        assert_eq!(one.ok, 2, "坏文件旁边的好文件要照常索引：{one:?}");
+        assert_eq!(one.scanned_total, 3, "{one:?}");
+        assert_eq!(one.skipped, 0, "{one:?}");
+        assert_eq!(doc_rows(&conn, "p1"), 3, "坏文件照样要有一行 —— 失败要能被 /index 清单回答，不静默丢弃");
+
+        let stored: (String, Option<String>, i64) = conn
+            .query_row(
+                "SELECT index_status, error_msg, length(error_msg) FROM index_docs WHERE path LIKE '%坏文档.docx'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(stored.0, "failed", "{:?}", stored.0);
+        let msg = stored.1.unwrap_or_default();
+        assert!(msg.starts_with("XML 解析失败"),
+            "error_msg 要留下原因文案的前缀，界面上才念得出来：{}",
+            msg.chars().take(24).collect::<String>());
+        assert!(!msg.is_empty(), "失败行不许只有状态没有原因");
+        assert!(stored.2 <= 300, "error_msg 要显示在 /index 清单里，必须被截断：{}", stored.2);
+        assert_eq!(stored.2, 300,
+            "夹具原始 message 实测 473 字（那 400 字标签名被 quick-xml 回显进 Display），所以这条才真的钉住 truncate(&e.message, 300)：删掉它这里会变成 473");
+
+        // 终态事件的计数与摘要必须同一个口径（Task 11 的摘要条数全靠它）。
+        let term = terminal(summary.state, &summary.results, None);
+        assert_eq!((term.total, term.done, term.ok, term.skipped, term.failed), (3, 3, 2, 0, 1), "{term:?}");
+        assert_eq!(term.error, None, "本轮没整轮失败，终止事件不该带原因");
+        let last = events.last().unwrap();
+        assert_eq!((last.done, last.ok, last.failed), (3, 2, 1), "项目边界的进度事件也要对得上：{last:?}");
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收", 20).unwrap().len(), 1, "其余文件仍可检索");
+        assert_eq!(crate::index_store::fts_orphan_rows(&conn), 0, "一轮里有失败行也不该留下对不上主表的虚表行");
     }
 }

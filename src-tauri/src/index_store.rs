@@ -122,6 +122,23 @@ pub fn clear_project(conn: &Connection, project_id: &str) -> AppResult<u64> {
     Ok(n)
 }
 
+/// 跨表不变量的**全表**形态（终审 m2 里本轮要做的那条）：`index_docs_fts` 是 FTS5 虚表、没有外键，
+/// 整个设计就靠 rowid 对齐，而虚表行不参与 `ON DELETE CASCADE`。既有测试只数过局部
+/// （本模块 `rewriting_…` / `non_ok_outcomes_…` / `clear_project_…` 那几处 count），
+/// 「任何路径都不留孤儿」这句话本身此前全仓无断言（grep `NOT IN`/orphan/孤立 0 命中）。
+/// 孤儿行的后果不是错命中（`SELECT_SQL` 靠 JOIN 连不上），而是索引体积与 bm25 统计被长期污染且没人能清。
+/// 只给测试用：产品路径不该拿它当检查点（每轮全表扫）。
+#[cfg(test)]
+pub(crate) fn fts_orphan_rows(conn: &Connection) -> i64 {
+    // 注意：FTS5 虚表不能随手 `SELECT *`，这里按普通 query_row 只取 count(*)。
+    conn.query_row(
+        "SELECT count(*) FROM index_docs_fts WHERE rowid NOT IN (SELECT doc_rowid FROM index_docs)",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatusCount {
@@ -424,6 +441,10 @@ mod tests {
         assert_eq!(c.query_row("SELECT count(*) FROM index_docs WHERE project_id = 'p1'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
         assert_eq!(c.query_row("SELECT count(*) FROM index_docs WHERE project_id = 'p2'", [], |r| r.get::<_, i64>(0)).unwrap(), 1,
             "清场不能顺手把别的项目一起清掉");
+        // 全表不变量（终审 m2）：上面两条 count 只证明「两边各自少了几行」，证明不了两边**对齐**。
+        // 少这一句，把 clear_project 里那句按 rowid 点删改成删错列（例如删 doc_rowid 不存在的行），
+        // 主表照样归零、虚表留下孤儿，而这两条断言都还是绿的。
+        assert_eq!(fts_orphan_rows(&c), 0, "清场之后不该留下对不上主表的虚表行");
     }
 
     /// 只数行数证不出 OFFSET 生效：`LIMIT 2 OFFSET 4` 在 5 行数据上只回 1 行，
