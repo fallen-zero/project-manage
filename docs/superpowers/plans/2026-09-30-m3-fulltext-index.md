@@ -3832,7 +3832,7 @@ git commit -m "feat: M3 索引状态页：进度、按状态翻文件清单、�
 ## Task 12: 真机端到端验证 + 文档收口
 
 **Files:**
-- Modify: `docs/技术方案.md`（数据模型第 125-127 行按实测更正；M3 状态改「完成」）
+- Modify: `docs/技术方案.md`（数据模型第 **125-126** 行按实测更正——127 行是 `vault_meta`，不在本任务范围；M3 状态改「完成」）
 - Modify: `docs/开发进度.md`（新增 `## M3 验收证据` + 变更日志一条）
 
 **Interfaces:**
@@ -3857,12 +3857,14 @@ WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222" \
 
 数据落在 `%APPDATA%\dev.zero.pfm.m3test\`，仓库文件与真实库都不受影响（这条手法来自 M2 验收）。
 
+引号后路（控制方预判的风险点）：`-c '{...}'` 这段 JSON 要穿过 git-bash → npm → Windows 进程创建三层，碎掉的概率不低。若 CLI 报「invalid JSON」或把它当成文件路径，**不要**改成去动 `src-tauri/tauri.conf.json`（那是仓库文件，改了就是把 identifier 永久换掉）；改为写一份一次性 override 文件到仓库外（如 `E:/temp/pfm-m3/override.json`，内容 `{"identifier":"dev.zero.pfm.m3test"}`）并传绝对路径 `-c E:/temp/pfm-m3/override.json`，用完随沙盒一起删。两条路都不许 `git add` 任何新文件。
+
 - [ ] **Step 3: CDP 驱动，断言只回布尔/条数**
 
 连 `http://127.0.0.1:9222/json/list` 找到页面 `webSocketDebuggerUrl`，用 `Runtime.evaluate`（`awaitPromise: true, returnByValue: true`）在页面里发 `invoke`。三个必测点，脚本只打印断言结果，**不打印正文片段**：
 
 1. `index_overview()` → `projects.length >= 1`、`fts5Available === true`、`supportedExts.includes("pdf")`。
-2. 登记根目录（UI 上走项目详情 → 目录映射 → 手填 `E:\\temp\\pfm-m3\\root\\合同`）后 `index_start(null, true)`；等 `index://progress` 的 `state === "done"`，再 `index_overview()` 断言 `projects[0].ok >= 4`、`failed === 0`、`lastRun.state === "done"`。
+2. 登记根目录后 `index_start(null, true)`；等 `index://progress` 的 `state === "done"`，再 `index_overview()` 断言 `projects[0].ok >= 4`、`failed === 0`、`lastRun.state === "done"`。**这一条不必靠点鼠标**（控制方实测源码）：`ProjectInput`（`project.rs:46-58`）**不含目录字段**，创建项目与登记目录是两条命令 —— `project_create(input)` 然后 `project_set_root(id, {path, label, sort})`（`lib.rs:143`、`project.rs:62-66`），两者都是纯文本入参，可以全程用 `Runtime.evaluate` 发 `invoke` 完成，绕开 M2 记过的那条「原生对话框点不通」限制。UI 侧确实也有手填口（`src/pages/project-detail.tsx:245`，placeholder 明写「绝对路径…可登记暂不可达的路径」），要走 UI 就走这一格，别去找目录选择器。负向那条密文断言同理：`ledger_credential_create`（`lib.rs:298`）是命令，不用点。
 3. `search_docs(...)` 的四条中文断言（这是 M3 的收口证据，逐条给数字）：
    - `"验收"` → 至少 2 条，且其中一条 `path` 以 `.pdf` 结尾（证明真中文 PDF 进了索引）。
    - `"维保"` → 至少 1 条且 `matchedBy === "prefix"`（证明两段放宽真的生效）。
@@ -3881,11 +3883,11 @@ WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222" \
 ls -l "$APPDATA/dev.zero.pfm/" 2>/dev/null
 ```
 
-Expected: 目录仍在，内容未被本轮改动（只有应用自身在真实进程里做的前向迁移可以动它；本次用的是 m3test，不应有任何变化）。跑完把 `dev.zero.pfm.m3test` 目录删干净（先确认没有孤儿 `project-files-manage.exe` 占着它：`Get-CimInstance Win32_Process -Filter "name='project-files-manage.exe'" | Select ProcessId,CommandLine`）。
+Expected: 目录仍在，内容未被本轮改动（只有应用自身在真实进程里做的前向迁移可以动它；本次用的是 m3test，不应有任何变化）。控制方 2026-10-07 实测该目录当前是 `ledger.db` 4096 B / `ledger.db-shm` 32768 B / `ledger.db-wal` 399672 B（mtime Sep 30）——**文件名是 `ledger.db`，不是本计划其它处顺手写过的 `pm.db`**，比对要按 size+mtime 快照逐文件做，别按记忆里的名字找。跑完把 `dev.zero.pfm.m3test` 目录删干净（先确认没有孤儿 `project-files-manage.exe` 占着它：`Get-CimInstance Win32_Process -Filter "name='project-files-manage.exe'" | Select ProcessId,CommandLine`）。
 
 - [ ] **Step 6: 更正 spec**
 
-`docs/技术方案.md` 第 125-127 行改成实测口径：
+`docs/技术方案.md` 第 125-126 行（`index_docs` 与 `index_docs_fts` 那两行；**127 行是 `vault_meta`，别连它一起替换**）改成实测口径：
 
 ```
 index_docs          每个文件一行：doc_rowid(自增，给 FTS 当 rowid) / id(uuid) / path / ext /
