@@ -186,12 +186,25 @@ export function IndexStatusPage() {
               // IPC 一落地就再取一次总览。running 的唯一口径是 overview.running，而 load() 原本只在挂载与
               // 终态事件两处跑，少这一步的话：从本页发起的那一整轮里 overview.running 全程停在 false ⇒
               // 徽章念「空闲」、两个 start 按钮一直可点，而 取消 是 disabled={!running} —— 这次挂载里永远点不动，
-              // 用户从本页发起的作业没法从本页取消。这不是赌时序：index_job.rs:335 的
+              // 用户从本页发起的作业没法从本页取消。这不是赌时序：index_job.rs:334 的
               // running.swap(true, SeqCst) 在 spawn 之前、命令返回之前就完成，所以 `.then` 里读到的是 true；
               // 轮次极短、线程已经跑完时读到 false 也是对的。被 index_running 拒绝时 store 的 start 把错误
               // 收进 error、promise 照样 resolve，此时真值本来就是 true ⇒ 两个 start 按钮随即变灰，
               // 也就没机会再点一次、把上面那行复位打在正在显示的进度上。
-              void start(undefined, false).then(() => load());
+              // 但 load() 的成功路径写的是 `set({ overview, error: null })`（src/stores/index-job.ts:24），
+              // 顺手会把 start 刚写进 error 的「这一次点击没被受理」在一个总览往返之后擦成 null，两支拒绝都会变哑：
+              // index_spawn_failed 时线程压根没起来（index_job.rs:375-383 在返回错误前把 running 复位成 false，
+              // report_failure 一行没跑、不发事件也不写 last_error），页面只剩「空闲徽章 + 空进度 + 零提示」，
+              // 正是 last_error 要防的那个失效形态；index_running 的「你点早了」中性提示同样只活一个往返。
+              // 故先把拒绝存下来，load() 之后只在 error 仍是 null 时放回去；若 load() 自己失败，它的 catch 已经
+              // 写了一条更新的 error（总览取不动比刚才那次点击被拒更要紧），不覆盖。
+              void start(undefined, false).then(async () => {
+                const clickError = useIndexJobStore.getState().error;
+                await load();
+                if (useIndexJobStore.getState().error === null) {
+                  useIndexJobStore.setState({ error: clickError });
+                }
+              });
             }}
           >
             建立索引
@@ -206,7 +219,16 @@ export function IndexStatusPage() {
               setLastRunning(null);
               useIndexJobStore.setState({ progress: null });
               // 同上：start 落地后补一次 load()，让 overview.running 回到真值，徽章与取消按钮才跟得上这一轮。
-              void start(undefined, true).then(() => load());
+              // 同样先存后还：load() 的成功路径把 error 一并清成 null（src/stores/index-job.ts:24），
+              // 不还的话 index_spawn_failed 之后页面是「空闲 + 空进度 + 一行提示都没有」，index_running 的
+              // 中性提示也活不过一个往返；load() 自己失败时它写的是一条更新的 error，那条更该露出来。
+              void start(undefined, true).then(async () => {
+                const clickError = useIndexJobStore.getState().error;
+                await load();
+                if (useIndexJobStore.getState().error === null) {
+                  useIndexJobStore.setState({ error: clickError });
+                }
+              });
             }}
           >
             全量重建
