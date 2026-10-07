@@ -8,6 +8,7 @@ import { AppShell } from "@/components/app-shell";
 import { SearchPage } from "@/pages/search";
 import { ProjectsPage } from "@/pages/projects";
 import { ProjectDetailPage } from "@/pages/project-detail";
+import { IndexStatusPage } from "@/pages/index-status";
 
 const rootRoute = createRootRoute({ component: AppShell });
 
@@ -25,7 +26,13 @@ const projectDetailRoute = createRoute({
   component: ProjectDetailPage,
 });
 
-const routeTree = rootRoute.addChildren([searchRoute, projectsRoute, projectDetailRoute]);
+const indexRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/index",
+  component: IndexStatusPage,
+});
+
+const routeTree = rootRoute.addChildren([searchRoute, projectsRoute, projectDetailRoute, indexRoute]);
 
 // hash history：Tauri 生产环境走打包后的自定义协议，browser history 的深链刷新会丢路由
 export const router = createRouter({ routeTree, history: createHashHistory() });

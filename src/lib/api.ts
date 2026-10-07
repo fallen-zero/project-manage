@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -14,6 +15,7 @@ import type {
   SecretKind,
   ServerInput,
 } from "@/types/ledger";
+import type { DocHit, DocRow, IndexOverview, IndexProgress } from "@/types/index";
 
 export const listProjects = () => invoke<Project[]>("project_list");
 export const getProject = (id: string) => invoke<Project>("project_get", { id });
@@ -94,3 +96,18 @@ export const createNote = (projectId: string, input: NoteInput) =>
   invoke<Ledger["notes"][number]>("ledger_note_create", { projectId, input });
 export const updateNote = (id: string, input: NoteInput) => invoke<void>("ledger_note_update", { id, input });
 export const deleteNote = (id: string) => invoke<void>("ledger_note_delete", { id });
+
+// —— M3 全文索引：5 个命令 + 1 个进度事件（Task 10 的 aff828d）——
+// 形参按 camelCase 传，Tauri 会自动映射到 Rust 的 snake_case 形参（removeDir/ledgerList/vaultInit 已是先例）。
+export const indexStart = (projectId?: string, rebuild = false) =>
+  invoke<void>("index_start", { projectId: projectId ?? null, rebuild });
+export const indexCancel = () => invoke<void>("index_cancel");
+export const indexOverview = () => invoke<IndexOverview>("index_overview");
+export const indexDocs = (projectId: string, status: string | null, limit = 200, offset = 0) =>
+  invoke<DocRow[]>("index_docs", { projectId, status, limit, offset });
+export const searchDocs = (query: string, limit?: number) =>
+  invoke<DocHit[]>("search_docs", { query, limit: limit ?? null });
+// `index://progress` 就是 Rust 侧的 index_job::PROGRESS_EVENT（index_job.rs:22）：
+// 两侧都是字面量、没有共享常量，拼错事件名 tsc 抓不到，只能由真机点验确认连通。
+export const onIndexProgress = (handler: (p: IndexProgress) => void) =>
+  listen<IndexProgress>("index://progress", (e) => handler(e.payload));
