@@ -3419,6 +3419,8 @@ fn fts5_available(conn: &rusqlite::Connection) -> bool {
 
 - [ ] **Step 2: 五个命令**
 
+> **Task 10 评审后修订（Important 1）**：`index_overview` 必须**两段写** —— 持 `Mutex<Connection>` 守卫的那一段只做库内的读，离开作用域后再做 `Path::is_dir()` 这些文件系统探测。评审的原始表述：`is_dir()` 落在未挂载的 SMB/网络盘上能阻塞几十秒，而这段时间里全 crate 唯一那把连接锁被占了，`db_status` / `project_list` / `ledger_list` / `index_docs` / `search_docs` 全部排队 —— 恰好 Task 11 会在每轮终态事件后主动刷新总览，把这个窗口放大成日常路径。下面片段已是修订后的版本。修法**不是**把 `rootExists` 改取 `last_run.results[].root_missing`：那样「还没跑过任何一轮」时 `rootExists` 无从计算，而那正是本页最主要的用途。合并 N+1（一条 `GROUP BY project_id, index_status` 代替逐项目 `status_counts`）**不在本轮做**：窗口长度来自阻塞式 stat，不来自语句数，且 `ix_index_docs_project`（`db.rs:300`）已把每次统计限定在该项目的行内。
+
 ```rust
 #[tauri::command]
 fn index_start(
@@ -3471,32 +3473,50 @@ struct IndexOverview {
 
 #[tauri::command]
 fn index_overview(state: State<'_, AppState>) -> AppResult<IndexOverview> {
-    let conn = db(&state)?;
-    let opts = index_scan::ScanOptions::load(&conn)?;
-    let targets = index_job::targets(&conn, None)?;
-    let mut projects = Vec::new();
-    for t in targets {
-        let counts = index_store::status_counts(&conn, &t.project_id)?;
-        let pick = |s: &str| counts.iter().find(|c| c.status == s).map(|c| c.count).unwrap_or(0);
-        projects.push(ProjectState {
-            total: counts.iter().map(|c| c.count).sum(),
-            project_id: t.project_id.clone(),
-            project_name: t.project_name.clone(),
-            root_exists: std::path::Path::new(&t.root_path).is_dir(),
-            root_path: t.root_path,
-            ok: pick("ok"),
-            skipped: pick("skipped"),
-            failed: pick("failed"),
-            pending: pick("pending"),
-            missing: pick("missing"),
-        });
-    }
+    // 持锁段：只做库内的读。文件系统探测一条都不放进来 ——
+    // `AppState.conn` 是全 crate 唯一那把 `Mutex<Connection>`，`db_status` / `project_list` /
+    // `ledger_list` / `index_docs` / `search_docs` 全排在它后面；而未挂载的 SMB/网络盘上的
+    // `Path::is_dir()` 在 Windows 上能阻塞几十秒。持着它去 stat N 个根目录 = 一次界面刷新
+    // 卡住整条 IPC（Task 10 评审的 Important 1，代价实测过口径，不是推测）。
+    let (opts, targets, counts, has_fts) = {
+        let conn = db(&state)?;
+        let opts = index_scan::ScanOptions::load(&conn)?;
+        let targets = index_job::targets(&conn, None)?;
+        // 与 targets 同序收集，出锁后用 zip 配对，不另存一个 project_id 做查表。
+        let mut counts = Vec::with_capacity(targets.len());
+        for t in &targets {
+            counts.push(index_store::status_counts(&conn, &t.project_id)?);
+        }
+        (opts, targets, counts, fts5_available(&conn))
+    }; // conn 守卫到此离开作用域被 drop，下面再碰文件系统已经不持锁
+
+    // 出锁段：`is_dir()` 可以慢，但此时别的 IPC 进得来。
+    let projects = targets
+        .into_iter()
+        .zip(counts)
+        .map(|(t, counts)| {
+            let pick = |s: &str| counts.iter().find(|c| c.status == s).map(|c| c.count).unwrap_or(0);
+            ProjectState {
+                total: counts.iter().map(|c| c.count).sum(),
+                project_id: t.project_id,
+                project_name: t.project_name,
+                root_exists: std::path::Path::new(&t.root_path).is_dir(),
+                root_path: t.root_path,
+                ok: pick("ok"),
+                skipped: pick("skipped"),
+                failed: pick("failed"),
+                pending: pick("pending"),
+                missing: pick("missing"),
+            }
+        })
+        .collect();
+
     Ok(IndexOverview {
         running: state.index.running.load(std::sync::atomic::Ordering::SeqCst),
-        fts5_available: fts5_available(&conn),
+        fts5_available: has_fts,
         // 上一轮结论只是展示用，拿不到锁就回 None，不因为 UI 刷新阻塞作业线程。
-        // 这里两处 lock() 都只碰 IndexShared 自己的 Mutex，而作业线程从不反向拿 AppState 的
-        // conn 锁（它自己 `db::open` 了一条连接），所以「持着 conn 守卫再拿 summary」不构成环路。
+        // summary/last_error 是 IndexShared 自己的两把 Mutex。作业线程自持一条 `db::open` 的连接、
+        // 从不反向拿 AppState 的 conn，所以这里既不构成环路，也不再持着 conn 守卫。
         last_run: state.index.summary.lock().ok().and_then(|g| g.clone()),
         last_error: state.index.last_error.lock().ok().and_then(|g| g.clone()),
         projects,
