@@ -3624,12 +3624,21 @@ export interface IndexProgress {
   skipped: number;
   failed: number;
   current: string;
+  /** 只有 `state === "error"` 时有值（`[code] message（hint）` 整串），其余状态是 null。
+   *  Rust 侧 `Progress.error: Option<String>` 没有 `skip_serializing_if`，所以这一格**永远在载荷里**，
+   *  TS 类型必须写 `string | null` 而不是可选 —— 漏了它，`tsc` 这一步照样绿（前端不读就不报错），
+   *  而界面上「这一轮挂了」和「为什么挂」就接不上。 */
+  error: string | null;
 }
 
 export interface IndexOverview {
   running: boolean;
   fts5Available: boolean;
   lastRun: RunSummary | null;
+  /** 一轮彻底失败的原因串（同上：Rust 侧 `Option<String>`，载荷里恒有这一格，写成 `string | null`）。
+   *  与 `lastRun` 是互补的：成功轮 `lastRun` 有值、`lastError` 是 null；彻底失败的轮 `lastRun` 被置回
+   *  null 而 `lastError` 有值（`start` 在成功收口时把 `last_error` 清掉，所以不必自己判陈旧）。 */
+  lastError: string | null;
   projects: ProjectState[];
   excludeDirs: string[];
   maxFileBytes: number;
@@ -3747,8 +3756,10 @@ export const isTerminal = (p: IndexProgress | null) =>
 - 进度条：`done / total`（total 来自当前项目的 `scannedTotal`，扫完才有，所以开始阶段显示「正在扫描…」而不是假百分比）。
 - **支持类型清单**：把 `overview.supportedExts` 原样列出，并配一句「清单之外的类型（图片、.doc/.ppt、压缩包）不会建行：图片等归 M6 OCR，.doc/.ppt 归 M7」。这是「为什么这个文件搜不到」的第一层答案。
 - **超限与排除**：显示 `maxFileBytes`（换算成 MB）、`maxFilesPerProject`、`excludeDirs`。
-- 项目表：每个项目一行 —— 名称、根目录（不可达时红标 `rootExists=false`，文案「根目录当前不可达，通常是盘没挂载」）、`ok / skipped / failed / pending / missing` 五个数字。选中一行后下方列出该项目的文件行（`indexDocs`），状态筛选下拉：全部 / ok / skipped / failed。
+- 项目表：每个项目一行 —— 名称、根目录（不可达时红标 `rootExists=false`，文案「根目录当前不可达，通常是盘没挂载」）、`ok / skipped / failed` 三个数字（`pending` / `missing` 也在载荷里，为什么只念三个见下面那条）。选中一行后下方列出该项目的文件行（`indexDocs`），状态筛选下拉：全部 / ok / skipped / failed。
 - 每条文件行展示 `skipReason`（`too_large` / `empty_text`）与 `errorMsg` 的中文映射，例如 `too_large` → `超出单文件上限`。映射写成 `src/pages/index-status.tsx` 内的一个 `const REASON_LABEL: Record<string, string>`，不要为它建 store。**不要给 `over_project_cap` 留映射**：触顶后被丢弃的文件根本不建行（`scan_root` 在 `break` 之后什么都不返回，见 Task 6 的 `capped`），M3 没有任何写入方；留着等于告诉用户「这里本该有一行」，是假的可观测性。上限这件事由下一行的项目级 `capped` 标注回答。
+- **失败原因有两条来源，都要念，缺一不可**：`progress.error`（事件里那条，只在 `state === "error"` 非 null，实时）与 `overview.lastError`（IPC 里那条，页面切走再回来、或刷新后唯一还留下的证据）。所以收到终态事件后必须再 `load()` 一次（生命周期已写死），否则界面上「这一轮挂了」和「为什么挂」会分家。另两条边界：**`error` 终止事件不带计数** —— `report_failure` 发的是 `terminal("error", &[], ...)`，`total`/`done` 恒为 0、`results` 是空数组，「跑到第几个项目挂的」只能取失败前最后一条 `running` 事件的 `projectName` / `current`，别去 error 事件里找数字；`lastError` 是 `[code] message（hint）` 的整串，**直接整段显示**，不要按 code 分支（要分支就得先把 `AppError` 拆成三元组透出，那是另一件事）。
+- 项目表那五个计数里，**M3 只有 `ok / skipped / failed` 三个有写入方**（`write_doc` 的 `DocOutcome` 只映射这三个，`index_store.rs:33-43`）。`pending` 只是 `index_docs.index_status` 的列默认值（`db.rs:290`），`missing` 是 M5 对账预留的（`db.rs:374` 注明 CHECK 改不动、必须现在就在枚举里）—— 二者在 M3 恒为 0。**类型里保留这两个字段**（契约要与 CHECK 对齐），但页面上不要给它们占栏位，更不要写成「待处理 0 / 已丢失 0」这种看起来像结论的文案：那会让用户以为「0 个待处理 = 全处理完了」。
 - 上一轮摘要：`lastRun.results` 里逐项目显示 `scannedTotal / ok / skipped / failed / unchanged`，并显式标出 `capped`（文案用 `已达单项目文件上限，本轮只处理前 N 个（含超限跳过的行），其余文件本轮没有行`）与 `rootMissing`、`walkErrors`。**别把 `scannedTotal` 念成「索引了 N 个」**：Task 6 的配额是在分「可抽取 / 超限」两桶**之前**判的（见 Task 9 Interfaces 的 capped 语义），这 N 个里含 `too_large` 的 skipped 行，而真正能抽正文的文件可能反而被挤掉了。
 - **试搜区**：一个输入框 + 结果列表，直接吃 `searchDocs`。每条显示 `path`、`snippet`、`matchedBy`；`prefix` 那条要在旁边标「宽松匹配」，让用户知道这不是精确命中。这一区同时是 M4 的输入素材，本任务只求「能验」。
 - 敏感字段脱敏的既有约定不影响本页（本页没有任何密文列）。
