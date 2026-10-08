@@ -241,9 +241,10 @@ pub fn kind_of(ext: &str) -> Option<DocKind> {
 /// pdf-extract 内部依赖 lopdf，畸形结构有 panic 的前科；一轮索引不能因为一个坏文件整体失败。
 /// 注意：本机实测的假 PDF 头与截断文件都走的是 Err 分支（事实 18），
 /// 这里的 catch_unwind 防的是 panic 分支，那条分支在本机无法构造 —— 属已知缺口，不要当成已证。
-/// 两道边界是叠加的而不是重复：外层 `index_job::panic_to_err` 还兜着 docx/pptx/xlsx/txt 那三条
-/// 本文件没包的路径，所以这处**不许**被「反正外层有兜底」删掉，也不许改成去调 `index_job` 的私有助手
-/// （抽取层不该反向依赖作业层）。两者共同的前提是 release 保持 unwind，
+/// 两道边界是叠加的而不是重复：外层 `panic_to_err`（本文件，M4 从 `index_job` 提上来）还兜着
+/// docx/pptx/xlsx/txt 那三条本文件没包的路径，所以这处**不许**被「反正外层有兜底」删掉，
+/// 也不许因为『反正外面有兜底』把这两道叠出的边界折成一道：`extract_text` 还有不走 `panic_to_err` 的调用方。
+/// 两者共同的前提是 release 保持 unwind，
 /// 见本文件 `release_profile_does_not_abort_so_panic_guards_work`（终审 C1）。
 fn pdf_text(path: &Path) -> AppResult<String> {
     let p = path.to_path_buf();
@@ -259,6 +260,28 @@ fn pdf_text(path: &Path) -> AppResult<String> {
             "extract_failed",
             "PDF 解析器在畸形文件上 panic，已兜住并跳过该文件",
             "该文件本轮不索引；可换 PDF 工具另存一份再登记",
+        )),
+    }
+}
+
+/// 把「可能 panic 的调用」统一转成 `AppResult`：panic → `Err(extract_failed)`。
+/// 索引（`index_job::run_pass`）与预览（`doc_preview`）两条路共用这一个实现，
+/// 于是「一个坏文件只废它自己」这条红线只有一条路径可以写错。
+/// 为什么必须有这一层：`技术方案.md` 2.2 把 `pdf-extract` **和 zip+XML 解析**并列列为 panic 源，
+/// 而本文件里只有 `pdf_text` 自己包了 `catch_unwind`；docx/pptx/xlsx/txt 四条路径的 panic
+/// 原本会一路炸穿调用方。M4 之前这个助手在 `index_job.rs` 里是私有的，预览那条路一道边界都没有。
+/// 前提：release 保持 unwind（见本文件 `release_profile_does_not_abort_so_panic_guards_work`），
+/// 否则这里抓不到任何东西。
+///
+/// **跨模块不变量：任何按 path 调用抽取器的地方都必须包这一层。** 新增读盘通路的人不必再读
+/// `index_job.rs` 才能发现这一点——它写在抽取层，就在抽取层的门口。
+pub(crate) fn panic_to_err<T, F: FnOnce() -> T>(f: F, what: &str) -> AppResult<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(v) => Ok(v),
+        Err(_) => Err(AppError::new(
+            "extract_failed",
+            &format!("抽取器 panic，已兜住并跳过：{what}"),
+            Some("该文件本轮不索引；这类文件可换工具另存一份再登记"),
         )),
     }
 }
@@ -577,9 +600,32 @@ mod tests {
                 assert_ne!(
                     key, "panic",
                     "release 里 `panic = \"abort\"` 会让 `catch_unwind` 抓不到任何东西，抽取层的兜底形同不存在；本项目要求 unwind。\
-                     见本文件 `pdf_text` 的注释与 `index_job::panic_to_err`（终审 C1）。"
+                     见本文件 `pdf_text` 的注释与 `crate::panic_to_err`（终审 C1）。"
                 );
             }
         }
+    }
+
+    /// panic 边界的直测（终审 I1）。动机写在这里：`extract_text` 四条路径里只有 `pdf_text`
+    /// 在抽取层自己兜了 panic，docx/pptx/xlsx/txt 三条原本会直接炸穿本轮。
+    /// **少这一条，把 `panic_to_err` 里的 `catch_unwind` 删掉也不会红** —— 真实文件在本机
+    /// 构造不出 panic（那是 `开发进度.md` 的缺口 1），能构造的地方只有这里，所以这条直测不可替代。
+    /// 只断 code / 文案前缀 / 透传值，不回显任何抽取正文。
+    /// M4 起这条直测跟着 `panic_to_err` 住在抽取层：被守护的表达式在哪，测试就在哪。
+    #[test]
+    fn panic_to_err_turns_a_panic_into_an_extract_failure() {
+        let boom = panic_to_err(
+            || panic!("抽取器在畸形文件上炸了 —— 这条用例的前提就是它要炸"),
+            "C:/坏文档.docx",
+        )
+        .unwrap_err();
+        assert_eq!(boom.code, "extract_failed", "panic 必须落成 extract_failed，才能走 pass 那条失败 arm：{}", boom.code);
+        assert!(boom.message.contains("panic"), "message 要能看出是 panic 被兜住的：{}", boom.message);
+        assert!(boom.message.contains("C:/坏文档.docx"), "message 要带上是哪个文件，否则 /index 清单无法定位：{}", boom.message);
+        assert!(boom.hint.is_some(), "要给界面一句可行动的建议");
+
+        // 正常路径原样透传：兜底不许把值吃掉（吃掉的话整轮会变成「全都 failed」而照样报 done）。
+        assert_eq!(panic_to_err(|| "正文两个词".to_owned(), "C:/好文件.txt").unwrap(), "正文两个词");
+        assert_eq!(panic_to_err(|| 7u8, "C:/好文件.txt").unwrap(), 7);
     }
 }
