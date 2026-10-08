@@ -33,10 +33,27 @@ test("有内容的段按 项目 / 台账 / 正文 顺序产出；平铺段的存
   // —— 原本这条的名字写「段里没有簇也能产出」，那是实现里**没有**的行为（`clusters.length === 0` 就不产出，
   // 第 2 条与第 4 条的第一句断言正是钉这个的），照旧名读会诱导出「把空段也产出」的反向整改。
   // 「有簇但簇里 `items` 为空」照样产出这一格，由第 4、5 条用 `items: []` 的夹具守着，不在本条。
+  // 段序守卫（Task 7 首轮评审 I-1 整改）：原本这条只喂单段夹具，名字里的「按 项目 / 台账 / 正文 顺序」
+  // 压根没有被断言 —— 控制方实测过：把 `bundleToSections` 里 ledger 与 docs 两个 `if` 块整个交换，
+  // 8 条照样全绿（`pass 8 / fail 0 / exit=0`）。所以必须有一个**三段同时非空**的夹具来钉住 `out` 的顺序；
+  // 顺手把 `relaxed` 也塞进这个夹具，让「放宽只落在正文段」拿到平铺段与台账段的反面断言（评审 M-2）。
   const hit = { source: "project", id: "p1", projectId: "p1", projectName: "甲", title: "甲", detail: "" };
   const sections = bundleToSections(bundle({ projects: [hit] }));
   assert.deepEqual(sections.map((s) => s.kind), ["projects"]);
   assert.equal(sections[0].title, "项目档案");
+  const cluster = { projectId: "p1", projectName: "甲", items: [], hidden: 0 };
+  const all = bundleToSections(
+    bundle({
+      projects: [hit],
+      ledger: { clusters: [cluster], hiddenClusters: 0 },
+      docs: { clusters: [cluster], hiddenClusters: 0 },
+      relaxed: true,
+    }),
+  );
+  assert.deepEqual(all.map((s) => s.kind), ["projects", "ledger", "docs"]);
+  assert.equal(all[0].note, null, "放宽属于正文段，平铺段不该跟着说");
+  assert.equal(all[1].note, null, "放宽属于正文段，台账段不该跟着说");
+  assert.equal(all[2].note, "含前缀放宽匹配");
 });
 
 test("三个截断计数各自产出一行说明，互不借用", () => {
