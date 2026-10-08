@@ -4,7 +4,7 @@ import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { Project, ProjectInput } from "@/types/project";
-import type { FieldHit } from "@/types/search";
+import type { DocPreview, FieldHit, SearchBundle } from "@/types/search";
 import type {
   CredentialInput,
   EnvInput,
@@ -34,6 +34,12 @@ export const statusOptions = () => invoke<string[]>("project_status_options");
 
 // 库内字段检索：只扫明文列，未解锁也能用（SQL 里压根没有密文列）。
 export const searchLocal = (query: string) => invoke<FieldHit[]>("search_local", { query });
+
+// 首屏统一检索：三段一次带回。M4 起页面只用这一个入口，searchLocal 留给旧调用与对照。
+export const searchAll = (query: string) => invoke<SearchBundle>("search_all", { query });
+// 点开正文命中：后端锁内查库、锁外重抽原文，返回窗口文本与码元区间。
+export const docPreview = (docId: string, query: string) =>
+  invoke<DocPreview>("doc_preview", { docId, query });
 
 // 打开目录本身；打不开时把后端错误原样抛出，由调用方提示，不静默失败。
 export const openFolder = (path: string) => openPath(path);
