@@ -21,7 +21,8 @@ use crate::error::{AppError, AppResult};
 use crate::extract::{panic_to_err, extract_text};
 use crate::tokenize::query_terms;
 
-/// 一扇窗的**半宽**（按 char 计），所以单窗最长 `2 * PREVIEW_WINDOW_CHARS` 个 char。
+/// 一扇窗的**半宽**（按 char 计），所以单窗最长 `2 * PREVIEW_WINDOW_CHARS + 命中自身长度` 个 char
+/// （两端各扩一个半宽，中间还得放下命中本身 —— Task 5 复审指出原句少了后半截）。
 /// 不要求落在词或行边界上：预览是给人核对原文的，切在字中间比多加一层对齐逻辑更好读。
 const PREVIEW_WINDOW_CHARS: usize = 4_000;
 /// 一次预览最多拼几扇窗；多出来的命中直接丢弃，由 `truncated` 说实话。
@@ -161,8 +162,10 @@ fn hit_ranges(text: &str, query: &str) -> Vec<(usize, usize)> {
     let mut merged: Vec<(usize, usize)> = Vec::new();
     for (s, e) in out {
         match merged.last_mut() {
-            // 只并**真重叠**：`s < prev.1`。相接（`s == prev.1`）保持两格，前端各涂一格，
-            // 这正是「合同 报价」命中「合同报价」时该有的形状。
+            // `<` 不是笔误：这里比的是**命中**，两段首尾相接（`s == prev.1`）在原文上是两格，
+            // 前端要各涂一格，所以不并。真正必须分开的是「合同」「报价」这种相邻不重叠的命中
+            // （`multi_word_query_highlights_both_terms` 断 `[(0,2),(2,4)]`）；写 `<=` 会把它们
+            // 并成一格，与本任务自己的用例冲突。Task 5 首轮评审裁定：断言是规格，实现文本写错了。
             Some(prev) if s < prev.1 => prev.1 = prev.1.max(e),
             _ => merged.push((s, e)),
         }
@@ -170,26 +173,35 @@ fn hit_ranges(text: &str, query: &str) -> Vec<(usize, usize)> {
     merged
 }
 
-/// 以命中为中心扩半宽，相接或重叠的窗并成一扇；超出 `MAX_PREVIEW_WINDOWS` 的命中丢弃并置 `truncated`。
+/// 以命中为中心扩半宽，**左沿相接或越过上一扇右沿**的窗并成一扇；超出 `MAX_PREVIEW_WINDOWS` 的命中丢弃并置 `truncated`。
 /// 只与**最后一扇**比就够：命中升序，窗也升序。
 fn take_windows(hits: &[(usize, usize)], text_len: usize) -> (Vec<(usize, usize)>, bool) {
     let mut windows: Vec<(usize, usize)> = Vec::new();
     let mut dropped = false;
     for &(start, end) in hits {
         let hi = (end + PREVIEW_WINDOW_CHARS).min(text_len);
-        // 判据与窗数上限两条各自成立，所以要写成「先看清最后一扇的界，再决定动谁」：
-        // 若放进一个 `match windows.last_mut()`，守卫里再读 `windows.len()` 会和这把
-        // 可变借用打架（E0502），读 `windows.push` 更不行。语义与三分支逐条对应。
-        if let Some(prev) = windows.last_mut() {
-            if start <= prev.1 {
+        // 比的是新窗的**左沿** `lo`，不是命中起点 `start`：窗是 `[start - 半宽, end + 半宽]`，
+        // 拿 `start` 去比，两处命中相距落在「一个半宽到两个半宽」这条带里时既不并窗、`lo` 又越过
+        // 上一扇的右沿 —— `stitch` 会把中间那段正文**吐两遍**，还在它中间插一个代表「此处有省略」的
+        // `PREVIEW_GAP`，而那段正文根本没被省略（Task 5 首轮评审 Important-1）。
+        let lo = start.saturating_sub(PREVIEW_WINDOW_CHARS);
+        // 这里刻意不用 `match windows.last_mut()` 里再写 `windows.len()` / `windows.push()`：
+        // `last_mut()` 的可变借用横跨所有分支，那两个调用会撞 E0502（计划原文就是这个形状，
+        // Task 5 实现者实测编不过）。借用在 `merged` 出作用域前结束，所以先算出布尔再分支。
+        let merged = match windows.last_mut() {
+            Some(prev) if lo <= prev.1 => {
                 prev.1 = prev.1.max(hi);
-                continue;
+                true
             }
+            _ => false,
+        };
+        if merged {
+            continue;
         }
         if windows.len() >= MAX_PREVIEW_WINDOWS {
             dropped = true;
         } else {
-            windows.push((start.saturating_sub(PREVIEW_WINDOW_CHARS), hi));
+            windows.push((lo, hi));
         }
     }
     (windows, dropped)
@@ -208,7 +220,9 @@ fn stitch(chars: &[char], windows: &[(usize, usize)], hits: &[(usize, usize)]) -
     for (i, &(ws, we)) in windows.iter().enumerate() {
         if i > 0 {
             out.push_str(PREVIEW_GAP);
-            base += utf16_len(PREVIEW_GAP.chars().collect::<Vec<char>>().as_slice());
+            // 码元数现算而不是写死 3：将来换分隔串不会悄悄错。形态用 `encode_utf16().count()`，
+            // 省掉每扇窗一次 `collect::<Vec<char>>()`。
+            base += PREVIEW_GAP.encode_utf16().count();
         }
         out.extend(chars[ws..we].iter());
         for &(hs, he) in hits {
@@ -327,8 +341,18 @@ mod tests {
 
     #[test]
     fn near_hits_share_one_window_so_no_gap_is_emitted() {
-        let text = "甲验收乙".to_owned();
+        // 夹具是按半宽算出来的，不是随手一个短串：HALF = `PREVIEW_WINDOW_CHARS` = 4000，
+        // 第一处命中 (0,2) 的窗是 `[0, 4002]`；要让第二处命中的**窗左沿**恰等于 4002（相接），
+        // 它的 `start` 就得落在 `4002 + HALF = 8002`。
+        // 于是并窗判据从 `<=` 翻成 `<` 时两扇窗不再相接 → `stitch` 多插一个 `PREVIEW_GAP` → 本条红；
+        // 而 `<=` 下是一扇覆盖全文的窗 → `p.text` 就是原文、不含分隔串。
+        // （原夹具 `"甲验收乙"` 只有一处命中，并窗分支根本不执行，Step 4 变异 3 因此在给定夹具下
+        // 逻辑不可满足 —— Task 5 首轮评审 Important-2，名不符实的假守护。）
+        let text = format!("验收{}验收", "字".repeat(8_000));
         let p = render_preview_with("d1", &row_for("C:/x/a.docx"), "验收", body(text.clone())).unwrap();
+        assert_eq!(text.chars().count(), 8_004, "间距算错了这条就退化成单命中夹具");
+        assert_eq!(p.ranges, vec![(0, 2), (8_002, 8_004)], "两处命中进同一扇窗，各自涂一格");
+        assert!(!p.truncated, "相接的两处命中该并成一扇，窗数没超上限不该截断");
         assert!(!p.text.contains(PREVIEW_GAP), "两窗相接还分开拼就会多出一个假省略号");
         assert_eq!(p.text, text);
     }
