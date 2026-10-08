@@ -1057,8 +1057,11 @@ use crate::error::{AppError, AppResult};
 use crate::extract::{panic_to_err, extract_text};
 use crate::tokenize::query_terms;
 
-/// 一扇窗的**半宽**（按 char 计），所以单窗最长 `2 * PREVIEW_WINDOW_CHARS + 命中自身长度` 个 char
-/// （两端各扩一个半宽，中间还得放下命中本身 —— Task 5 复审指出原句少了后半截）。
+/// 一扇窗的**半宽**（按 char 计），所以**没被并过**的单扇窗最长
+/// `2 * PREVIEW_WINDOW_CHARS + 命中自身长度` 个 char（两端各扩一个半宽，中间还得放下命中本身
+/// —— Task 5 复审指出原句少了后半截）。链式合并会让窗更长：`MAX_PREVIEW_WINDOWS` 只封顶**窗数**、
+/// 不封顶窗长，命中每隔不到两个半宽出现一次时会并成一扇，长文里这扇可以接近整篇，由 `truncated` 说实话。
+/// （Task 5 复审 Minor-1：并窗判据从「命中起点」换成「新窗左沿」后合并带翻倍，旧句的「单窗最长」成了假话。）
 /// 不要求落在词或行边界上：预览是给人核对原文的，切在字中间比多加一层对齐逻辑更好读。
 const PREVIEW_WINDOW_CHARS: usize = 4_000;
 /// 一次预览最多拼几扇窗；多出来的命中直接丢弃，由 `truncated` 说实话。
@@ -1470,7 +1473,9 @@ fn stitch(chars: &[char], windows: &[(usize, usize)], hits: &[(usize, usize)]) -
     for (i, &(ws, we)) in windows.iter().enumerate() {
         if i > 0 {
             out.push_str(PREVIEW_GAP);
-            base += utf16_len(PREVIEW_GAP.chars().collect::<Vec<char>()).as_slice());
+            // 分隔串的码元数就地算，不写死 3（Task 5 复审 Minor(b)：老写法每扇窗白做一次 collect，
+            // 且计划原文那句 `collect::<Vec<char>` 的尖括号根本没闭合，编译不过）。
+            base += PREVIEW_GAP.encode_utf16().count();
         }
         out.extend(chars[ws..we].iter());
         for &(hs, he) in hits {
@@ -1497,7 +1502,7 @@ Expected: `134 passed; 0 failed`（120 + 14）。
 
 1. `hit_ranges` 的 needle 改成 `query.trim()`（不经 `query_terms`）：`punctuation_in_the_query_is_dropped_by_the_shared_tokenizer` 必须红。
 2. `lower_first` 改成 `src.to_lowercase()`（整串折叠）：`a_bmp_outside_char_before_the_hit_costs_two_units` 或长度不变式用例红（`ß` 那种展开会漂偏移；本仓夹具没有 ß，所以这条**预期是假绿**，按已知缺口登记，不要为了让它红而篡改断言）。
-3. `take_windows` 的并窗判据从 `lo <= prev.1` 改成 `lo < prev.1`（相接不并）：`near_hits_share_one_window_so_no_gap_is_emitted` 必须红。它的夹具是按半宽算的（第二处命中 `start = 8002`，左沿 `8002 - 4000 = 4002` 恰等于第一扇窗右沿），所以翻成 `<` 就变成两扇窗：红点是 `assert!(!p.truncated)` 与 `assert!(!p.text.contains(PREVIEW_GAP))` 两处。**并且这条夹具还兼任第二格取证**：把判据里的 `lo` 换回命中起点 `start`（就是 Important-1 那个缺陷形态，`8002 <= 4002` 为假 → 两扇重叠窗）也必须红，红点同上。还原后 `cargo test --lib doc_preview` 恢复 `14 passed`。**这条在旧夹具（`"甲验收乙"`，单命中）下逻辑上不可能满足** —— 并窗分支根本没执行，改判据全量照绿，那是等价变异而不是「这条变异不成立」。
+3. `take_windows` 的并窗判据从 `lo <= prev.1` 改成 `lo < prev.1`（相接不并）：`near_hits_share_one_window_so_no_gap_is_emitted` 必须红。它的夹具是按半宽算的（第二处命中 `start = 8002`，左沿 `8002 - 4000 = 4002` 恰等于第一扇窗右沿），所以翻成 `<` 就变成两扇相接的窗 → `stitch` 多插一个 3 码元的 `PREVIEW_GAP` → 第二处命中的起点被推到 8005。**首个红点是 `assert_eq!(p.ranges, vec![(0, 2), (8_002, 8_004)])` 这一条**（`assert_eq!` 失败即中止本用例，后面的 `!p.truncated`、`!p.text.contains(PREVIEW_GAP)`、`p.text == text` 在同一次运行里不会执行到，但它们在这个变异下各自也成立地失败 —— 取证时照实写「红点一处、其后三条被短路挡住」，**不许**为了凑「两条都红」去调断言顺序或拆条）。**并且这条夹具还兼任第二格取证**：把判据里的 `lo` 换回命中起点 `start`（就是 Important-1 那个缺陷形态，`8002 <= 4002` 为假 → 两扇**重叠**窗、正文吐两遍）也必须红，红点同上。这一格的可信度论证（Task 5 复审具名风险，已 SETTLED）：只要多出一扇窗，`stitch` 的 `base` 就多算一次分隔串，其后每个命中的起点位移至少 3 码元，所以 `ranges` 是「多插分隔串（进而重复正文）」的忠实代理，不存在「ranges 逐字相同而 `text` 变脏」的变异。还原后 `cargo test --lib doc_preview` 恢复 `14 passed`。**这条在旧夹具（`"甲验收乙"`，单命中）下逻辑上不可能满足** —— 并窗分支根本没执行，改判据全量照绿，那是等价变异而不是「这条变异不成立」。
 4. `stitch` 里删掉 `if i > 0 { push_str(PREVIEW_GAP) }`：`four_spaced_hits_give_three_windows_and_the_fourth_is_dropped` 的 gap 计数断言必须红。
 5. `render_preview_with` 去掉 `panic_to_err(...).and_then(|r| r)` 直接调 `extract_with(&path)`：`a_panicking_extractor_is_caught_not_fatal` 必须红。**红的形态**（Task 5 首轮评审核实过，原句「让整个测试进程崩掉」在本机不成立）：dev profile 是 `panic = "unwind"`，而 libtest 给每条测试线程自带 `catch_unwind`，所以现象是**该用例 FAILED + `cargo test` 以 101 退出，测试进程本身不崩**；报告要把形态照实写。生产语义仍然成立 —— IPC 命令线程没有 harness，同一处 panic 就是真终止整个应用，那正是这道边界存在的全部理由。改回来后恢复 `14 passed`。
 6. `truncated` 写成 `false`：`a_file_name_only_match...` 与 `four_spaced_hits...` 都必须红。
@@ -1550,9 +1555,10 @@ Expected: 两条 clippy `exit=0` 且 0 条 warning（`PathBuf` 若最终没用�
 
 **Files:**
 - Modify: `src-tauri/src/lib.rs`（`search_local`（`:255-259`）之后加 `search_all`；`search_docs`（`:536-543`）之后加 `doc_preview`；`generate_handler!`（`:562-602`）末尾加两条。`mod doc_preview;` 那一行**已由 Task 5 落地**，本任务只核它在位，不要重复加）
-- Modify: `src-tauri/src/doc_preview.rs`（**只删 Task 5 为「caller 还不存在」开的那块临时豁免**：以 `// 临时豁免，Task 6 落地` 开头的 4 行注释，加上紧跟它的那行 `#![allow(dead_code)]`，共 5 行（它们前后各留一个空行，别把空行也删掉）。除这 5 行之外的任何字节都不许变，尤其不许动文件头那条红线注释的语义。）
+- Modify: `src-tauri/src/doc_preview.rs`（两件事，都只碰注释与豁免，不碰任何表达式。① **删 Task 5 为「caller 还不存在」开的那块临时豁免**：以 `// 临时豁免，Task 6 落地` 开头的 4 行注释，加上紧跟它的那行 `#![allow(dead_code)]`，共 5 行（它们前后各留一个空行，别把空行也删掉）。② **同步 `PREVIEW_WINDOW_CHARS` 的 doc 注释**（Task 5 落地时是 3 行，行号会漂，按「紧贴 `const PREVIEW_WINDOW_CHARS: usize` 的那段 `///`」定位）：并窗判据在 fix round 1 从「命中起点」换成了「新窗左沿」，合并带随之翻倍，旧句「单窗最长 `2 * PREVIEW_WINDOW_CHARS + 命中自身长度`」变成了假话（链式合并能让一扇窗接近整篇）。整段换成本计划 Task 5 Step 1 里那份 6 行的写法，逐字照抄，不要自己重述。除这两处之外的任何字节都不许变，尤其不许动文件头那条红线注释的语义。）
 - Modify: `src-tauri/src/search.rs`（**删掉 Task 4 为「caller 还不存在」开的那行临时豁免**：`unified_bundle` 上方的 `#[allow(dead_code)]`（Task 4 落地时在 `:290`，行号会漂，按「紧贴 `pub fn unified_bundle` 的那行 `#[allow(dead_code)]`」定位）。它的注释里写死了「第一个 caller 在 Task 6 的 `search_all` IPC，该任务落地时必须删掉本行」——本任务就是那个落地点，不删就永久化（M3 的豁免账教训：临时豁免必须有具名回收点与一条 grep 门）。除删这行和 Step 4 点名的四处**注释/断言**之外，不许动 `search.rs` 的任何表达式。）
 - Modify: `src-tauri/src/index_store.rs`（**只改注释**：`query_guards_and_limit_pass_straight_through` 的头注释里那条「Task 10 的 IPC 写 `limit.unwrap_or(50).clamp(1, 200)`」旧指针，落点在 `:671` 附近，按注释文本定位；见 Step 4）
+- Modify: `src-tauri/src/extract.rs`（**只改一条断言消息字符串**，第 595-605 行那段 `release_profile_does_not_abort_so_panic_guards_work` 里的 `assert_ne!` 尾句：`见本文件 \`pdf_text\` 的注释与 \`crate::panic_to_err\`（终审 C1）。` 里的 `crate::panic_to_err` 是 `f72a5c8` 把边界助手从 `index_job` 搬进 `extract` 之后悬空的第三个指针（Task 5 已收掉 `Cargo.toml:46` 与同函数 doc 那两处，这一条是 Task 5 复审登记的越界残留——本任务被禁止碰 `extract.rs` 除 `:577` 之外的字节，所以落在拥有 `extract.rs` 的这里）。改为 `见本文件 \`pdf_text\` 的注释与 \`panic_to_err\`（终审 C1）。`。**纯字符串**，不许动同一函数体里的任何表达式，也不许动 `:577` 附近 Task 5 已改好的那句。）
 
 M4 在这一格只有两个 `#[allow(dead_code)]`（`search.rs` 一处、`doc_preview.rs` 一处），两块豁免都由本任务回收，Step 3 的门一次扫两个文件 —— 少收一个就是永久豁免。
 
@@ -1601,16 +1607,17 @@ fn doc_preview(
             doc_preview
 ```
 
-- [ ] **Step 3: 编译与四条门禁**
+- [ ] **Step 3: 编译与五条门禁**
 
 ```bash
 cd src-tauri && cargo test --lib; echo exit=$?
 cargo clippy --lib -- -D warnings; echo exit=$?
 cargo clippy --lib --all-targets -- -D warnings; echo exit=$?
 grep -rn "allow(dead_code)" src/search.rs src/doc_preview.rs; echo exit=$?
+grep -rn "crate::panic_to_err\|index_job::panic_to_err" . --include=*.rs --include=*.toml; echo exit=$?
 ```
 
-Expected: `134 passed; 0 failed`（本任务 0 条新单测：命令体只是转发，`unified_bundle` 与 `doc_preview::*` 的逻辑已各自守住）；两条 clippy `exit=0`；第四条 **`exit=1`（0 命中）**——它就是「Task 4 与 Task 5 那两块临时豁免都被本任务回收」的证据，接线之后 `unified_bundle` 与 `doc_preview::*` 都有了真 caller，豁免留着就永远不会有人发现它过期了。两个文件一起扫：只要还剩一处命中，输出里会点名是哪个文件，别把它读成「另一个也快了」。
+Expected: `134 passed; 0 failed`（本任务 0 条新单测：命令体只是转发，`unified_bundle` 与 `doc_preview::*` 的逻辑已各自守住）；两条 clippy `exit=0`；第四条 **`exit=1`（0 命中）**——它就是「Task 4 与 Task 5 那两块临时豁免都被本任务回收」的证据，接线之后 `unified_bundle` 与 `doc_preview::*` 都有了真 caller，豁免留着就永远不会有人发现它过期了。两个文件一起扫：只要还剩一处命中，输出里会点名是哪个文件，别把它读成「另一个也快了」。第五条扫**悬空符号指针**（`f72a5c8` 把边界助手搬进 `extract.rs` 后，任何写成 `crate::panic_to_err` 或 `index_job::panic_to_err` 的注释/字符串都指到一个不存在的路径上；正确写法在 `extract.rs` 内部是裸 `panic_to_err`，跨文件是 `crate::extract::panic_to_err`），`exit=1`；Task 5 的门只扫 `index_job::panic_to_err` 这一种形态，所以漏掉了 `extract.rs:603` 那条 `crate::` 前缀的，本任务把两种形态一起封住。
 
 - [ ] **Step 4: Task 4 定向复审登记的四处文本残留（四处全零行为，本任务不新增测试）**
 
@@ -1680,9 +1687,11 @@ Expected: 第一条列出 handler 里的两行（`mod doc_preview;` 与 `fn doc_
 - [ ] **Step 6: 提交**
 
 ```bash
-git add src-tauri/src/lib.rs src-tauri/src/search.rs src-tauri/src/doc_preview.rs src-tauri/src/index_store.rs
+git add src-tauri/src/lib.rs src-tauri/src/search.rs src-tauri/src/doc_preview.rs src-tauri/src/index_store.rs src-tauri/src/extract.rs
 git commit -m "feat: M4 索引接线：search_all 与 doc_preview 两条 IPC 命令（后者锁内查库、锁外抽盘）"
 ```
+
+Expected: 提交含这**五**个文件，不多不少（`extract.rs` 是 Step 文件清单里那条断言消息字符串，只有 1 行；报告里 `git show --stat` 要能看出它只有注释级改动）。
 
 ---
 
@@ -2309,6 +2318,7 @@ cd "$APPDATA" && ls -la dev.zero.pfm 2>/dev/null && stat -c '%n %s %Y' dev.zero.
 4. 预览一个 `index_status='skipped'` 的行回 `code === "preview_unavailable"`。
 5. 预览一个文件已被删除的行回 `code === "preview_file_missing"`（在沙盒 tempdir 里造的文件，删掉它，不碰真实目录）。
 6. 连打两个字（先「验」再「验收」）后页面显示的是后一次的结果（守 seq 守卫在真 UI 上闭环；用 CDP 逐字符派发 input 事件）。
+7. **预览载荷长度（Task 5 复审 Minor-1 的有名缺口，实测而非断言）**：在沙盒 tempdir 里造一份长文（≥ 4 万 char，命中每隔约 8000 char 一个，间距刻意落在合并带 `(4000, 8002]` 内），`invoke("doc_preview", …)` 后**只回三个数字**：`text` 的码元长度、`ranges.len()`、`truncated`。并窗判据在 fix round 1 换成了「新窗左沿」，合并带随之翻倍，`MAX_PREVIEW_WINDOWS` 只封顶窗数不封顶窗长，所以链式合并会把一扇窗拉到接近整篇 —— 这是裁定过并接受的行为（要断开就得让窗相接，那正是 Important-1 的重复段落失效形态），但对话框是否还读得动只有真机看得见。**判据写死**：若单次预览的 `text` 超过 6 万码元且页面渲染明显卡顿或滚动失效，把它登记为终审的独立 finding（讨论「给合并加长度上限 + 上限处宁可多插一个 `⋯`」这条备选路），不在本任务里顺手改算术；不卡就在 `docs/开发进度.md` 记数字收口。
 
 - [ ] **Step 3: D6 的实测决定（20/10/10 是不是合适）**
 
