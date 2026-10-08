@@ -55,7 +55,9 @@
 | 真机 CDP 手法 | `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222" npm run tauri dev` + Node 全局 WebSocket 发 `Runtime.evaluate`；React 受控输入要用原型 `value` setter 再派发 `input` 事件 | `docs/开发进度.md:31` |
 | `write_doc` 可直接在别的模块的测试里调用 | `pub fn write_doc(conn, project_id: &str, file: &ScannedFile, outcome: DocOutcome) -> AppResult<i64>`，`ScannedFile` 五个字段全 `pub` | `index_store.rs:27`、`index_scan.rs:47-53` |
 
-**条数链（计划承诺的唯一口径，与各任务正文里写死的 Expected 逐条对齐）**：Task 1 → 106（tokenize +2），Task 2 → 106（extract +1、index_job −1，总数不变），Task 3 → 108（tokenize +2），Task 4 → 119（search +10、index_store +1），Task 5 → 133（新增 doc_preview 模块 14 条），Task 6 → 133（0 条新 Rust 测试，handler 39 → 41），Task 7 → Rust 侧仍 133、`node --test` **pass 8**，Task 8/9 不新增单测。终态分模块：tokenize 9 / extract 15 / index_job 12 / index_store 15 / search 19 / doc_preview 14，加不变的 db 8 / index_scan 10 / ledger 12 / project 10 / vault 9 = **133**。
+**条数链（计划承诺的唯一口径，与各任务正文里写死的 Expected 逐条对齐）**：Task 1 → 106（tokenize +2），Task 2 → 106（extract +1、index_job −1，总数不变），Task 3 → 108（tokenize +2），Task 4 → **120**（search +11、index_store +1），Task 5 → 134（新增 doc_preview 模块 14 条），Task 6 → 134（0 条新 Rust 测试，handler 39 → 41），Task 7 → Rust 侧仍 134、`node --test` **pass 8**，Task 8/9 不新增单测。终态分模块：tokenize 9 / extract 15 / index_job 12 / index_store 15 / search 20 / doc_preview 14，加不变的 db 8 / index_scan 10 / ledger 12 / project 10 / vault 9 = **134**。
+
+> 这条链在 Task 4 首轮评审后从 119/133 上调过一处：台账段（三段的三分之一）在原本 10 条测试里只被断言过「为空」，`partition` 谓词的变异因此是等价变异、无人捕获，所以补了第 11 条 `ledger_section_clusters_its_own_hits_instead_of_leaking_into_projects`。凡引用旧数（119/133/search 19）的下游正文都要一起改。
 
 ## 文件结构（谁负责什么）
 
@@ -534,8 +536,8 @@ git commit -m "fix: M4 摘要里的复合词重复：clean_snippet 按「恰好�
 ### Task 4: `search::unified_bundle` —— 三段聚合 + 段内按项目聚簇 + 三个截断计数
 
 **Files:**
-- Modify: `src-tauri/src/search.rs`（顶部常量区 `:15` 之后加四个常量；`:29` 之后加三个 DTO；`field_hits` 之后加 `cluster_by_project` 与 `unified_bundle`；tests 模块加 10 条）
-- Modify: `src-tauri/src/index_store.rs`（`status_counts`（`:149`）之后加 `indexed_project_count`；tests 模块加 1 条）
+- Modify: `src-tauri/src/search.rs`（顶部常量区 `:15` 之后加四个常量；`:29` 之后加三个 DTO；`field_hits` 之后加 `cluster_by_project` 与 `unified_bundle`；tests 模块加 11 条）
+- Modify: `src-tauri/src/index_store.rs`（`status_counts`（`:149`）之后加 `indexed_project_count`；tests 模块加 1 条；顺带更正 `doc_hits` 头注释里那条过期指针，见 Step 3 末尾）
 
 **Interfaces:**
 - Consumes：`search::field_hits`（既有）、`index_store::doc_hits`（既有，签名 `pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<DocHit>>`）、Task 1 的 `MAX_QUERY_CHARS`（本任务不直接引，两处守卫仍在原处）。
@@ -546,7 +548,7 @@ git commit -m "fix: M4 摘要里的复合词重复：clean_snippet 按「恰好�
 
 **为什么这些形状是定死的**（spec §三、§四、D3/D6/D7）：簇间序只取「命中条数降序 → 项目名升序 → 项目 id 升序」，**不跨段合并、不把 bm25 与 LIKE 归一化**（§3.4 禁假归一化）；三个截断各自有承载（簇内 → `Cluster.hidden`，整簇 → `ClusterSection.hidden_clusters`，平铺 → `projects_hidden`），只显示不展开；`relaxed` 在**截断前**的 docs 上算，否则放宽命中全被截掉时段级说明会凭空消失。
 
-- [ ] **Step 1: 先写 10 条红测试（`search.rs` 的 `mod tests`）**
+- [ ] **Step 1: 先写 11 条红测试（`search.rs` 的 `mod tests`）**
 
 测试模块的 `use` 行改为（`DocHit` 是 DTO 字段类型，必须在**文件顶部**引，见 Step 3；这里只引测试要直接点名的东西）：
 
@@ -581,7 +583,7 @@ git commit -m "fix: M4 摘要里的复合词重复：clean_snippet 按「恰好�
     }
 ```
 
-十条测试（向量全部沿用 `index_store.rs` 已实测的事实 5/6：正文含「验收」的行查「验收」是 `exact`；正文「维保期为十二个月」+ 文件名「维保期说明.docx」查「维保」是 `prefix`。**不要**换新词去赌 jieba 词典）：
+十一条测试（向量全部沿用 `index_store.rs` 已实测的事实 5/6：正文含「验收」的行查「验收」是 `exact`；正文「维保期为十二个月」+ 文件名「维保期说明.docx」查「维保」是 `prefix`。**不要**换新词去赌 jieba 词典）：
 
 ```rust
     #[test]
@@ -600,6 +602,25 @@ git commit -m "fix: M4 摘要里的复合词重复：clean_snippet 按「恰好�
         assert_eq!(b.docs.clusters[0].items.len(), 1);
         assert_eq!(b.docs.clusters[0].project_name, "政务云迁移");
         assert_eq!(b.indexed_projects, 1, "只有一个项目有 ok 正文行");
+    }
+
+    /// 台账段必须有**非空**证据。上一条只断过 `b.ledger.clusters.is_empty()`，
+    /// 于是 `partition` 的谓词怎么写都得空簇 —— Task 4 首轮评审据此判定「三段的三分之一零守护」，
+    /// 且简报原来的变异 6 是等价变异（实测全量 119 条都绿）。这条补上台账段的聚簇与两段不互相漏。
+    #[test]
+    fn ledger_section_clusters_its_own_hits_instead_of_leaking_into_projects() {
+        let (c, pid, mk) = fixture();
+        seed_ledger(&c, &pid, &mk); // 「生产门户」只在 env 表里，逐条读过
+        seed_doc(&c, &pid, "C:/x/合同验收.docx", "甲方要求验收指标见合同附件");
+        let b = unified_bundle(&c, "生产门户").unwrap();
+        assert!(b.projects.is_empty(), "「生产门户」不是项目名，平铺段必须空");
+        assert_eq!(b.ledger.clusters.len(), 1, "五条台账只有 env 命中，应聚成一簇");
+        assert_eq!(b.ledger.hidden_clusters, 0);
+        let cluster = &b.ledger.clusters[0];
+        assert_eq!(cluster.project_id, pid);
+        assert_eq!(cluster.project_name, "政务云迁移");
+        assert_eq!(sources(&cluster.items), ["env"]);
+        assert!(b.docs.clusters.is_empty(), "正文里没有「生产门户」，不该凭空多出正文簇");
     }
 
     #[test]
@@ -692,6 +713,8 @@ git commit -m "fix: M4 摘要里的复合词重复：clean_snippet 按「恰好�
         let b = unified_bundle(&c, "   ").unwrap();
         assert!(b.projects.is_empty() && b.ledger.clusters.is_empty() && b.docs.clusters.is_empty());
         assert!(!b.relaxed);
+        // 空查询不许留下幽灵计数：把三处 `saturating_sub` 写死成任何非零数都会在这里红。
+        assert_eq!((b.projects_hidden, b.ledger.hidden_clusters, b.docs.hidden_clusters), (0, 0, 0));
     }
 
     #[test]
@@ -797,6 +820,11 @@ use crate::index_store::{self, DocHit};
 /// 正文段一次向库取多少条。这是**取数**上限，不是展示上限；展示截断走下面三个数。
 /// 顶对齐 IPC 侧 `search_docs` 的 limit clamp（`lib.rs:542`，那里是边界唯一一次校验），
 /// 让首屏与 `/index` 的「试搜正文」试验台在同一条 SQL 上取数。
+///
+/// 下面三个展示计数只**相对本次取到的样本**：库里命中超过这条取数上限时它们会低报
+/// （排在第 201 位的正文根本没进内存，不计进任何 `hidden`）。M4 的线格式里没有「结果被截过」的位
+/// （spec §三 定死那七个字段，M4 不擅自加），所以诚实性落在两处：本注释 + Task 8 的文案措辞 ——
+/// 要说「本次结果里另有 N 条未展开」，不能说「库里还有 N 条」。
 const DOCS_FETCH_LIMIT: i64 = 200;
 /// 段级：一个段最多展示多少个簇。整簇被扔掉的簇数进 `ClusterSection::hidden_clusters`。
 const MAX_CLUSTERS_PER_SECTION: usize = 20;
@@ -818,6 +846,7 @@ pub struct Cluster<T> {
     pub project_name: String,
     pub items: Vec<T>,
     /// 簇内被 `MAX_ITEMS_PER_CLUSTER` 截掉的条数。只显示、不做展开（§十）。
+    /// 只相对本次取到的样本，见 `DOCS_FETCH_LIMIT` 的头注释。
     pub hidden: usize,
 }
 
@@ -826,6 +855,7 @@ pub struct Cluster<T> {
 pub struct ClusterSection<C> {
     pub clusters: Vec<C>,
     /// 被 `MAX_CLUSTERS_PER_SECTION` 整簇扔掉的簇数。
+    /// 只相对本次取到的样本，见 `DOCS_FETCH_LIMIT` 的头注释。
     pub hidden_clusters: usize,
 }
 
@@ -836,6 +866,8 @@ pub struct SearchBundle {
     pub query: String,
     /// `source == "project"` 的命中，平铺，最多 `MAX_PROJECT_HITS` 条。
     pub projects: Vec<FieldHit>,
+    /// 平铺段被截掉的条数。台账段一样只相对本次取到的样本，
+    /// 而且它上面还压着 `PER_GROUP_LIMIT`（每组取数上限），所以低报的方向与正文段相同。
     pub projects_hidden: usize,
     pub ledger: ClusterSection<Cluster<FieldHit>>,
     pub docs: ClusterSection<Cluster<DocHit>>,
@@ -852,8 +884,17 @@ pub struct SearchBundle {
 ```rust
 /// 段内按项目聚簇。簇间序 = 命中条数降序 → 项目名升序 → 项目 id 升序。
 /// 第三级兜底不是因为库里会有两个同项目（`projects.id` 是主键），而是为了「簇序可复现」：
-/// 前两级在库里**不唯一**（name 无 UNIQUE，条数更是常并列），少了第三级，
-/// `doc_clusters_sort_by_hit_count_then_project_name` 会在不同插入序下翻红。
+/// 前两级在库里**不唯一**（name 无 UNIQUE，条数更是常并列）。
+///
+/// 三键的守护现状（Task 4 实测，别把它读成「三级都有测试」）：
+/// - 第一级条数：`doc_clusters_sort_by_hit_count_then_project_name` 里 Gamma 那 5 条守住；
+/// - 第二级项目名：确定性红在 `section_drops_the_21st_cluster_and_reports_it`（21 个等条数簇，
+///   断的是「名序最大者被扔掉」）；`doc_clusters_sort_by_hit_count_then_project_name` 只能概率性红 ——
+///   `project::create_project` 的 id 是随机 UUID v4（`project.rs:110`），去掉名字键后 Alpha/Beta
+///   谁在前就是抛硬币（首轮实测 10 次里只红 2 次）；
+/// - 第三级 id：**当前没有任何测试能把它打红**。要它生效得有两个同名且同条数的簇，而测试没法把
+///   随机 id 的「插入序 vs id 序」摆成固定先后，`sort_by` 又是稳定排序。有名缺口，交 M5
+///   （补法要么给 `projects.id` 开一个测试注入点，要么在测试里用裸 SQL 固定 id）。
 fn cluster_by_project<T>(
     items: Vec<T>,
     project_of: impl Fn(&T) -> (String, String),
@@ -911,22 +952,32 @@ pub fn unified_bundle(conn: &Connection, query: &str) -> AppResult<SearchBundle>
 }
 ```
 
+`index_store.rs` 里 `doc_hits` 的头注释有一条 M3 时期写下的过期指针（现在读作「Task 10 的 IPC：`limit.unwrap_or(50).clamp(1, 200)`」，而本计划里做接线的是 Task 6），本任务把它换成现名。**只动那两行注释，同一函数体的代码一个字都不许碰**（`src/search.rs` 才是 Step 5 门禁扫的文件，这段落在 `index_store.rs`，但指针过期同样会误导读者）：
+
+```rust
+/// `limit` 原样进 SQL，这里不校验也不补默认值：SQLite 里负数 LIMIT = 不限行、0 = 无行，
+/// clamp 属于调用方的系统边界（`lib.rs:542` 的 `search_docs` 是唯一做过 clamp 的入口，
+/// 首屏那条走 `search::DOCS_FETCH_LIMIT`）。
+/// 刻意不做第二道校验 —— 本项目只在边界校验一次，两道 clamp 会漂成两个数。
+```
+
 Run: `cd src-tauri && cargo test --lib search; echo exit=$?`
-Expected: `19 passed; 0 failed`（原 9 + 本任务 10）。
+Expected: `20 passed; 0 failed`（原 9 + 本任务 11）。
 
 Run: `cd src-tauri && cargo test --lib; echo exit=$?`
-Expected: `119 passed; 0 failed`（108 + 10 + 1）。
+Expected: `120 passed; 0 failed`（108 + 11 + 1）。
 
 - [ ] **Step 4: 变异取证（每个截断计数与每条排序都要被单独打红）**
 
 1. 三个计数各写死成 `0`（`hidden_clusters`、`hidden`、`projects_hidden` 三处分别改）：`section_drops_the_21st_cluster_and_reports_it`、`cluster_keeps_10_items_and_reports_the_other_2`、`flat_project_section_truncates_into_projects_hidden` 各红一条。这三项是「不静默丢弃」的唯一证据。
-2. `sort_by` 去掉 `.then_with(|| a.1.cmp(&b.1))`：`doc_clusters_sort_by_hit_count_then_project_name` 必须红（Alpha/Beta 回到插入序 Beta/Alpha）。
+2. **反转** `.then_with(|| a.1.cmp(&b.1))` 的比较方向（改成 `b.1.cmp(&a.1)`），不要用「删掉这一行」的形态：删掉后并列簇落到随机的 UUID id 序上，`doc_clusters_sort_by_hit_count_then_project_name` 只有约 2/10 概率红（Task 4 首轮实测正是 2/10，报的是「捕获到了但红点与预测不同」）。反转方向才能让两个捕获者都确定性红：`section_drops_the_21st_cluster_and_reports_it`（p20 不再被扔、混进前 20 个簇）与 `doc_clusters_sort_by_hit_count_then_project_name`（变成 Gamma, Beta, Alpha）。两条都要在报告里贴出红点。
 3. `cluster_by_project` 里 `items.truncate(...)` 之前加一句 `items.reverse()`：`items_keep_the_bm25_order_that_doc_hits_returns` 必须红（3 条 id 互不相同，奇数长度 reverse 不可能等于原序，所以这条不存在「恰好对称而假绿」）。
 4. 把 `relaxed` 改成在截断后的 docs 簇上算（`bundle.docs.clusters.iter().any(...)`）：`relaxed_is_the_prefix_stage_and_nothing_else` 的第一条断言在 12 条截断夹具下仍然绿，**所以要另加一步**：把 `MAX_ITEMS_PER_CLUSTER` 临时改成 `0` 跑一次该测试，红则说明截断前/后确实有差异；然后改回 `10`。把两次结果都贴进报告。
 5. `unified_bundle` 里补一道 `if query.trim().is_empty() { return Err(AppError::new("invalid_input", ..)) }`：`empty_query_yields_an_empty_bundle_instead_of_an_error` 必须红。
-6. `partition` 的谓词从 `== "project"` 改成 `!= "note"`：`bundle_splits_three_sections_without_letting_one_borrow_another` 必须红。
+6. `partition` 的谓词从 `== "project"` 改成 `!= "note"`：`ledger_section_clusters_its_own_hits_instead_of_leaking_into_projects` 必须红（env 命中溜进平铺段，`b.projects.is_empty()` 与 `b.ledger.clusters.len() == 1` 一起倒）。**这条在补第 11 条测试之前是等价变异**：旧夹具的台账段只有空命中，谓词怎么写都得空簇，首轮实测「单条测试 exit=0、全量 `119 passed`」就是这个原因，所以变异 6 的红点必须在第 11 条上，报告要指名它。
+7. （**预期不红**的取证，必须实跑并把绿贴进报告）去掉第三级 `.then_with(|| a.0.cmp(&b.0))`：预期全量 `120 passed / 0 failed` 不变。理由写在 `cluster_by_project` 的头注释里 —— `sort_by` 稳定、夹具项目名互异，走不到第三级。不许为凑红改夹具、不许为凑红在测试里裸 SQL 注 id；这条是登记在注释里的有名缺口，不是待办。
 
-Expected: 变异回滚后 `19 passed; 0 failed`。
+Expected: 变异回滚后 `20 passed; 0 failed`（全量 `120 passed`）。
 
 - [ ] **Step 5: 一条 grep 门禁（防「数值又漂回字面量」）**
 
@@ -1389,7 +1440,7 @@ Run: `cd src-tauri && cargo test --lib doc_preview; echo exit=$?`
 Expected: `14 passed; 0 failed`。
 
 Run: `cd src-tauri && cargo test --lib; echo exit=$?`
-Expected: `133 passed; 0 failed`（119 + 14）。
+Expected: `134 passed; 0 failed`（120 + 14）。
 
 - [ ] **Step 4: 变异取证**
 
@@ -1427,10 +1478,10 @@ Expected: 两条都 `exit=1`（0 命中）。第一条守「预览不含自己�
 改为
 `/// \`catch_unwind\`（以及 \`panic_to_err\` 那道边界与 worker 线程体的最外层 \`catch_unwind\`）在发布包里**抓不到任何东西**，`
 —— 搬完之后再写「`index_job` 的两道」就把读者指到一个已经没有边界助手的文件里去了。同一句里
-`/// 一个畸形文件直接终止整个应用 —— 而 96 条单测全绿` 的 **`96`** 是 M3 收口时的快照数，本任务之后就是 133，
+`/// 一个畸形文件直接终止整个应用 —— 而 96 条单测全绿` 的 **`96`** 是 M3 收口时的快照数，本任务之后就是 134，
 任何后续里程碑都会再漂一次，所以把数字换成不随条数漂移的说法：`—— 而全仓单测都跑在 dev profile 上，一条都不会红`。
 
-这三处都是**纯注释**，不许顺手动同一函数体内的任何代码；改完 `cargo test --lib` 必须仍是 `133 passed`。
+这三处都是**纯注释**，不许顺手动同一函数体内的任何代码；改完 `cargo test --lib` 必须仍是 `134 passed`。
 
 ```bash
 cd src-tauri && cargo clippy --lib -- -D warnings; echo exit=$?
@@ -1506,7 +1557,7 @@ cargo clippy --lib --all-targets -- -D warnings; echo exit=$?
 grep -rn "allow(dead_code)" src/search.rs; echo exit=$?
 ```
 
-Expected: `133 passed; 0 failed`（本任务 0 条新单测：命令体只是转发，`unified_bundle` 与 `doc_preview::*` 的逻辑已各自守住）；两条 clippy `exit=0`；第四条 **`exit=1`（0 命中）**——它就是「Task 4 那行临时豁免已被本任务回收」的证据，接线之后 `unified_bundle` 有了真 caller，豁免留着就永远不会有人发现它过期了。
+Expected: `134 passed; 0 failed`（本任务 0 条新单测：命令体只是转发，`unified_bundle` 与 `doc_preview::*` 的逻辑已各自守住）；两条 clippy `exit=0`；第四条 **`exit=1`（0 命中）**——它就是「Task 4 那行临时豁免已被本任务回收」的证据，接线之后 `unified_bundle` 有了真 caller，豁免留着就永远不会有人发现它过期了。
 
 - [ ] **Step 4: 两侧字面量对账（tsc 与 rustc 都抓不到拼错的那一类）**
 
@@ -2167,7 +2218,7 @@ cd "$APPDATA" && stat -c '%n %s %Y' dev.zero.pfm/* 2>/dev/null
 git status --porcelain   # 必须只剩 M4 的代码与文档，没有沙盒残留、没有新增依赖
 ```
 
-`docs/开发进度.md` 的 M4 段落按既有格式写：终态测试条数（**cargo 133 / node pass 8**）、两条命令名、三个上限的实测裁定结果、以及这张「没能自动验证」清单（逐条点名，不许省略）：
+`docs/开发进度.md` 的 M4 段落按既有格式写：终态测试条数（**cargo 134 / node pass 8**）、两条命令名、三个上限的实测裁定结果、以及这张「没能自动验证」清单（逐条点名，不许省略）：
 - JSX 渲染正确性（只有 tsc + 真机点验，`node --test` 不覆盖）
 - 原生对话框/资源管理器那一步（`revealItemInDir` 由人点验）
 - `isNewest` 的 `>=` 变异假绿（Task 7 Step 5 第 1 条登记的有名缺口）
@@ -2184,7 +2235,7 @@ git commit -m "docs: M4 收口：真机断言、上限实测裁定与未能自�
 
 ## 完成判据（可核对）
 
-- `cd src-tauri && cargo test --lib` → `133 passed; 0 failed`（分模块：tokenize 9 / extract 15 / index_job 12 / index_store 15 / search 19 / doc_preview 14 / db 8 / index_scan 10 / ledger 12 / project 10 / vault 9）
+- `cd src-tauri && cargo test --lib` → `134 passed; 0 failed`（分模块：tokenize 9 / extract 15 / index_job 12 / index_store 15 / search 20 / doc_preview 14 / db 8 / index_scan 10 / ledger 12 / project 10 / vault 9）
 - `node --test "tests/**/*.test.ts"` → `pass 8 / fail 0 / exit=0`
 - `npm test`、`npm run build` 两条 `exit=0`
 - `cargo clippy --lib -- -D warnings` 与 `cargo clippy --lib --all-targets -- -D warnings` 四条全部 `exit=0`
