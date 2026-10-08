@@ -559,7 +559,7 @@ git commit -m "fix: M4 摘要里的复合词重复：clean_snippet 按「恰好�
 新增两个夹具（放在既有 `seed_ledger` 之后）。正文行不像台账那样有 builder，直接走写入侧唯一入口；`write_doc` 是 `pub`、`ScannedFile` 五个字段全 `pub`（`index_scan.rs:47-53`），所以不需要把 `index_store` 的测试夹具提出来共享：
 
 ```rust
-    /// 一条可搜的正文行。`path` 在同一项目内唯一（`db.rs:175` 的 `UNIQUE (project_id, path)`）。
+    /// 一条可搜的正文行。`path` 在同一项目内唯一（`db.rs:297` `index_docs` 的 `UNIQUE (project_id, path)`）。
     fn seed_doc(conn: &Connection, pid: &str, path: &str, body: &str) {
         index_store::write_doc(
             conn,
@@ -734,7 +734,7 @@ git commit -m "fix: M4 摘要里的复合词重复：clean_snippet 按「恰好�
 Run: `cd src-tauri && cargo test --lib search; echo exit=$?`
 Expected: 编译失败 —— `cannot find function unified_bundle in this scope` / `cannot find type SearchBundle`（未定义，不是断言失败）。
 
-- [ ] **Step 2: 加 `indexed_project_count`（`index_store.rs`）并单独跑红**
+- [ ] **Step 2: 加 `indexed_project_count`（`index_store.rs`）——先只写测试跑红，再落实现跑绿**
 
 放在 `status_counts`（`:149`）之后：
 
@@ -742,17 +742,21 @@ Expected: 编译失败 —— `cannot find function unified_bundle in this scope
 /// 有几个项目已经有可搜的正文了。首屏空态要在「正文还没建索引」和「建了但没命中」之间分开
 /// （M3 的 m8：文案对「根不存在」和「0 个可索引文件」说了同一句话），所以这里的谓词
 /// **必须与 `SELECT_SQL` 同口径**：少半个谓词就会出现「文案说正文有索引、正文段却是空的」。
-/// `usize` 直取：rusqlite 0.40.2 `src/types/from_sql.rs:146` 有 `from_sql_integral!(usize)`，
-/// 所以不必 `as` 转换（那是 `clippy::cast` 与负数语义的另一个坑）。
+/// 取数走原生 `i64` 再转 `usize`：rusqlite 0.40.2 的 `from_sql_integral!(usize)`（`src/types/from_sql.rs:146`）
+/// 挂在 `#[cfg(feature = "fallible_uint")]`（`:145`）后面，而本项目 `Cargo.toml:25` 只开了 `bundled`，
+/// 所以 `r.get::<_, usize>(0)` 编译不过（Task 4 实测 `E0277`：`usize: FromSql<'_>` 不满足）。
+/// 控制方写计划时只查到「有 `from_sql_integral!(usize)`」没查它上面那行 `cfg`，这是那条论断的更正。
+/// `count(DISTINCT …)` 恒非负，转换不丢信息。
 pub fn indexed_project_count(conn: &Connection) -> AppResult<usize> {
-    Ok(conn.query_row(
+    let n = conn.query_row(
         "SELECT count(DISTINCT d.project_id)
            FROM index_docs d
            JOIN projects p ON p.id = d.project_id
           WHERE d.index_status = 'ok' AND p.deleted_at IS NULL",
         [],
-        |r| r.get::<_, usize>(0),
-    )?)
+        |r| r.get::<_, i64>(0),
+    )?;
+    Ok(n as usize)
 }
 ```
 
@@ -774,6 +778,8 @@ pub fn indexed_project_count(conn: &Connection) -> AppResult<usize> {
     }
 ```
 
+顺序是「测试先落地、实现后落地」：先只贴下面那段测试跑一次 `cargo test --lib index_store`，红在 `error[E0425]: cannot find function indexed_project_count in this scope`（测试引用了还不存在的函数，编译不过就是本任务的 RED，Task 4 实测如此）；再落上面那段实现。
+
 Run: `cd src-tauri && cargo test --lib index_store; echo exit=$?`
 Expected: `15 passed; 0 failed`（14 + 1）。
 
@@ -785,11 +791,11 @@ Expected: `15 passed; 0 failed`（14 + 1）。
 use crate::index_store::{self, DocHit};
 ```
 
-`PER_GROUP_LIMIT`（`:15`）之后追加四个常量：
+`PER_GROUP_LIMIT`（`:15`）之后追加四个常量。注释里**不许出现** `unwrap_or(50)` 或 `, 200)` 这类字面量文本——Step 5 那条 grep 门禁数的是整份源文件，注释与测试也算（计划原文在这里写的是 `limit.unwrap_or(50).clamp(1, 200)`，会把自家的门直接弄红；同 Task 1 那条「结构门禁用 `include_str!` 数文本时，注释里的同款字面量会被无回归地数进去」的坑）。指针只写函数名加行号：
 
 ```rust
 /// 正文段一次向库取多少条。这是**取数**上限，不是展示上限；展示截断走下面三个数。
-/// 200 与 IPC 侧 `limit.unwrap_or(50).clamp(1, 200)`（`lib.rs:536-543`）的顶对齐，
+/// 顶对齐 IPC 侧 `search_docs` 的 limit clamp（`lib.rs:542`，那里是边界唯一一次校验），
 /// 让首屏与 `/index` 的「试搜正文」试验台在同一条 SQL 上取数。
 const DOCS_FETCH_LIMIT: i64 = 200;
 /// 段级：一个段最多展示多少个簇。整簇被扔掉的簇数进 `ClusterSection::hidden_clusters`。
@@ -1442,6 +1448,7 @@ Expected: 两条 clippy `exit=0` 且 0 条 warning（`PathBuf` 若最终没用�
 
 **Files:**
 - Modify: `src-tauri/src/lib.rs`（`mod` 区 `:1-11` 加一行；`search_local`（`:255-259`）之后加 `search_all`；`search_docs`（`:536-543`）之后加 `doc_preview`；`generate_handler!`（`:562-602`）末尾加两条）
+- Modify: `src-tauri/src/search.rs`（**删掉 Task 4 为「caller 还不存在」开的那行临时豁免**：`unified_bundle` 上方的 `#[allow(dead_code)]`（Task 4 落地时在 `:290`，行号会漂，按「紧贴 `pub fn unified_bundle` 的那行 `#[allow(dead_code)]`」定位）。它的注释里写死了「第一个 caller 在 Task 6 的 `search_all` IPC，该任务落地时必须删掉本行」——本任务就是那个落地点，不删就永久化（M3 的豁免账教训：临时豁免必须有具名回收点与一条 grep 门）。除此之外不许动 `search.rs`。）
 
 **Interfaces:**
 - Consumes：Task 4 的 `search::unified_bundle`、Task 5 的 `doc_preview::{row_for_preview, render_preview, DocPreview}`、既有 `db(&state)`（`lib.rs` 内取锁的助手，毒锁回 `db_poisoned`）。
@@ -1496,9 +1503,10 @@ fn doc_preview(
 cd src-tauri && cargo test --lib; echo exit=$?
 cargo clippy --lib -- -D warnings; echo exit=$?
 cargo clippy --lib --all-targets -- -D warnings; echo exit=$?
+grep -rn "allow(dead_code)" src/search.rs; echo exit=$?
 ```
 
-Expected: `133 passed; 0 failed`（本任务 0 条新单测：命令体只是转发，`unified_bundle` 与 `doc_preview::*` 的逻辑已各自守住）；两条 clippy `exit=0`。
+Expected: `133 passed; 0 failed`（本任务 0 条新单测：命令体只是转发，`unified_bundle` 与 `doc_preview::*` 的逻辑已各自守住）；两条 clippy `exit=0`；第四条 **`exit=1`（0 命中）**——它就是「Task 4 那行临时豁免已被本任务回收」的证据，接线之后 `unified_bundle` 有了真 caller，豁免留着就永远不会有人发现它过期了。
 
 - [ ] **Step 4: 两侧字面量对账（tsc 与 rustc 都抓不到拼错的那一类）**
 
@@ -1512,7 +1520,7 @@ Expected: 第一条列出 handler 里的两行（`mod doc_preview;` 与 `fn doc_
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src-tauri/src/lib.rs
+git add src-tauri/src/lib.rs src-tauri/src/search.rs
 git commit -m "feat: M4 索引接线：search_all 与 doc_preview 两条 IPC 命令（后者锁内查库、锁外抽盘）"
 ```
 
