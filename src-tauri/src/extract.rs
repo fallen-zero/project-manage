@@ -574,8 +574,8 @@ mod tests {
 
     /// 构建配置守护（终审 C1）。`cargo test` 跑的是 dev profile，而 `tauri build` 走 release：
     /// `[profile.release]` 里只要出现 `panic = "abort"`，panic 就不展开，本文件 `pdf_text` 的
-    /// `catch_unwind`（以及 `index_job` 的两道边界）在发布包里**抓不到任何东西**，
-    /// 一个畸形文件直接终止整个应用 —— 而 96 条测试全绿完全看不见这件事。
+    /// `catch_unwind`（以及 `panic_to_err` 那道边界与 worker 线程体的最外层 `catch_unwind`）在发布包里**抓不到任何东西**，
+    /// 一个畸形文件直接终止整个应用 —— 而全仓单测都跑在 dev profile 上，一条都不会红，完全看不见这件事。
     /// 所以这条只能靠读 Cargo.toml 来钉：它断言的是「防线在发布构建里存在」这个前提本身。
     /// 控制方用 `rustc 1.98.1` 单文件复现过：`-C panic=abort` 下 `catch_unwind` 两个标记都不打印、
     /// 进程当场终止，`-C panic=unwind` 下 `CAUGHT=true` 并走到下一行。

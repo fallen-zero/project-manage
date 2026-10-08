@@ -1,4 +1,5 @@
 mod db;
+mod doc_preview;
 mod error;
 mod extract;
 mod index_job;
