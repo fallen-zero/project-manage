@@ -9,6 +9,12 @@ use std::sync::OnceLock;
 
 use jieba_rs::Jieba;
 
+/// 查询串长度上限（按 char 计）。两条检索通路的边界守卫都引这一个数：
+/// 之前 `search.rs:87` 与 `index_store.rs:262` 各写了一遍字面量 128，改一处就会让两边口径分家。
+/// 家放在这里而不是 `search.rs`：`index_store` 本来就 `use crate::tokenize::...`，
+/// 反过来引 `search.rs` 会新造一条 `index_store → search` 的反向依赖，只为搬一个数。
+pub const MAX_QUERY_CHARS: usize = 128;
+
 fn jieba() -> &'static Jieba {
     static J: OnceLock<Jieba> = OnceLock::new();
     // Jieba::new() 载入内置词典，是百毫秒级的一次性开销，故用 OnceLock 复用。
@@ -34,13 +40,12 @@ pub fn index_text(text: &str) -> String {
         .join(" ")
 }
 
-/// 查询侧唯一入口。每个词都包成 `"词"`，FTS5 的操作符（`NEAR`/`*`/`-`/`|`/引号）
-/// 就只能是普通字符，查询串无法注入语法；串内的 `"` 按 FTS5 规则翻倍成 `""`。
-///
-/// 前缀查询的关键约束：`*` 必须写在引号外面。`"维保"*` 能命中索引里的「维保期」，
-/// `"维保*"` 里的 `*` 只是词内一个字面字符，永远命不中。
-pub fn query_expression(query: &str, prefix: bool) -> Option<String> {
-    let terms: Vec<String> = jieba()
+/// 查询侧唯一的切词入口：`cut` + 去空白 + 丢纯标点词，返回 `cut` 的原序。
+/// 两个消费方：`query_expression` 拼 FTS5 语法，`doc_preview` 拿它决定原文里高亮哪些词。
+/// 必须是同一个入口——预览若另起一次切词，两处词表会随词典版本各自漂移，
+/// 表现为「列表里摘要标出了这个词、点开原文却没有标记」。
+pub fn query_terms(query: &str) -> Vec<String> {
+    jieba()
         .cut(query, true)
         .into_iter()
         .map(|x| x.word.trim().to_owned())
@@ -51,6 +56,17 @@ pub fn query_expression(query: &str, prefix: bool) -> Option<String> {
         // 而 is_alphanumeric 回 false，于是全由 Co 组成的查询词会被丢掉、返回无结果而不是错结果。
         // 本项目索引的是中/英/数字文本，故判据保持不变，只在此登记这一处口径差。
         .filter(|t| !t.is_empty() && t.chars().any(|c| c.is_alphanumeric()))
+        .collect()
+}
+
+/// 查询侧唯一出口。每个词都包成 `"词"`，FTS5 的操作符（`NEAR`/`*`/`-`/`|`/引号）
+/// 就只能是普通字符，查询串无法注入语法；串内的 `"` 按 FTS5 规则翻倍成 `""`。
+///
+/// 前缀查询的关键约束：`*` 必须写在引号外面。`"维保"*` 能命中索引里的「维保期」，
+/// `"维保*"` 里的 `*` 只是词内一个字面字符，永远命不中。
+pub fn query_expression(query: &str, prefix: bool) -> Option<String> {
+    let terms: Vec<String> = query_terms(query)
+        .into_iter()
         .map(|t| {
             let quoted = format!("\"{}\"", t.replace('"', "\"\""));
             if prefix {
@@ -189,5 +205,35 @@ mod tests {
         );
         assert_eq!(clean_snippet("报价 单 2026 年"), "报价单2026年");
         assert_eq!(clean_snippet(""), "");
+    }
+
+    /// 查询侧唯一切词入口的三条行为：丢空白词、丢纯标点词、保持 `cut` 的原序。
+    /// 期望向量不是想当然：本轮在仓库外用同一版 jieba-rs 实测过
+    /// `cut("合同 报价")` 确实吐出一枚独立的 `" "` 词（被 `trim` + `is_empty` 丢掉），
+    /// `cut("验收，")` = `["验收", "，"]`。
+    #[test]
+    fn query_terms_drops_blanks_and_punctuation_only_words() {
+        assert_eq!(query_terms("验收"), vec!["验收"]);
+        assert_eq!(
+            query_terms("验收，"),
+            vec!["验收"],
+            "纯标点词进不了索引，留在查询里只会把整条 AND 变成 0 命中"
+        );
+        assert_eq!(query_terms("合同 报价"), vec!["合同", "报价"], "丢掉空白词后，词序就是 cut 的返回序");
+        assert!(query_terms("，。！ ").is_empty(), "全标点时一个词都不产出");
+        assert!(query_terms("").is_empty());
+        assert!(query_terms("   ").is_empty());
+    }
+
+    /// 「入库与查询同一个分词器」这条红线的**结构**守卫：查询侧只允许有一处 `cut`。
+    /// 为什么不写成行为断言：把 `query_expression` 里那份切词复制一份出来，两边结果照样相等，
+    /// 任何行为断言都绿 —— 那条断言不可证伪。数源码里的出现次数才守得住「别再加第二套词表」。
+    /// `index_text` 用的是 `.cut_for_search(`，与本 needle 不重叠（needle 要求左括号紧跟 `cut`）。
+    /// needle 必须用 `concat!` 拼：写成字面量会数到它自己。
+    #[test]
+    fn query_side_has_exactly_one_cut() {
+        let src = include_str!("tokenize.rs");
+        let n = src.match_indices(concat!(".cut", "(")).count();
+        assert_eq!(n, 1, "查询侧的切词只能有 `query_terms` 里那一处，实测 {n} 次");
     }
 }

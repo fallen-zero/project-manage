@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::index_scan::ScannedFile;
-use crate::tokenize::{index_text, query_expression};
+use crate::tokenize::{index_text, query_expression, MAX_QUERY_CHARS};
 
 /// `Ok(String)` 携带抽取到的正文，交给这里决定要不要落 FTS。
 pub enum DocOutcome {
@@ -259,7 +259,7 @@ pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<Doc
     if q.is_empty() {
         return Ok(Vec::new());
     }
-    if q.chars().count() > 128 {
+    if q.chars().count() > MAX_QUERY_CHARS {
         return Err(AppError::new(
             "invalid_input",
             "正文检索关键词过长",

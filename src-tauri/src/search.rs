@@ -11,6 +11,7 @@ use rusqlite::{params, Connection, Row};
 use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
+use crate::tokenize::MAX_QUERY_CHARS;
 
 /// 每组最多返回这么多条：命中几千条时把整表灌进前端没有意义，界面也翻不完。
 const PER_GROUP_LIMIT: i64 = 50;
@@ -84,7 +85,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
     if q.is_empty() {
         return Ok(Vec::new());
     }
-    if q.chars().count() > 128 {
+    if q.chars().count() > MAX_QUERY_CHARS {
         return Err(AppError::new(
             "invalid_input",
             "搜索关键词过长",
