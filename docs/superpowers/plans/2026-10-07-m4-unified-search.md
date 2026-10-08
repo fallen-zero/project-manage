@@ -1499,7 +1499,8 @@ Expected: 两条 clippy `exit=0` 且 0 条 warning（`PathBuf` 若最终没用�
 
 **Files:**
 - Modify: `src-tauri/src/lib.rs`（`mod` 区 `:1-11` 加一行；`search_local`（`:255-259`）之后加 `search_all`；`search_docs`（`:536-543`）之后加 `doc_preview`；`generate_handler!`（`:562-602`）末尾加两条）
-- Modify: `src-tauri/src/search.rs`（**删掉 Task 4 为「caller 还不存在」开的那行临时豁免**：`unified_bundle` 上方的 `#[allow(dead_code)]`（Task 4 落地时在 `:290`，行号会漂，按「紧贴 `pub fn unified_bundle` 的那行 `#[allow(dead_code)]`」定位）。它的注释里写死了「第一个 caller 在 Task 6 的 `search_all` IPC，该任务落地时必须删掉本行」——本任务就是那个落地点，不删就永久化（M3 的豁免账教训：临时豁免必须有具名回收点与一条 grep 门）。除此之外不许动 `search.rs`。）
+- Modify: `src-tauri/src/search.rs`（**删掉 Task 4 为「caller 还不存在」开的那行临时豁免**：`unified_bundle` 上方的 `#[allow(dead_code)]`（Task 4 落地时在 `:290`，行号会漂，按「紧贴 `pub fn unified_bundle` 的那行 `#[allow(dead_code)]`」定位）。它的注释里写死了「第一个 caller 在 Task 6 的 `search_all` IPC，该任务落地时必须删掉本行」——本任务就是那个落地点，不删就永久化（M3 的豁免账教训：临时豁免必须有具名回收点与一条 grep 门）。除删这行和 Step 4 点名的四处**注释/断言**之外，不许动 `search.rs` 的任何表达式。）
+- Modify: `src-tauri/src/index_store.rs`（**只改注释**：`query_guards_and_limit_pass_straight_through` 的头注释里那条「Task 10 的 IPC 写 `limit.unwrap_or(50).clamp(1, 200)`」旧指针，落点在 `:671` 附近，按注释文本定位；见 Step 4）
 
 **Interfaces:**
 - Consumes：Task 4 的 `search::unified_bundle`、Task 5 的 `doc_preview::{row_for_preview, render_preview, DocPreview}`、既有 `db(&state)`（`lib.rs` 内取锁的助手，毒锁回 `db_poisoned`）。
@@ -1559,7 +1560,63 @@ grep -rn "allow(dead_code)" src/search.rs; echo exit=$?
 
 Expected: `134 passed; 0 failed`（本任务 0 条新单测：命令体只是转发，`unified_bundle` 与 `doc_preview::*` 的逻辑已各自守住）；两条 clippy `exit=0`；第四条 **`exit=1`（0 命中）**——它就是「Task 4 那行临时豁免已被本任务回收」的证据，接线之后 `unified_bundle` 有了真 caller，豁免留着就永远不会有人发现它过期了。
 
-- [ ] **Step 4: 两侧字面量对账（tsc 与 rustc 都抓不到拼错的那一类）**
+- [ ] **Step 4: Task 4 定向复审登记的四处文本残留（四处全零行为，本任务不新增测试）**
+
+Task 4 的 fix round 1 复审判了「5 条 finding 全 ADDRESSED、无新 Critical/Important」，但留了 7 条文本级 open 项；其中 4 条的回收点就在本任务（本任务是这些计数的第一个 caller，也是那条「Task 10 的 IPC」注释所指的真身），另外 3 条已在账本里登记为有名缺口（台账侧 `MAX_CLUSTERS_PER_SECTION` 无独立用例、第三级 id 键无守护、M3 遗留的其余旧任务号注释）。逐字替换，**不许顺手改任何表达式或断言逻辑**：
+
+1. `search.rs` 的 `Cluster::hidden` 注释第二行（现为「只相对本次取到的样本，见 `DOCS_FETCH_LIMIT` 的头注释。」）改为点名两个上游：
+
+```rust
+    /// 簇内被 `MAX_ITEMS_PER_CLUSTER` 截掉的条数。只显示、不做展开（§十）。
+    /// 只相对本次取到的样本：正文段的上游是 `DOCS_FETCH_LIMIT`，台账段的上游是 `PER_GROUP_LIMIT`。
+```
+
+2. 同文件 `ClusterSection::hidden_clusters` 注释第二行同样改为那句两个上游的写法（首行「被 `MAX_CLUSTERS_PER_SECTION` 整簇扔掉的簇数。」不动）。
+
+3. 同文件 `SearchBundle::projects_hidden` 的注释（现两行主语横跨平铺段与台账段）改为只说本段、并给出它自己的上游：
+
+```rust
+    /// 平铺段被截掉的条数。它与台账段一样只相对本次取到的样本，
+    /// 上游是 `PER_GROUP_LIMIT`（每组取数上限），所以低报的方向与正文段相同。
+    pub projects_hidden: usize,
+```
+
+4. 同文件 `cluster_by_project` 的头注释里「第二级项目名」那两句**必须标出变异形态**（复审指出：「确定性红」只对反转方向成立，删行形态下连 `section_drops...` 也只是约 20/21 概率红）。整段替换为：
+
+```rust
+/// 段内按项目聚簇。簇间序 = 命中条数降序 → 项目名升序 → 项目 id 升序。
+/// 第三级兜底不是因为库里会有两个同项目（`projects.id` 是主键），而是为了「簇序可复现」：
+/// 前两级在库里**不唯一**（name 无 UNIQUE，条数更是常并列）。
+///
+/// 三键的守护现状（Task 4 两轮实测，别把它读成「三级都有测试」）：
+/// - 第一级条数：`doc_clusters_sort_by_hit_count_then_project_name` 里 Gamma 那 5 条守住；
+/// - 第二级项目名：**反转比较方向**时两条测试都确定性红 —— `section_drops_the_21st_cluster_and_reports_it`
+///   （21 个等条数簇，断「名序最大者被扔掉」）与 `doc_clusters_sort_by_hit_count_then_project_name`
+///   （并列对翻反）。**删掉这一行**则两条都只剩概率性红：`project::create_project` 的 id 是随机
+///   UUID v4（`project.rs:110`），并列簇改按 id 升序，首轮实测 10 次只红 2 次 —— 所以本仓的排序键
+///   变异取证一律用反转形态；
+/// - 第三级 id：**当前没有任何测试能把它打红**（删掉它实测 120 条全绿）。要它生效得有两个同名且
+///   同条数的簇，而测试没法把随机 id 的「插入序 vs id 序」摆成固定先后，`sort_by` 又是稳定排序。
+///   有名缺口，交 M5（补法要么给 `projects.id` 开测试注入点，要么在测试里用裸 SQL 固定 id）。
+```
+
+5. `src-tauri/src/index_store.rs` 里那条测试注释（上面 Files 点名的 `:671` 附近）把旧任务号换成现名，顺带把它里面那两个裸字面量形态去掉（本任务的 Step 3 门只扫 `src/search.rs`，但留着它们，将来谁把门面扩到 `index_store.rs` 就会无预警红）：
+
+```rust
+    /// limit 那三条钉的是**现状**不是意图：SQLite 里负数 LIMIT = 不限行、0 = 无行，
+    /// `doc_hits` 不做二次校验，clamp 归调用方边界（`lib.rs:542` 的 `search_docs`，
+    /// 首屏那条走 `search::DOCS_FETCH_LIMIT`）。
+```
+
+6. 同文件 `bundle_wire_format_is_camel_case` 里，紧跟 `assert!(!obj.contains_key("projects_hidden"));` 之后补一句键集合等值断言（复审指出这条测试是 presence-only，加第八个 camelCase 字段不会红；而 I-2 的裁定恰恰是不加，所以得有个东西真锁住集合大小）：
+
+```rust
+        assert_eq!(obj.len(), 7, "bundle 的键集合就是 spec §三 那七个，多一个都要红");
+```
+
+补完之后本任务**仍然**是 `134 passed; 0 failed`、`search::tests` 仍 20 条（加的是断言不是测试）。证伪取证一条即可：临时往 `SearchBundle` 加一个 `pub docs_capped: bool`（值随便给 `false`），这条必须红，然后**删干净**——这条同时是给「M4 不加线格式字段」这个裁定上的一道闸。
+
+- [ ] **Step 5: 两侧字面量对账（tsc 与 rustc 都抓不到拼错的那一类）**
 
 ```bash
 cd src-tauri && grep -n "search_all,\|doc_preview$" src/lib.rs | tail -4; echo exit=$?
@@ -1568,10 +1625,10 @@ grep -rn "\"search_all\"\|\"doc_preview\"" ../src/lib/api.ts; echo exit=$?
 
 Expected: 第一条列出 handler 里的两行（`mod doc_preview;` 与 `fn doc_preview` 也在文件里，所以用 `tail -4` 只看接线段）；第二条在 Task 7 落地前**必然 `exit=1`**（api.ts 还没有这两个名字），Task 7 之后必须 `exit=0`。这一条 Task 7 要重跑并写进它的 Expected。
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 6: 提交**
 
 ```bash
-git add src-tauri/src/lib.rs src-tauri/src/search.rs
+git add src-tauri/src/lib.rs src-tauri/src/search.rs src-tauri/src/index_store.rs
 git commit -m "feat: M4 索引接线：search_all 与 doc_preview 两条 IPC 命令（后者锁内查库、锁外抽盘）"
 ```
 
