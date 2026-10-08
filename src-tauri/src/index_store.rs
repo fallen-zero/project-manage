@@ -208,8 +208,9 @@ pub struct DocHit {
     pub path: String,
     /// 已按 `clean_snippet` 收回 CJK 空格的摘要，命中词用 [ ] 包住。
     /// 两条 M4 要知道的契约（控制方探针实测）：摘要取自**正文列**（`snippet()` 的第 2 个实参固定为 1），
-    /// 只靠文件名命中的结果摘要不带 [ ]；且摘要串是预分词后的正文，`cut_for_search` 的复合词会
-    /// 连着出现两次（实测「里面只有付款条件付款条件与验收流程」）—— 不影响召回，只影响观感。
+    /// 只靠文件名命中的结果摘要不带 [ ]；且摘要串是预分词后的正文，`cut_for_search` 的复合词原本会
+    /// 连着出现两次，M4 起由 `clean_snippet` 的三连折叠收口（见 `tokenize.rs:fold_duplicated_compound`）；
+    /// 窗口首格被 `⋯` 粘住时不折，属已知观感残留。
     /// 要拿原文做摘要得在建表时给虚表加一列 UNINDEXED 正文，不许在检索侧拼。
     pub snippet: String,
     /// exact | prefix：放宽过的命中要能被界面标出来，否则用户会以为是 bug
@@ -523,11 +524,13 @@ mod tests {
         // 夹具正文全 CJK，所以「摘要里一个空格都不该剩」既断得住，又能被同一处变异打红。
         assert!(!hit.snippet.contains(' '), "摘要里不该残留分词空格：{}", hit.snippet);
         // 摘要只取自正文列（snippet 的第 2 个实参固定为 1）：只靠文件名命中的结果，摘要不带 [ ]。
-        // 这条是 M4 的界面契约，探针实测 hits("报价单")[0].snippet =
-        // "里面只有付款条件付款条件与验收流程"（正文没「报价单」三个字，故无标记）。
+        // 这条是 M4 的界面契约。正文入库串是 `里面 只有 付款 条件 付款条件 与 验收 流程`
+        // （cut_for_search 把复合词连同子词一起写进索引列），M4 的三连折叠把它折回一个词，
+        // 所以下面期望的是**逐字相等**而不是「不含空格」这种弱断言。
         let only_name = hits(&c, "报价单");
         assert_eq!(only_name.len(), 1);
-        assert!(!only_name[0].snippet.contains('['), "正文没这个词、只靠文件名命中时摘要不带标记：{}", only_name[0].snippet);
+        assert_eq!(only_name[0].snippet, "里面只有付款条件与验收流程");
+        assert!(!only_name[0].snippet.contains('['), "正文没这个词、只靠文件名命中时摘要不带标记");
     }
 
     /// 事实 5：复合词的子词查询靠 cut_for_search 才能命中。

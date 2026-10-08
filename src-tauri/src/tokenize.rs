@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use jieba_rs::Jieba;
 
 /// 查询串长度上限（按 char 计）。两条检索通路的边界守卫都引这一个数：
-/// 之前 `search.rs:87` 与 `index_store.rs:262` 各写了一遍字面量 128，改一处就会让两边口径分家。
+/// 之前 `search::field_hits` 与 `index_store::doc_hits` 的守卫各写了一遍字面量 128，改一处就会让两边口径分家。
 /// 家放在这里而不是 `search.rs`：`index_store` 本来就 `use crate::tokenize::...`，
 /// 反过来引 `search.rs` 会新造一条 `index_store → search` 的反向依赖，只为搬一个数。
 pub const MAX_QUERY_CHARS: usize = 128;
@@ -41,7 +41,7 @@ pub fn index_text(text: &str) -> String {
 }
 
 /// 查询侧唯一的切词入口：`cut` + 去空白 + 丢纯标点词，返回 `cut` 的原序。
-/// 两个消费方：`query_expression` 拼 FTS5 语法，`doc_preview` 拿它决定原文里高亮哪些词。
+/// 两个消费方：`query_expression` 拼 FTS5 语法，`doc_preview`（M4 Task 5 落地）拿它决定原文里高亮哪些词。
 /// 必须是同一个入口——预览若另起一次切词，两处词表会随词典版本各自漂移，
 /// 表现为「列表里摘要标出了这个词、点开原文却没有标记」。
 pub fn query_terms(query: &str) -> Vec<String> {
@@ -90,15 +90,17 @@ pub(crate) fn is_cjk(c: char) -> bool {
 }
 
 /// `snippet()` 回的是我们插入空格连接起来的词条串，直接展示会读成「甲 方 要 求」。
-/// 规则只有一条：空格相邻任一侧是 CJK 就删掉。Latin 之间的空格原样保留，
-/// 数字与中文之间也删（「800 毫秒」→「800毫秒」）。省略号 `⋯` 两侧不带空格，故不受影响。
+/// 两步：① 折掉 `cut_for_search` 造成的复合词重复；② 空格相邻任一侧是 CJK 就删掉。
+/// 第二步的规则一字不变（Latin 之间的空格保留、数字与中文之间也删、`⋯` 两侧不带空格故不受影响）。
 pub fn clean_snippet(raw: &str) -> String {
-    let chars: Vec<char> = raw.chars().collect();
-    let mut out = String::with_capacity(raw.len());
+    // 按单个空格切再拼回，是无损往返（`split(' ')` 保留空段），所以下面第二步看到的串与入参同形。
+    let folded = fold_duplicated_compound(&raw.split(' ').collect::<Vec<_>>());
+    let joined = folded.join(" ");
+    let chars: Vec<char> = joined.chars().collect();
+    let mut out = String::with_capacity(joined.len());
     for (i, c) in chars.iter().enumerate() {
         if *c == ' ' {
-            let near_cjk = (i > 0 && is_cjk(chars[i - 1]))
-                || chars.get(i + 1).is_some_and(|n| is_cjk(*n));
+            let near_cjk = (i > 0 && is_cjk(chars[i - 1])) || chars.get(i + 1).is_some_and(|n| is_cjk(*n));
             if near_cjk {
                 continue;
             }
@@ -106,6 +108,67 @@ pub fn clean_snippet(raw: &str) -> String {
         out.push(*c);
     }
     out
+}
+
+/// 折叠对象只有一种：紧跟在复合词 W 左侧的那一串词，每一个都是 W 的**真子串**，
+/// 且它们在 W 里首次出现的区间并起来**恰好铺满 W**。
+/// 「铺满」这一步就是它不篡改正文的原因：单枚真子串必然比 W 短、铺不满，所以
+/// 「用户真的把某个词写了两遍」（`数据 数据`、`甲方 甲方要求`）永远落在判据之外；
+/// 而 `cut_for_search` 吐出的子词组（实测 `付款 条件 付款条件`、`报价 价单 报价单`）恰好铺满。
+/// 带 `[` / `]` 高亮标记的词一律不参与：标记是 `技术方案.md` 6.1 要求暴露给前端的信息，
+/// 为了观感吃掉它，代价比重复词大。
+/// 签名里只给内层 `&str` 命名生命周期：返回值只从词里抄 `&str`，不带外层切片的借用。
+fn fold_duplicated_compound<'a>(tokens: &[&'a str]) -> Vec<&'a str> {
+    let mut drop = vec![false; tokens.len()];
+    for idx in 0..tokens.len() {
+        let run = foldable_run(tokens, idx);
+        for k in 1..=run {
+            drop[idx - k] = true;
+        }
+    }
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !drop[*i])
+        .map(|(_, t)| *t)
+        .collect()
+}
+
+/// 返回 `tokens[w_idx]` 左侧应丢掉的词数（0 = 不折）。左侧任何一处不满足条件就整组放弃。
+fn foldable_run(tokens: &[&str], w_idx: usize) -> usize {
+    let whole: Vec<char> = tokens[w_idx].chars().collect();
+    if whole.len() < 2 || tokens[w_idx].contains('[') || tokens[w_idx].contains(']') {
+        return 0;
+    }
+    let mut covered = vec![false; whole.len()];
+    let mut run = 0usize;
+    let mut i = w_idx;
+    while i > 0 {
+        i -= 1;
+        let part = tokens[i];
+        let part_chars: Vec<char> = part.chars().collect();
+        // 空段（连续空格）算「不是真子串」→ 整组放弃，保守。
+        if part_chars.is_empty()
+            || part_chars.len() >= whole.len()
+            || part.contains('[')
+            || part.contains(']')
+            || !tokens[w_idx].contains(part)
+        {
+            return 0;
+        }
+        // 用首次出现的区间：稳定，且不会为凑铺满去找最宽松的落点。
+        let start_chars = tokens[w_idx][..tokens[w_idx].find(part).unwrap_or(0)]
+            .chars()
+            .count();
+        for slot in &mut covered[start_chars..start_chars + part_chars.len()] {
+            *slot = true;
+        }
+        run += 1;
+        if covered.iter().all(|c| *c) {
+            return run;
+        }
+    }
+    0
 }
 
 #[cfg(test)]
@@ -207,6 +270,35 @@ mod tests {
         assert_eq!(clean_snippet(""), "");
     }
 
+    /// 折叠规则：只有「前面若干个词恰好铺满后面那个复合词」才折，铺不满就不折。
+    /// 正例两枚都来自实测的 `cut_for_search` 输出：`付款 条件 付款条件` 是**无重叠铺满**，
+    /// `报价 价单 报价单` 是**有重叠铺满**（报价=0..2、价单=1..3），后者证明规则不要求子词互不相交。
+    #[test]
+    fn clean_snippet_folds_the_indexed_compound_back_into_one_word() {
+        assert_eq!(
+            clean_snippet("里面 只有 付款 条件 付款条件 与 验收 流程"),
+            "里面只有付款条件与验收流程"
+        );
+        assert_eq!(clean_snippet("报价 价单 报价单 一份"), "报价单一份", "重叠子词同样被铺满判据收下");
+        // 用户真写了两遍的情形：两个词等长，谁都不是对方的真子串，一个字都不许动。
+        assert_eq!(clean_snippet("数据 数据 库"), "数据数据库", "相邻同词是原文真重复，折了就是篡改正文");
+        assert_eq!(clean_snippet("甲方 甲方要求"), "甲方甲方要求", "单枚前缀铺不满复合词，不许折");
+    }
+
+    /// `[` / `]` 是 `技术方案.md` 6.1 要求暴露给前端的高亮标记，折叠不许把它吃掉；
+    /// 摘要里那枚省略号 `⋯` 会粘在首个词上（`⋯付款` 不是 `付款条件` 的子串），
+    /// 于是被截断的窗口首格不折叠——这是**已知取舍**，宁可不折也不折错。
+    #[test]
+    fn clean_snippet_keeps_the_highlight_markers_and_leaves_truncated_runs_alone() {
+        assert_eq!(clean_snippet("[付款] 条件 付款条件"), "[付款]条件付款条件", "带标记就不折，标记是界面契约");
+        assert_eq!(clean_snippet("付款 [条件] 付款条件"), "付款[条件]付款条件");
+        assert_eq!(
+            clean_snippet("⋯付款 条件 付款条件 与 验收"),
+            "⋯付款条件付款条件与验收",
+            "省略号粘住首词时放弃折叠（观感问题不该吃掉了召回证据）"
+        );
+    }
+
     /// 查询侧唯一切词入口的三条行为：丢空白词、丢纯标点词、保持 `cut` 的原序。
     /// 期望向量不是想当然：本轮在仓库外用同一版 jieba-rs 实测过
     /// `cut("合同 报价")` 确实吐出一枚独立的 `" "` 词（被 `trim` + `is_empty` 丢掉），
@@ -230,6 +322,7 @@ mod tests {
     /// 任何行为断言都绿 —— 那条断言不可证伪。数源码里的出现次数才守得住「别再加第二套词表」。
     /// `index_text` 用的是 `.cut_for_search(`，与本 needle 不重叠（needle 要求左括号紧跟 `cut`）。
     /// needle 必须用 `concat!` 拼：写成字面量会数到它自己。
+    /// 因此本文件里不许出现第二处带点的 `cut` 字面量——注释与测试里也算。要在文档里提这个调用，写成 `cut(...)` 或用反引号把点断开，否则这条守卫会在没有任何代码回归的情况下红。
     #[test]
     fn query_side_has_exactly_one_cut() {
         let src = include_str!("tokenize.rs");
