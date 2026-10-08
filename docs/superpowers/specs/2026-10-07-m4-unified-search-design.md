@@ -105,6 +105,8 @@ fn doc_preview(state: State<AppState>, doc_id: String, query: String) -> AppResu
 
 另外，因为 D4 把 `path` 从入参里拿掉了，M3 的 m5（路径未归一化）在本轮**不再是安全前提**，它退回「同一目录的另一种写法会落成两行」的观感/去重问题，仍归 M5。
 
+**线程口径：光出锁不够，`doc_preview` 必须换线程跑（Task 6 首轮复审 Important-1 的裁定）**。上面第 1–5 条描述的是一条会做无上限磁盘 IO + pdf/docx 抽取的通路，而 Tauri 的命令默认 `execution_context = Blocking`：Windows/WebView2 上 `ipc_handler` 是在 `add_WebMessageReceived` 的 COM 回调里**同步调用**的，所以 sync 形态的命令体占的就是消息泵那一个线程 —— 期间没有任何别的 `invoke` 进得来，「锁外抽盘」买到的东西被 sync 形态原地退掉。因此本节的契约是：`doc_preview` 命令带 `#[tauri::command(async)]`（对非 `async fn` 走 `sync_threadpool`，命令体落进 `async_runtime::spawn` 的 future），`search_all` 本轮保持 sync（它只做 SQL 且取数有 200 行上限，是否也要换线程由第九节的实测说话，与其它上限的裁定同一条口径：由数字说话不由推测说话）。两条推论都必须在实现里成文：① 出锁从此**真的承重** —— 全仓那把 `Mutex<Connection>` 过去只有 IPC 线程取（后台索引线程自己开连接），有了第二条线程之后，「锁内查库、锁外抽盘」才是防住并发命令排队在慢 IO 上的那道闸；② `async` 让同类命令**可能乱序返回**（sync 形态下由消息泵天然串行，这在以前不可能发生），所以第六节 `src/stores/local-search.ts` 那条自增 `seq` 守卫（以及第八节点名的 `search-order.ts::isNewest`）从防御性写法升为承重设计，前端不许把它当可选优化省掉。
+
 ## 六、模块与文件切分
 
 - `src-tauri/src/search.rs` —— 新增 `unified_bundle()` 与三个 DTO（`SearchBundle` / `ClusterSection<C>` / `Cluster<T>`；`DocPreview` 归 `doc_preview.rs`，`DocHit`/`FieldHit` 复用既有）；分组、聚簇、截断都在这里。不新建 `unified.rs`：架构图 §三 里 `search` 那一格写的就是「jieba 分词 → FTS5 查询 → 结果分组」，分组本来就是它的职责。
@@ -162,11 +164,12 @@ Rust 单测（内存库 `db::open_in_memory()` + 夹具只在 `tempfile::tempdir
 
 沿用 M3 全部红线：真实数据目录 `%APPDATA%\dev.zero.pfm\` 只读、任何真机验证用一次性 identifier `dev.zero.pfm.m4test` 且跑完删净；子代理一律不跑 `tauri dev` / `npm run dev`（例外由控制方授予）；验证脚本只回断言结果（布尔/条数/`matchedBy`/文案前缀/尺寸），**绝不打印抽出的正文或任何解密内容**；密文列不参与任何检索。
 
-静态看不见、只能真机证的三格：
+静态看不见、只能真机证的四格：
 
 1. 对话框里三个动作真的唤起系统程序 / 资源管理器 / 原生剪贴板（`opener` 的 `{path:["**"]}` scope 与 clipboard 焦点问题都是 M1 踩过的）。
 2. `±4000` 字符窗口与高亮在真实中文正文上的观感（`snippet` 的重复词折叠是否真的生效）。**含 Task 5 复审登记的一条有名缺口**：并窗判据取「新窗左沿」后合并带翻倍（见第五节第 5 条），`MAX_PREVIEW_WINDOWS` 只封顶窗数不封顶窗长，命中每隔不到两个半宽出现一次时长文的 `text` 会接近整篇 —— 载荷上界没了这件事是裁度过、可接受的，但「对话框还读不读得动」只有真机看得见，所以真机侧灌一份命中间隔约 8000 char 的长文，只回 `text` 码元长度、`ranges.len()`、`truncated` 三个数字，明显卡顿才升级为终审 finding。
 3. **性能实测（D6 的前置）**：往沙盒灌 5 万行量级的 `index_docs`（复用 M3 那批自造 `.txt` 的手法），量 `search_all` 从键入停止到回包的往返耗时若干次取分布；同时量一次「台账段 LIKE 全扫」与「正文段 FTS」各自的占比。数字写进 `docs/开发进度.md` 的验收证据。若 LIKE 那半段明显拖住首屏，再回来决定 D6 要不要拆段——**拆不拆由这次实测说话，不由推测说话**。
+4. **`async` 到底有没有兑现（第五节那条线程口径的唯一运行时证据）**：单测里证明不了「不占消息泵」这件事，134 条 Rust 测试一条都不覆盖它。做法是在沙盒 tempdir 造一份慢到可辨的文件（几百 MB 纯文本或多页 PDF，只读、跑完删净），在页面里同一时刻并发发 `invoke("doc_preview", {慢文件})` 与一条便宜的 `invoke("db_status")`，只回两个毫秒数和「`db_status` 是否先返回」。`db_status` 先回 = 属性生效；它被推到 `doc_preview` 之后 = 属性没起作用，升级为终审的独立 finding。同一口径顺手量 `search_all`：5 万行那次往返期间并发 `db_status`，若 `search_all` 已 > 800 ms 且把 `db_status` 顶到后面，就在 `docs/开发进度.md` 写明「首屏检索也在冻消息泵，`search_all` 应一并换 `async`」，交给终审落地 —— 本轮不趁真机顺手改 Rust，免得绕过任务评审这道闸。
 
 ## 十、不在本轮
 

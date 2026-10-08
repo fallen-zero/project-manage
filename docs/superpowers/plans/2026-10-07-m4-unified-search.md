@@ -1554,9 +1554,9 @@ Expected: 两条 clippy `exit=0` 且 0 条 warning（`PathBuf` 若最终没用�
 ### Task 6: 两条 IPC 命令接线（`search_all` / `doc_preview`）
 
 **Files:**
-- Modify: `src-tauri/src/lib.rs`（`search_local`（`:255-259`）之后加 `search_all`；`search_docs`（`:536-543`）之后加 `doc_preview`；`generate_handler!`（`:562-602`）末尾加两条。`mod doc_preview;` 那一行**已由 Task 5 落地**，本任务只核它在位，不要重复加）
-- Modify: `src-tauri/src/doc_preview.rs`（两件事，都只碰注释与豁免，不碰任何表达式。① **删 Task 5 为「caller 还不存在」开的那块临时豁免**：以 `// 临时豁免，Task 6 落地` 开头的 4 行注释，加上紧跟它的那行 `#![allow(dead_code)]`，共 5 行（它们前后各留一个空行，别把空行也删掉）。② **同步 `PREVIEW_WINDOW_CHARS` 的 doc 注释**（Task 5 落地时是 3 行，行号会漂，按「紧贴 `const PREVIEW_WINDOW_CHARS: usize` 的那段 `///`」定位）：并窗判据在 fix round 1 从「命中起点」换成了「新窗左沿」，合并带随之翻倍，旧句「单窗最长 `2 * PREVIEW_WINDOW_CHARS + 命中自身长度`」变成了假话（链式合并能让一扇窗接近整篇）。整段换成本计划 Task 5 Step 1 里那份 6 行的写法，逐字照抄，不要自己重述。除这两处之外的任何字节都不许变，尤其不许动文件头那条红线注释的语义。）
-- Modify: `src-tauri/src/search.rs`（**删掉 Task 4 为「caller 还不存在」开的那行临时豁免**：`unified_bundle` 上方的 `#[allow(dead_code)]`（Task 4 落地时在 `:290`，行号会漂，按「紧贴 `pub fn unified_bundle` 的那行 `#[allow(dead_code)]`」定位）。它的注释里写死了「第一个 caller 在 Task 6 的 `search_all` IPC，该任务落地时必须删掉本行」——本任务就是那个落地点，不删就永久化（M3 的豁免账教训：临时豁免必须有具名回收点与一条 grep 门）。除删这行和 Step 4 点名的四处**注释/断言**之外，不许动 `search.rs` 的任何表达式。）
+- Modify: `src-tauri/src/lib.rs`（`search_local`（`:255-259`）之后加 `search_all`；`search_docs`（`:536-543`）之后加 `doc_preview`；`generate_handler!`（`:562-602`）末尾加两条。`mod doc_preview;` 那一行**已由 Task 5 落地**，本任务只核它在位，不要重复加。**`doc_preview` 那一条的属性必须是 `#[tauri::command(async)]`**，`search_all` 保持无参数的 `#[tauri::command]` —— 为什么只给前者、代价是什么、取证口径划到哪一格，全在 Step 1 下面那四段，不要自己重述也不要改成第二种写法。**另外一处同文件注释**：`index_overview` 的出锁段那句「此时别的 IPC 进得来」按 Step 1 里「顺带把一句既有的假话收口」那段换成两句实话 —— 它在本任务的 Files 范围内（`lib.rs`），不是越界）
+- Modify: `src-tauri/src/doc_preview.rs`（两件事，都只碰注释与豁免，不碰任何表达式。① **删 Task 5 为「caller 还不存在」开的那块临时豁免**：以 `// 临时豁免，Task 6 落地` 开头的 4 行注释，加上紧跟它的那行 `#![allow(dead_code)]`，共 5 行；**删完后的形态是「文件头注释 → 单个空行 → `use std::path::{Path, PathBuf};`」**（照本计划 Task 5 Step 1 那块模板：`#![allow(dead_code)]` 与它下面那行 `use` 之间只有 1 个空行，豁免块上方也只有 1 个）。Task 6 首轮实现按「前后各留一个空行」逐字执行，结果留下了 2 个连续空行（`doc_preview.rs:9-10`）—— 那句话是本计划自己的措辞缺陷，已在此更正，别再照旧句执行。② **同步 `PREVIEW_WINDOW_CHARS` 的 doc 注释**（Task 5 落地时是 3 行，行号会漂，按「紧贴 `const PREVIEW_WINDOW_CHARS: usize` 的那段 `///`」定位）：并窗判据在 fix round 1 从「命中起点」换成了「新窗左沿」，合并带随之翻倍，旧句「单窗最长 `2 * PREVIEW_WINDOW_CHARS + 命中自身长度`」变成了假话（链式合并能让一扇窗接近整篇）。整段换成本计划 Task 5 Step 1 里那份 6 行的写法，逐字照抄，不要自己重述。除这两处之外的任何字节都不许变，尤其不许动文件头那条红线注释的语义。）
+- Modify: `src-tauri/src/search.rs`（**删掉 Task 4 为「caller 还不存在」开的那行临时豁免**：`unified_bundle` 上方的 `#[allow(dead_code)]`（Task 4 落地时在 `:290`，行号会漂，按「紧贴 `pub fn unified_bundle` 的那行 `#[allow(dead_code)]`」定位）。它的注释里写死了「第一个 caller 在 Task 6 的 `search_all` IPC，该任务落地时必须删掉本行」——本任务就是那个落地点，不删就永久化（M3 的豁免账教训：临时豁免必须有具名回收点与一条 grep 门）。除删这行和 Step 4 点名的**注释/断言**（Step 4 共六条，落在本文件的是第 1、2、3、4、6 条；第 6 条是断言不是注释）之外，不许动 `search.rs` 的任何表达式。）
 - Modify: `src-tauri/src/index_store.rs`（**只改注释**：`query_guards_and_limit_pass_straight_through` 的头注释里那条「Task 10 的 IPC 写 `limit.unwrap_or(50).clamp(1, 200)`」旧指针，落点在 `:671` 附近，按注释文本定位；见 Step 4）
 - Modify: `src-tauri/src/extract.rs`（**只改一条断言消息字符串**，第 595-605 行那段 `release_profile_does_not_abort_so_panic_guards_work` 里的 `assert_ne!` 尾句：`见本文件 \`pdf_text\` 的注释与 \`crate::panic_to_err\`（终审 C1）。` 里的 `crate::panic_to_err` 是 `f72a5c8` 把边界助手从 `index_job` 搬进 `extract` 之后悬空的第三个指针（Task 5 已收掉 `Cargo.toml:46` 与同函数 doc 那两处，这一条是 Task 5 复审登记的越界残留——本任务被禁止碰 `extract.rs` 除 `:577` 之外的字节，所以落在拥有 `extract.rs` 的这里）。改为 `见本文件 \`pdf_text\` 的注释与 \`panic_to_err\`（终审 C1）。`。**纯字符串**，不许动同一函数体里的任何表达式，也不许动 `:577` 附近 Task 5 已改好的那句。）
 
@@ -1579,9 +1579,10 @@ fn search_all(state: State<'_, AppState>, query: String) -> AppResult<search::Se
 }
 
 /// 原文预览：**锁内查库、锁外抽盘**，所以必须分两步。
-/// 握着 `state.conn` 去读盘会让其他每条命令都等一次慢 IO（网络盘上一个大文件就是秒级卡顿，
-/// 而首屏正是最容易连点的地方），因此这里刻意不写成 `let conn = db(&state)?; preview(&conn, ..)`。
-#[tauri::command]
+/// 握着 `state.conn` 去读盘会让别的命令等一次慢 IO（网络盘上一个大文件就是秒级卡顿，而首屏正是
+/// 最容易连点的地方），所以这里刻意不写成 `let conn = db(&state)?; preview(&conn, ..)`。
+/// 光出锁还不够：`async` 那一行把命令体挪出 IPC 所在线程，见下面那段「为什么必须有 async」。
+#[tauri::command(async)]
 fn doc_preview(
     state: State<'_, AppState>,
     doc_id: String,
@@ -1595,7 +1596,28 @@ fn doc_preview(
 }
 ```
 
+**为什么 `doc_preview` 必须有 `async` 而 `search_all` 本轮没有（Task 6 首轮复审的 Important-1，三条机制断言都由控制方到 vendored 源码逐行复核过，不是转述评审）**：
+
+1. `tauri-macros-2.7.0/src/command/wrapper.rs:50` —— `execution_context` 的默认值是 `Blocking`；`:116`/`:159` 只有写了 `async` 才变 `Async`。`body_blocking`（`:398-431`）生成的代码是 `let result = $path(...); kind.block(result, resolver); return true;` —— **命令体就地在那个线程里跑完**，没有换线程。
+2. `wry-0.57.0/src/webview2/mod.rs:944-978` —— Windows 上 `attach_ipc_handler` 把回调注册进 `add_WebMessageReceived`，`Ok(request) => ipc_handler(request)` 是**在 COM 事件回调里同步调用**的；`tauri-runtime-wry-2.12.0/src/lib.rs:5289-5307` 的 `create_ipc_handler` 也只是把 request 直接转给 handler，不起线程。所以 sync 形态的 `doc_preview` 占的是消息泵所在线程，期间**没有任何别的 `invoke` 进得来** —— 出锁出得干干净净，别的命令也一样等着，「锁外抽盘」买到的东西被 sync 形态抵消掉。
+3. 加了 `async` 且函数本身不是 `async fn` 时，`wrapper.rs:258` 的 `kind` 是 `"sync_threadpool"`，`body_async`（定义在 `:357`，not-tracing 分支的生成体在 `:383-388`）生成 `resolver.respond_async_serialized(async move { let result = $path(...); … })` —— **命令体写在 `async move` 块里面**，不在 `return true` 之前就地执行；而 `tauri-2.12.0/src/ipc/mod.rs:371` 的 `respond_async_serialized_inner` 在 `:375` 就是 `crate::async_runtime::spawn(...)` —— 于是命令体落到 async runtime 的工作线程，IPC 所在线程立刻回去泵下一条消息。对照第 1 条：sync 形态的 `$path(...)` 在 `wrapper.rs:425` 就地调用、`:427` 直接 `kind.block(result, resolver)`，同一句宏展开在两种形态下落点完全不同。
+
+为什么只给 `doc_preview`：它是本仓**第一条把无上限的磁盘 IO + pdf/docx 解析放进命令体内**的通路（既有重活一律走后台线程，`index_job.rs:383-387` 自己 `thread::Builder::spawn`）。全仓 41 条命令今天都是 sync，`vault_unlock` 的 Argon2id（百毫秒级）也一样占着那个线程 —— 那是一个成规模的既有口径，不在本轮顺手改。`search_all` 的取数有上限（200 行）且只做 SQL，**本轮保持 sync**，是否也要 `async` 交给 T9 的 5 万行实测说话（见 Task 9 Step 3 新增的那条），照本计划一贯的「拆不拆由实测说话，不由推测说话」。
+
+**本任务查证到的一条机制事实，它决定了「出锁」这件事什么时候才承重**：`AppState.conn` 那把 `Mutex<Connection>` 在全仓只有 `lib.rs:37` 的 `db()` 一处取锁点、38 个调用点全在 `lib.rs` 的 IPC 命令里；唯一的非 IPC 线程 `index_job::start` **自己开一条连接**（`index_job.rs:402`，它的理由写在 `:365-366`），不抢这把锁。所以在给 `doc_preview` 加 `async` 之前，这把锁实际上**无人竞争** —— 慢 IO 挡的是消息泵那一个线程，跟锁没关系，「锁外抽盘」对界面延迟的真实收益是 0。加了 `async` 之后它才第一次有牙齿：命令体落到 async runtime 的工作线程，预览读盘期间真会有第二条 `invoke` 来抢这把锁。这也是 Important-1 选「加属性」而不是「只降级注释」的核心理由 —— 出锁与换线程是同一个契约的两半，只做一半等于没做，而两句注释各自都会变成半句假话。
+
+**顺带把一句既有的假话收口（Important-1 的同源事实，零行为改动）**：`lib.rs:481` 那一整行写的是「出锁段：`is_dir()` 可以慢，但此时别的 IPC 进得来。」（去掉行首缩进与 `//`，逐字如此），它写在 M3，而 `index_overview` 是 sync 命令 —— sync 形态下这段时间占的就是消息泵所在线程，别的 IPC **进不来**，那句「进得来」按上面的机制根本不成立。本任务不改 `index_overview` 的形态（41 条 sync 是既有口径，不在本轮顺手动），但既然本任务把机制查清了，它就得说实话。整行换为下面这两行，逐字照抄（`index_overview` 的函数体、`{ let conn = … }` 那一块，以及它上面那段以「卡住整条 IPC（Task 10 评审的 Important 1，代价实测过口径，不是推测）」收尾的旧任务号注释都不许动 —— 后者在终审清单里，行号会随本任务增长而漂，所以按文本定位）：
+
+```rust
+    // 出锁段：`is_dir()` 可以慢，但已不再排 `Mutex<Connection>`；命令本身仍是 sync，
+    // 所以这段时间消息泵还被它占着，别的 IPC 进不来（Task 6 复审 Important-1 核到的口径）。
+```
+
+`async` 形态的代价要写明白：**同一类命令的两次调用现在可能乱序返回**（sync 形态下由消息泵天然串行，所以「乱序」这件事以前不可能发生）。首屏的 `seq` 守卫（Task 7 的 `search-order.ts::isNewest`、Task 8 的 store）因此从「防御性写法」变成**承重**的，那两个任务不许把它当成可选优化删掉。`doc_preview` 本身是点一次开一个对话框，乱序不可见。
+
 `mod doc_preview;` 与 `fn doc_preview()` 同名不冲突：模块在类型命名空间、函数在值命名空间，控制方已用 `rustc --edition 2021` 单独验过这种形状能编过。命令名保持 spec §三 定的 `doc_preview`，前端 `invoke("doc_preview")` 与之一致。
+
+**这条属性改动的取证口径**：编译本身就是证据链的一节 —— `State<'_, AppState>` 落进 `spawn` 出去的 future 要求它 `Send`，形状不对就编不过，所以 `cargo test --lib` 绿 = 「这个签名在 async 形态下成立」。但**运行时兑现（预览大文件期间别的 IPC 是否真进得来）在单测里证明不了**，本任务不许声称已验证；它由 T9 真机那条新增断言负责，报告里要在「没能自动验证」清单上点名这一格。
 
 - [ ] **Step 2: `generate_handler!` 加两条（39 → 41）**
 
@@ -1607,7 +1629,7 @@ fn doc_preview(
             doc_preview
 ```
 
-- [ ] **Step 3: 编译与五条门禁**
+- [ ] **Step 3: 编译与六道门禁**
 
 ```bash
 cd src-tauri && cargo test --lib; echo exit=$?
@@ -1615,13 +1637,14 @@ cargo clippy --lib -- -D warnings; echo exit=$?
 cargo clippy --lib --all-targets -- -D warnings; echo exit=$?
 grep -rn "allow(dead_code)" src/search.rs src/doc_preview.rs; echo exit=$?
 grep -rn "crate::panic_to_err\|index_job::panic_to_err" . --include=*.rs --include=*.toml; echo exit=$?
+grep -n "tauri::command(async)" src/lib.rs; echo exit=$?
 ```
 
-Expected: `134 passed; 0 failed`（本任务 0 条新单测：命令体只是转发，`unified_bundle` 与 `doc_preview::*` 的逻辑已各自守住）；两条 clippy `exit=0`；第四条 **`exit=1`（0 命中）**——它就是「Task 4 与 Task 5 那两块临时豁免都被本任务回收」的证据，接线之后 `unified_bundle` 与 `doc_preview::*` 都有了真 caller，豁免留着就永远不会有人发现它过期了。两个文件一起扫：只要还剩一处命中，输出里会点名是哪个文件，别把它读成「另一个也快了」。第五条扫**悬空符号指针**（`f72a5c8` 把边界助手搬进 `extract.rs` 后，任何写成 `crate::panic_to_err` 或 `index_job::panic_to_err` 的注释/字符串都指到一个不存在的路径上；正确写法在 `extract.rs` 内部是裸 `panic_to_err`，跨文件是 `crate::extract::panic_to_err`），`exit=1`；Task 5 的门只扫 `index_job::panic_to_err` 这一种形态，所以漏掉了 `extract.rs:603` 那条 `crate::` 前缀的，本任务把两种形态一起封住。
+Expected: `134 passed; 0 failed`（本任务 0 条新单测：命令体只是转发，`unified_bundle` 与 `doc_preview::*` 的逻辑已各自守住）；两条 clippy `exit=0`；第四条 **`exit=1`（0 命中）**——它就是「Task 4 与 Task 5 那两块临时豁免都被本任务回收」的证据，接线之后 `unified_bundle` 与 `doc_preview::*` 都有了真 caller，豁免留着就永远不会有人发现它过期了。两个文件一起扫：只要还剩一处命中，输出里会点名是哪个文件，别把它读成「另一个也快了」。这条门的覆盖面**只有这两个文件**，不是全 crate —— 全仓另有一处 `#[allow(dead_code)]` 在 `src/db.rs:30`（M1 给 `open_in_memory` 开的，它的调用点至今全在 `mod tests` 里，`cargo clippy --lib` 不带 `--tests` 时确实没有非测试 caller，所以今天仍然必需）。它**不是本任务的账、也不许本任务顺手删**，归属在账本与 `docs/HANDOFF.md` 的 M4 豁免账里点名记为「永久豁免，或将 `open_in_memory` 开非测试入口时回收」（Task 6 首轮复审 Minor-3：不写明就会有人把「一条 grep 门 = 豁免账收干净」读成全仓成立）。第五条扫**悬空符号指针**（`f72a5c8` 把边界助手搬进 `extract.rs` 后，任何写成 `crate::panic_to_err` 或 `index_job::panic_to_err` 的注释/字符串都指到一个不存在的路径上；正确写法在 `extract.rs` 内部是裸 `panic_to_err`，跨文件是 `crate::extract::panic_to_err`），`exit=1`；Task 5 的门只扫 `index_job::panic_to_err` 这一种形态，所以漏掉了 `extract.rs:603` 那条 `crate::` 前缀的，本任务把两种形态一起封住。第六条是「钉住裁定范围」的门：期望**恰好 1 行**且 `exit=0`，那一行必须紧贴 `fn doc_preview`（`grep -n` 的行号与 `fn doc_preview` 只差一行）。它同时守住两个方向 —— 属性没落 = 0 行 = `exit=1` = 红；给 `search_all`（或任何既有命令）也顺手加上 = 2 行 = 红，因为「本轮只动 `doc_preview`，`search_all` 留给 T9 实测」是裁定而不是随手选择，而这条边界编译器和 clippy 都不会替你看着。
 
-- [ ] **Step 4: Task 4 定向复审登记的四处文本残留（四处全零行为，本任务不新增测试）**
+- [ ] **Step 4: Task 4 定向复审留下的六处残留收口（六处全零行为，本任务不新增测试）**
 
-Task 4 的 fix round 1 复审判了「5 条 finding 全 ADDRESSED、无新 Critical/Important」，但留了 7 条文本级 open 项；其中 4 条的回收点就在本任务（本任务是这些计数的第一个 caller，也是那条「Task 10 的 IPC」注释所指的真身），另外 3 条已在账本里登记为有名缺口（台账侧 `MAX_CLUSTERS_PER_SECTION` 无独立用例、第三级 id 键无守护、M3 遗留的其余旧任务号注释）。逐字替换，**不许顺手改任何表达式或断言逻辑**：
+Task 4 的 fix round 1 复审判了「5 条 finding 全 ADDRESSED、无新 Critical/Important」，但留了一批文本级 open 项，本任务收其中**六条**：4 条注释文本（下面 1–4）+ 1 条旧任务号指针（5）+ 1 条测试强度（6，键集合等值断言 —— 它是「M4 不加线格式字段」那条裁定唯一有牙齿的闸）。落点分布：六条里 5 条在本文件、第 5 条在 `index_store.rs`。其余 3 条已在账本里登记为有名缺口（台账侧 `MAX_CLUSTERS_PER_SECTION` 无独立用例、第三级 id 键无守护、M3 遗留的其余旧任务号注释）。逐字替换，**不许顺手改任何表达式或断言逻辑**：
 
 1. `search.rs` 的 `Cluster::hidden` 注释第二行（现为「只相对本次取到的样本，见 `DOCS_FETCH_LIMIT` 的头注释。」）改为点名两个上游：
 
@@ -1691,7 +1714,7 @@ git add src-tauri/src/lib.rs src-tauri/src/search.rs src-tauri/src/doc_preview.r
 git commit -m "feat: M4 索引接线：search_all 与 doc_preview 两条 IPC 命令（后者锁内查库、锁外抽盘）"
 ```
 
-Expected: 提交含这**五**个文件，不多不少（`extract.rs` 是 Step 文件清单里那条断言消息字符串，只有 1 行；报告里 `git show --stat` 要能看出它只有注释级改动）。
+Expected: 提交含这**五**个文件，不多不少（`extract.rs` 是 Step 文件清单里那条断言消息字符串，只有 1 行；报告里 `git show --stat` 要能看出它只有注释级改动）。**fix round 1 是这一次之外的第二个提交，它只含 `lib.rs` 与 `doc_preview.rs` 两个文件**（`async` 属性 + `index_overview` 那两句注释 + 删掉一个多余空行，全部落在本任务 Files 已点名的文件里）；别为了「凑齐五个文件」去动首轮已经落地的另外三个 —— 它们这轮没有待办，改动本身就是越界。
 
 ---
 
@@ -2319,6 +2342,7 @@ cd "$APPDATA" && ls -la dev.zero.pfm 2>/dev/null && stat -c '%n %s %Y' dev.zero.
 5. 预览一个文件已被删除的行回 `code === "preview_file_missing"`（在沙盒 tempdir 里造的文件，删掉它，不碰真实目录）。
 6. 连打两个字（先「验」再「验收」）后页面显示的是后一次的结果（守 seq 守卫在真 UI 上闭环；用 CDP 逐字符派发 input 事件）。
 7. **预览载荷长度（Task 5 复审 Minor-1 的有名缺口，实测而非断言）**：在沙盒 tempdir 里造一份长文（≥ 4 万 char，命中每隔约 8000 char 一个，间距刻意落在合并带 `(4000, 8002]` 内），`invoke("doc_preview", …)` 后**只回三个数字**：`text` 的码元长度、`ranges.len()`、`truncated`。并窗判据在 fix round 1 换成了「新窗左沿」，合并带随之翻倍，`MAX_PREVIEW_WINDOWS` 只封顶窗数不封顶窗长，所以链式合并会把一扇窗拉到接近整篇 —— 这是裁定过并接受的行为（要断开就得让窗相接，那正是 Important-1 的重复段落失效形态），但对话框是否还读得动只有真机看得见。**判据写死**：若单次预览的 `text` 超过 6 万码元且页面渲染明显卡顿或滚动失效，把它登记为终审的独立 finding（讨论「给合并加长度上限 + 上限处宁可多插一个 `⋯`」这条备选路），不在本任务里顺手改算术；不卡就在 `docs/开发进度.md` 记数字收口。
+8. **`async` 的运行时兑现（Task 6 复审 Important-1 裁的那条，全链条上唯一的证据就在这一格）**：光有第 3 条只证明预览能回，不证明它**不占消息泵**。做法：沙盒 tempdir 里造一份足以让抽取慢到肉眼可辨的文件（几百 MB 级纯文本，或页数很多的 PDF，反正只读、跑完删），在页面里**同一时刻**并发发两条：`invoke("doc_preview", {慢的那份})` 与一条便宜的 `invoke("db_status")`，只回两个数字 —— 各自的墙钟毫秒与「`db_status` 是否先返回」。**判据写死**：`db_status` 先回 ⇒ `async` 生效（sync 形态下它必然排在慢命令后面，因为整条 IPC 都在消息泵那一个线程上）；`db_status` 等到 `doc_preview` 之后才回 ⇒ 属性没起作用，登记为终审的独立 finding 并附两个毫秒数。这条同时是 `lib.rs` 里 `doc_preview` 那段注释（「锁外抽盘」+「`async` 那一行把命令体挪出 IPC 所在线程」）唯一的真机对账，跑不通就不许在收口文档里说它成立。
 
 - [ ] **Step 3: D6 的实测决定（20/10/10 是不是合适）**
 
@@ -2327,6 +2351,8 @@ cd "$APPDATA" && ls -la dev.zero.pfm 2>/dev/null && stat -c '%n %s %Y' dev.zero.
 - 命中分布：有多少个簇的 `items.len()` 触到 10、多少个段触到 20 簇。
 
 裁定口径写死在这里，不用再问人：**若 5 万行下一次往返 > 800 ms，把 `DOCS_FETCH_LIMIT` 降到 100 并在 `docs/开发进度.md` 登记「取数上限由 200 降到 100，因为 X ms」；若「触顶簇」占比 > 30%，说明 `MAX_ITEMS_PER_CLUSTER = 10` 太小，把三个数一起上调（20/10/10 → 30/15/15）并同步改 Task 4 的三条截断测试期望值与 spec §四。** 两个都没触到就维持原值，只在文档里记数字。**不许**为了「看起来更快」而偷偷放宽 `truncated`/`hidden` 的语义。
+
+顺带记第三个数字（Task 6 的 Important-1 把这条列成了 `search_all` 的待裁定项，本轮它保持 sync）：**`search_all` 往返期间并发那条便宜的 `db_status`，它是否被占住**（口径同 Step 2 第 8 条）。若 `search_all` 本身已 > 800 ms 且 `db_status` 被推到它后面，那说明首屏每次键入都在冻消息泵，`search_all` 也该加 `#[tauri::command(async)]` —— 但**不在本任务改代码**：把两个毫秒数与结论写进 `docs/开发进度.md`，作为终审那轮的独立 finding 落地（终审只有一次 fix 派发，正好把它和别的整改一起做）。
 
 - [ ] **Step 4: 清场 + 文档收口**
 
@@ -2344,6 +2370,7 @@ git status --porcelain   # 必须只剩 M4 的代码与文档，没有沙盒残�
 - `lower_first` 折叠展开型映射（ß/İ）导致少认一次命中的分支（本机无夹具）
 - 纯静默拒绝 WAL 那条分支仍是无测试守护的 deferred minor（M0 起就记着）
 - 5 万行下的检索延迟只有沙盒数字，不代表用户真实目录
+- `#[tauri::command(async)]` 的运行时兑现（Task 6 只在编译侧证明了这个签名在 async 形态下成立；「预览期间别的 IPC 进得来」唯一证据是上面 Step 2 第 8 条，134 条单测一条都不覆盖它）
 
 ```bash
 git add docs/开发进度.md
