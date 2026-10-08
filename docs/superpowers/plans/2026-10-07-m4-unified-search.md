@@ -402,7 +402,9 @@ pub fn clean_snippet(raw: &str) -> String {
 /// 而 `cut_for_search` 吐出的子词组（实测 `付款 条件 付款条件`、`报价 价单 报价单`）恰好铺满。
 /// 带 `[` / `]` 高亮标记的词一律不参与：标记是 `技术方案.md` 6.1 要求暴露给前端的信息，
 /// 为了观感吃掉它，代价比重复词大。
-fn fold_duplicated_compound(tokens: &[&str]) -> Vec<&str> {
+/// `[` `]` `⋯` 这三个字面量来自 `index_store::SELECT_SQL` 里 `snippet()` 的实参，改那边要同步改这里。
+/// 签名里只给内层 `&str` 命名生命周期：返回值只从词里抄 `&str`，不带外层切片的借用。
+fn fold_duplicated_compound<'a>(tokens: &[&'a str]) -> Vec<&'a str> {
     let mut drop = vec![false; tokens.len()];
     for idx in 0..tokens.len() {
         let run = foldable_run(tokens, idx);
@@ -436,14 +438,19 @@ fn foldable_run(tokens: &[&str], w_idx: usize) -> usize {
             || part_chars.len() >= whole.len()
             || part.contains('[')
             || part.contains(']')
-            || !tokens[w_idx].contains(part)
         {
             return 0;
         }
+        // 子串判据就落在这里：`find` 回 None 就是「不是 W 的子串」→ 整组放弃。
         // 用首次出现的区间：稳定，且不会为凑铺满去找最宽松的落点。
-        let start_chars = tokens[w_idx][..tokens[w_idx].find(part).unwrap_or(0)]
-            .chars()
-            .count();
+        // 写计划时这里是「先 `contains` 再 `find(...).unwrap_or(0)`」两处并写，评审后收成一条：
+        // `str::contains` 按定义就是 `find(..).is_some()`，两条并写会让 `unwrap_or(0)` 那个分支
+        // 永不可达（于是它既不能被测试证伪，又把「守卫被删」的回归吞成静默的错区间覆盖），
+        // 而下面那条 `⋯付款` 用例正是靠这一格返回 None 才不折的。
+        let Some(start_byte) = tokens[w_idx].find(part) else {
+            return 0;
+        };
+        let start_chars = tokens[w_idx][..start_byte].chars().count();
         for slot in &mut covered[start_chars..start_chars + part_chars.len()] {
             *slot = true;
         }
@@ -455,6 +462,10 @@ fn foldable_run(tokens: &[&str], w_idx: usize) -> usize {
     0
 }
 ```
+
+关于签名里的 `<'a>`（写计划时漏了，实现者按编译器要求补上，评审已独立复现）：`fn f(tokens: &[&str]) -> Vec<&str>` 会 `error[E0106] missing lifetime specifier`——`&[&str]` 有两个输入生命周期位置且无 `self`，输出侧无法省略；而 rustc 提示的 `&'a [&'a str]` 在本函数唯一调用点（`&raw.split(' ').collect::<Vec<_>>()`，一个临时 `Vec`）会 `error[E0716] temporary value dropped while borrowed`。**只命名内层**是唯一能配上该调用点的最小形式。
+
+关于 `foldable_run` 开头那三处「蕴含关系上冗余」的守卫（`whole.len() < 2`、W 侧两枚括号 `contains`）：**按本计划有意保留**，它们与 part 侧括号守卫同属「把 D5 界面契约写成代码」的显式声明，行为由子串判据 + 长度判据 + 铺满判据承载。评审若再点名「不可证伪」，答案是既定的（见 Step 4 第 2 条），不必为此改代码。
 
 Run: `cd src-tauri && cargo test --lib tokenize; echo exit=$?`
 Expected: `9 passed; 0 failed`（原 5 + Task 1 的 2 + 本任务 2）。旧测试 `clean_snippet_only_collapses_cjk_boundaries` 必须**仍然绿**——它的三组输入按上面的判据都落不进折叠，若它红了说明折叠规则越界改了不该改的东西。
@@ -471,10 +482,12 @@ Expected: `9 passed; 0 failed`（原 5 + Task 1 的 2 + 本任务 2）。旧测�
         let only_name = hits(&c, "报价单");
         assert_eq!(only_name.len(), 1);
         assert_eq!(only_name[0].snippet, "里面只有付款条件与验收流程");
-        assert!(!only_name[0].snippet.contains('['), "正文没这个词、只靠文件名命中时摘要不带标记");
 ```
 
-同时把 `DocHit.snippet` 的契约注释（`index_store.rs:209-213`）里「`cut_for_search` 的复合词会连着出现两次（实测「里面只有付款条件付款条件与验收流程」）」这句改成「`cut_for_search` 的复合词原本会连着出现两次，M4 起由 `clean_snippet` 的三连折叠收口（见 `tokenize.rs:fold_duplicated_compound`）；窗口首格被 `⋯` 粘住时不折，属已知观感残留」。
+写计划时这个代码块里还有一条 `assert!(!only_name[0].snippet.contains('['), "正文没这个词、只靠文件名命中时摘要不带标记");`，Task 3 评审判定它是**恒绿断言**：紧邻的逐字相等断言的那个串本身不含 `[`，前一条通过时它在逻辑上不可能红；且按计划文本去掉 `{}` 实参后失败也打不出任何诊断。故删。
+「摘要要标出命中词」的正向契约由同一测试里 `hit.snippet.contains('[') && hit.snippet.contains(']')` 那条守着（可被「把 SELECT_SQL 的标记换成别的」打红），「只靠文件名命中不带标记」由上面那句逐字相等守着。
+
+同时把 `DocHit.snippet` 的契约注释（`index_store.rs:209-213`）里「`cut_for_search` 的复合词会连着出现两次（实测「里面只有付款条件付款条件与验收流程」）」这句改成「`cut_for_search` 的复合词原本会连着出现两次，M4 起由 `clean_snippet` 的三连折叠收口（见 `tokenize.rs:fold_duplicated_compound`）；两类残留不折、重复词仍连着出现两次：窗口首格被 `⋯` 粘住，以及命中词自己带着 `[ ]` 标记。折叠只作用在这条展示串上，不影响召回（原注释末尾那句「不影响召回，只影响观感」要保留下来）」。
 
 Run: `cd src-tauri && cargo test --lib index_store; echo exit=$?`
 Expected: `14 passed; 0 failed`（条数不变，本任务在 index_store 只改注释与加强一条既有断言）。
@@ -484,9 +497,14 @@ Expected: `108 passed; 0 failed`（106 + 2）。
 
 - [ ] **Step 4: 变异取证（本任务最重要的一条，因为它守护的是「不篡改用户正文」）**
 
-1. 把 `foldable_run` 的判据从「铺满」放宽成「只要是真子串就折」（删掉 `if covered.iter().all(...)` 的 return，改成走到头就返回 run）：`clean_snippet_keeps_the_highlight_markers_...` 里「甲方 甲方要求」那条**必须红**——它就是篡改。改回来。
-2. 删掉两个 `part.contains('[')` 守卫：标记那条必须红。改回来。
-3. 把 `fold_duplicated_compound` 整个函数换成 `tokens.to_vec()`（不折）：新正例与 `index_store` 那条逐字相等都必须红。改回来。
+四条变异都要实跑并把**真实红的那条测试名**贴进报告，不许凭推断写期望。「改回来」之后一律 `diff -q <备份> <工作文件>` 验字节一致（本仓 `core.autocrlf=true`、工作区 CRLF，`git show` 吐的是 LF 裸 blob，**不要用 `git show > 文件` 还原**）。
+
+1. 把 `foldable_run` 的判据从「铺满」放宽成「只要是真子串就折」（删掉 `if covered.iter().all(...)` 的 return，走到头返回 run）。
+   实测红在 `clean_snippet_folds_the_indexed_compound_back_into_one_word`（写计划时这条误写成 `clean_snippet_keeps_the_highlight_markers_...`：「甲方 甲方要求」那条断言其实在 **folds** 那条测试里、排第 4，而第 1 条 `assert_eq!` 先 panic，所以看不到它）。要拿到「篡改正文」的直接证据，就临时加一枚只跑一次的探针测试（只断言 `clean_snippet("甲方 甲方要求")`），跑完删除。
+2. 删掉 `part.contains('[')` / `part.contains(']')` 两处守卫：**本条变异预期不红**（Task 3 评审独立证明，实现者也用定向探针复现：删守卫后全量 108 绿、三组带标记输入仍不折）。原因是「带标记就不折」已被别的判据蕴含——W 侧 `:140` 先拒绝带标记的 W；带标记的 part 要么不是无标记 W 的子串（`find` 回 None），要么 `[付款]`/`[条件]` 这种 4 char 撞上 `part_chars.len() >= whole.len()`；`[` `]` 这两格本身永远铺不满。
+   处置：**四处括号守卫全部保留**（它们是把 D5 界面契约写在代码里的显式声明，成本为零、语义自解释），**不许为了凑红去删守卫或改夹具**。这条「括号守卫当前没有独立守护者」作为有名缺口登记进账本，交 M4 终审统一裁定。
+3. 把 `fold_duplicated_compound` 整个函数换成 `tokens.to_vec()`（不折）：新正例与 `index_store` 那条逐字相等都必须红。改回来。（附带确认：`clean_snippet_keeps_the_highlight_markers_...` 在这条下保持绿是**正确**的——它守的是「不许多折」。）
+4. 把子串判据那格的 `else { return 0; }` 改成 `else { 0 }` 等价的 `unwrap_or(0)` 形态（即 `find` 失败时落回区间 0）：`clean_snippet_keeps_the_highlight_markers_and_leaves_truncated_runs_alone` 里 `⋯付款 条件 付款条件 与 验收` 那条**必须红**（`⋯付款` 3 char、`付款条件` 4 char，长度守卫挡不住它，只有 `find` 回 None 才不折；落回 0 会把它当成 `付款` 铺满 → 折成 `付款条件与验收`，吃掉省略号那格）。这条是子串判据的独立守护者，也是本任务把 `contains` + `unwrap_or(0)` 收成一条 `find` 之后新增的变异。
 
 - [ ] **Step 5: 三处注释保鲜（Task 1 评审登记的 Minor，随本任务一起做）**
 
