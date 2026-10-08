@@ -1734,7 +1734,9 @@ Expected: 提交含这**五**个文件，不多不少（`extract.rs` 是 Step �
   - `src/lib/api.ts`：`searchAll(query): Promise<SearchBundle>`、`docPreview(docId, query): Promise<DocPreview>`
   - `src/lib/search-order.ts`：`isNewest`、`SECTION_TITLES`、`SectionView`、`bundleToSections`、`clusterNote`、`emptyStateKind`
 
-- [ ] **Step 1: 先写 `tests/search-order.test.ts`（7 条，跑红）**
+- [ ] **Step 1: 先写 `tests/search-order.test.ts`（8 条，跑红）**
+
+> 计数订正（Task 7 派发前预检）：这一节原本写「7 条」，而下面的代码块实际有 8 个 `test(...)`（第 8 个是末尾那条 value-import 门禁），Step 4 的期望也是 `pass 8` —— 差的那一条就是门禁本身，标题把它漏掉了。本仓没有 lint 会替你对这个数，所以标题、块内条数、Step 4 期望三处必须一起是 8（同形前科 = Task 6 的「四处文本残留」编号到 6，坑 63）。
 
 ```ts
 import test from "node:test";
@@ -1767,7 +1769,11 @@ test("三段全空时不产出任何段", () => {
   assert.deepEqual(bundleToSections(bundle()), []);
 });
 
-test("有内容的段按 项目 / 台账 / 正文 顺序产出，段里没有簇也能产出", () => {
+test("有内容的段按 项目 / 台账 / 正文 顺序产出；平铺段的存在性看 projects.length", () => {
+  // 存在性判据两段不同形（Task 7 派发前预检订正）：平铺段看 `projects.length`，聚簇段看 `clusters.length`
+  // —— 原本这条的名字写「段里没有簇也能产出」，那是实现里**没有**的行为（`clusters.length === 0` 就不产出，
+  // 第 2 条与第 4 条的第一句断言正是钉这个的），照旧名读会诱导出「把空段也产出」的反向整改。
+  // 「有簇但簇里 `items` 为空」照样产出这一格，由第 4、5 条用 `items: []` 的夹具守着，不在本条。
   const hit = { source: "project", id: "p1", projectId: "p1", projectName: "甲", title: "甲", detail: "" };
   const sections = bundleToSections(bundle({ projects: [hit] }));
   assert.deepEqual(sections.map((s) => s.kind), ["projects"]);
@@ -1882,11 +1888,13 @@ export const docPreview = (docId: string, query: string) =>
 
 - [ ] **Step 3: `src/lib/search-order.ts`**
 
+**这一格只 import `SearchBundle`，不许顺手把 `FieldHit` 也带上**（Task 7 派发前预检抓到，控制方用本仓自己的 `npx tsc` 在隔离探针里复现过）：`tsconfig.json` 开着 `noUnusedLocals: true` 且 `include` 只有 `["src"]`，而 `search-order.ts` 的函数签名里没有一处直接写 `FieldHit`（`bundleToSections(bundle: SearchBundle)` 用的是 bundle 上的字段类型，不需要点名 `FieldHit`）—— 一旦带上就是 `error TS6196: 'FieldHit' is declared but never used.`，**Step 4 的 `npm run build` 当场红**。原文这里写的是 `import type { FieldHit, SearchBundle }`，那是计划自己的错，不是实现者该照抄的规格；`src/types/search.ts` 那一格相反，它必须 import `DocHit`（`docs: ClusterSection<Cluster<DocHit>>` 真的用到）。
+
 ```ts
 // 首屏结果页的纯逻辑：段的存在性、三个截断计数的文案、空态判据、seq 守卫。
 // 这一格刻意不 import 任何运行时值（`import type` 会被擦除），这样它能被 `node --test` 直跑，
 // 不必给仓库添 jsdom / @testing-library。
-import type { FieldHit, SearchBundle } from "@/types/search";
+import type { SearchBundle } from "@/types/search";
 
 export type SectionKind = "projects" | "ledger" | "docs";
 
@@ -1913,7 +1921,9 @@ export function clusterNote(hidden: number): string | null {
   return hidden > 0 ? `还有 ${hidden} 条未显示` : null;
 }
 
-/** 三段的存在性与说明。顺序固定为 项目 → 台账 → 正文；**空段不产出**（没有行的段只是噪音）。
+/** 三段的存在性与说明。顺序固定为 项目 → 台账 → 正文；**空段不产出**，但两段的「空」判据不同形：
+ *  平铺段看 `projects.length`（有没有行），聚簇段看 `clusters.length`（有没有簇）—— 簇里 `items` 为空
+ *  也照样产出，因为那一行的截断说明与放宽说明仍然要说。
  *  三个截断计数各有自己的说法：平铺段用「还有」，聚簇段用「另有」，段级说明里 relaxed 只追加一次。 */
 export function bundleToSections(bundle: SearchBundle): SectionView[] {
   const out: SectionView[] = [];
@@ -1971,7 +1981,7 @@ Expected: `npm test` 输出 **`pass 8`**、`fail 0`、`exit=0`；`npm run build`
 
 - [ ] **Step 5: 变异取证**
 
-1. `isNewest` 改成 `mine >= latest`：第一条测试必须红（旧的 `mine` 更大时它回 false，看似无事；但 `mine` 永远 ≤ `latest`，`>=` 与 `==` 只在 `mine > latest` 才不同 —— 因此这条变异**不会红**，属已知假绿。改成把 `isNewest` 整个函数体写成 `return true;` 才是可观测变异，store 里那条「旧请求盖新结果」的守卫就会失效，`bundleToSections` 的用例守不到它，所以这一格按有名缺口登记在报告里，**不要**为了让它红而给测试喂假数据）。
+1. `isNewest` 改成 `mine >= latest`：**这一条的预期是「不红」，不是「必须红」**（Task 7 派发前预检订正：原文这里先写「第一条测试必须红」、同一个括号里又推出「因此这条变异不会红」，两处自相矛盾，实现者照前一句读就会去给测试喂假数据 —— 而那正是本条末尾禁止的事）。为什么不红：`isNewest(3, 3)` 在 `>=` 下仍 `true`，`isNewest(2, 3)` 仍 `false`，而真实调用形态里 `mine` 永远 ≤ `latest`，`>=` 与 `==` 只在 `mine > latest` 才不同 —— 这是**等价变异**，客观上说明「旧请求号大于新号」这一格零守护。可观测的变异是另一个：把 `isNewest` 整个函数体写成 `return true;`，此时 `isNewest(2, 3)` 回 `true`，第一条测试**必须红**。把两个读数都原样记进报告，并把 `>=` 那格按有名缺口登记（T8 的 store 守卫此刻还不存在，`bundleToSections` 的用例守不到它 —— 这条已在 `docs/HANDOFF.md` 的「没能自动验证」清单里）。**不要**为了让 `>=` 红而喂假数据或改断言。
 2. `clusterNote(0)` 从 `null` 改成回「还有 0 条未显示」：那条必须红。
 3. docs 段说明里删掉 `relaxed` 分支：`relaxed 只在正文段追加一次` 必须红。
 4. `emptyStateKind` 的 `indexedProjects === 0` 改成 `indexedProjects < 0`：三态那条必须红。
