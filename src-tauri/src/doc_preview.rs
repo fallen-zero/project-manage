@@ -7,11 +7,6 @@
 //! 2. **抽取必须包在 panic 边界里**（`extract::panic_to_err`）。预览跑在 IPC 命令线程上，
 //!    没有边界的话，一份畸形 docx 被用户在首屏点开就当场终止应用进程。
 
-// 临时豁免，Task 6 落地 `doc_preview` IPC 时必须删掉这一段（Step 3 有 grep 门守着，与
-// `search::unified_bundle` 在 Task 4 的同形豁免一起回收）：本模块的第一个 caller 在 Task 6，
-// 而 `cargo clippy --lib` 不带 `--tests`，cfg(test) 关闭时下面每个 pub 项都没有 caller，
-// rustc 会逐条判 dead_code。
-#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -21,8 +16,11 @@ use crate::error::{AppError, AppResult};
 use crate::extract::{panic_to_err, extract_text};
 use crate::tokenize::query_terms;
 
-/// 一扇窗的**半宽**（按 char 计），所以单窗最长 `2 * PREVIEW_WINDOW_CHARS + 命中自身长度` 个 char
-/// （两端各扩一个半宽，中间还得放下命中本身 —— Task 5 复审指出原句少了后半截）。
+/// 一扇窗的**半宽**（按 char 计），所以**没被并过**的单扇窗最长
+/// `2 * PREVIEW_WINDOW_CHARS + 命中自身长度` 个 char（两端各扩一个半宽，中间还得放下命中本身
+/// —— Task 5 复审指出原句少了后半截）。链式合并会让窗更长：`MAX_PREVIEW_WINDOWS` 只封顶**窗数**、
+/// 不封顶窗长，命中每隔不到两个半宽出现一次时会并成一扇，长文里这扇可以接近整篇，由 `truncated` 说实话。
+/// （Task 5 复审 Minor-1：并窗判据从「命中起点」换成「新窗左沿」后合并带翻倍，旧句的「单窗最长」成了假话。）
 /// 不要求落在词或行边界上：预览是给人核对原文的，切在字中间比多加一层对齐逻辑更好读。
 const PREVIEW_WINDOW_CHARS: usize = 4_000;
 /// 一次预览最多拼几扇窗；多出来的命中直接丢弃，由 `truncated` 说实话。

@@ -260,6 +260,13 @@ fn search_local(state: State<'_, AppState>, query: String) -> AppResult<Vec<sear
     search::field_hits(&conn, &query)
 }
 
+/// 首屏统一检索：一次 IPC 带回三段与三个截断计数。这一格只持锁查库，不碰磁盘。
+#[tauri::command]
+fn search_all(state: State<'_, AppState>, query: String) -> AppResult<search::SearchBundle> {
+    let conn = db(&state)?;
+    search::unified_bundle(&conn, &query)
+}
+
 #[tauri::command]
 fn ledger_reveal(
     state: State<'_, AppState>,
@@ -543,6 +550,22 @@ fn search_docs(
     index_store::doc_hits(&conn, &query, limit.unwrap_or(50).clamp(1, 200))
 }
 
+/// 原文预览：**锁内查库、锁外抽盘**，所以必须分两步。
+/// 握着 `state.conn` 去读盘会让其他每条命令都等一次慢 IO（网络盘上一个大文件就是秒级卡顿，
+/// 而首屏正是最容易连点的地方），因此这里刻意不写成 `let conn = db(&state)?; preview(&conn, ..)`。
+#[tauri::command]
+fn doc_preview(
+    state: State<'_, AppState>,
+    doc_id: String,
+    query: String,
+) -> AppResult<doc_preview::DocPreview> {
+    let row = {
+        let conn = db(&state)?;
+        doc_preview::row_for_preview(&conn, &doc_id)?
+    };
+    doc_preview::render_preview(&doc_id, &row, &query)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -599,7 +622,9 @@ pub fn run() {
             index_cancel,
             index_overview,
             index_docs,
-            search_docs
+            search_docs,
+            search_all,
+            doc_preview
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");

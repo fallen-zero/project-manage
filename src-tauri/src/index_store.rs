@@ -668,7 +668,8 @@ mod tests {
     /// 两条 guard 分支和 limit 的去向。`search.rs` 给自己的同名 guard 留了测试
     /// （断 `invalid_input`），这里补齐，否则「空白查询不扫库」「超长要拒绝」全靠肉眼。
     /// limit 那三条钉的是**现状**不是意图：SQLite 里负数 LIMIT = 不限行、0 = 无行，
-    /// `doc_hits` 不做二次校验，clamp 归调用方边界（Task 10 的 IPC 写 `limit.unwrap_or(50).clamp(1, 200)`）。
+    /// `doc_hits` 不做二次校验，clamp 归调用方边界（`lib.rs:542` 的 `search_docs`，
+    /// 首屏那条走 `search::DOCS_FETCH_LIMIT`）。
     #[test]
     fn query_guards_and_limit_pass_straight_through() {
         let c = seeded_with_docs();

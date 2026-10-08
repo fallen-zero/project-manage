@@ -55,7 +55,7 @@ pub struct Cluster<T> {
     pub project_name: String,
     pub items: Vec<T>,
     /// 簇内被 `MAX_ITEMS_PER_CLUSTER` 截掉的条数。只显示、不做展开（§十）。
-    /// 只相对本次取到的样本，见 `DOCS_FETCH_LIMIT` 的头注释。
+    /// 只相对本次取到的样本：正文段的上游是 `DOCS_FETCH_LIMIT`，台账段的上游是 `PER_GROUP_LIMIT`。
     pub hidden: usize,
 }
 
@@ -64,7 +64,7 @@ pub struct Cluster<T> {
 pub struct ClusterSection<C> {
     pub clusters: Vec<C>,
     /// 被 `MAX_CLUSTERS_PER_SECTION` 整簇扔掉的簇数。
-    /// 只相对本次取到的样本，见 `DOCS_FETCH_LIMIT` 的头注释。
+    /// 只相对本次取到的样本：正文段的上游是 `DOCS_FETCH_LIMIT`，台账段的上游是 `PER_GROUP_LIMIT`。
     pub hidden_clusters: usize,
 }
 
@@ -75,8 +75,8 @@ pub struct SearchBundle {
     pub query: String,
     /// `source == "project"` 的命中，平铺，最多 `MAX_PROJECT_HITS` 条。
     pub projects: Vec<FieldHit>,
-    /// 平铺段被截掉的条数。台账段一样只相对本次取到的样本，
-    /// 而且它上面还压着 `PER_GROUP_LIMIT`（每组取数上限），所以低报的方向与正文段相同。
+    /// 平铺段被截掉的条数。它与台账段一样只相对本次取到的样本，
+    /// 上游是 `PER_GROUP_LIMIT`（每组取数上限），所以低报的方向与正文段相同。
     pub projects_hidden: usize,
     pub ledger: ClusterSection<Cluster<FieldHit>>,
     pub docs: ClusterSection<Cluster<DocHit>>,
@@ -262,15 +262,16 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
 /// 第三级兜底不是因为库里会有两个同项目（`projects.id` 是主键），而是为了「簇序可复现」：
 /// 前两级在库里**不唯一**（name 无 UNIQUE，条数更是常并列）。
 ///
-/// 三键的守护现状（Task 4 实测，别把它读成「三级都有测试」）：
+/// 三键的守护现状（Task 4 两轮实测，别把它读成「三级都有测试」）：
 /// - 第一级条数：`doc_clusters_sort_by_hit_count_then_project_name` 里 Gamma 那 5 条守住；
-/// - 第二级项目名：确定性红在 `section_drops_the_21st_cluster_and_reports_it`（21 个等条数簇，
-///   断的是「名序最大者被扔掉」）；`doc_clusters_sort_by_hit_count_then_project_name` 只能概率性红 ——
-///   `project::create_project` 的 id 是随机 UUID v4（`project.rs:110`），去掉名字键后 Alpha/Beta
-///   谁在前就是抛硬币（首轮实测 10 次里只红 2 次）；
-/// - 第三级 id：**当前没有任何测试能把它打红**。要它生效得有两个同名且同条数的簇，而测试没法把
-///   随机 id 的「插入序 vs id 序」摆成固定先后，`sort_by` 又是稳定排序。有名缺口，交 M5
-///   （补法要么给 `projects.id` 开一个测试注入点，要么在测试里用裸 SQL 固定 id）。
+/// - 第二级项目名：**反转比较方向**时两条测试都确定性红 —— `section_drops_the_21st_cluster_and_reports_it`
+///   （21 个等条数簇，断「名序最大者被扔掉」）与 `doc_clusters_sort_by_hit_count_then_project_name`
+///   （并列对翻反）。**删掉这一行**则两条都只剩概率性红：`project::create_project` 的 id 是随机
+///   UUID v4（`project.rs:110`），并列簇改按 id 升序，首轮实测 10 次只红 2 次 —— 所以本仓的排序键
+///   变异取证一律用反转形态；
+/// - 第三级 id：**当前没有任何测试能把它打红**（删掉它实测 120 条全绿）。要它生效得有两个同名且
+///   同条数的簇，而测试没法把随机 id 的「插入序 vs id 序」摆成固定先后，`sort_by` 又是稳定排序。
+///   有名缺口，交 M5（补法要么给 `projects.id` 开测试注入点，要么在测试里用裸 SQL 固定 id）。
 fn cluster_by_project<T>(
     items: Vec<T>,
     project_of: impl Fn(&T) -> (String, String),
@@ -305,7 +306,6 @@ fn cluster_by_project<T>(
 /// 首屏唯一入口：一次调用带回三段与三个截断计数。
 /// 空判与长度守卫都不在这里做（§八：`field_hits` 与 `doc_hits` 各自负责，本项目只在边界校验一次），
 /// 所以 129 字的查询由 `field_hits` 回 `invalid_input`，空白查询回一个空 bundle。
-#[allow(dead_code)] // 第一个 caller 在 Task 6 的 `search_all` IPC，该任务落地时必须删掉本行（与 M3 的豁免同形，不是永久豁免）
 pub fn unified_bundle(conn: &Connection, query: &str) -> AppResult<SearchBundle> {
     let fields = field_hits(conn, query)?;
     let docs = index_store::doc_hits(conn, query, DOCS_FETCH_LIMIT)?;
@@ -768,6 +768,7 @@ mod tests {
             assert!(obj.contains_key(key), "缺 {key}：{:?}", obj.keys().collect::<Vec<_>>());
         }
         assert!(!obj.contains_key("projects_hidden"));
+        assert_eq!(obj.len(), 7, "bundle 的键集合就是 spec §三 那七个，多一个都要红");
         let cluster = &v["docs"]["clusters"][0];
         for key in ["projectId", "projectName", "items", "hidden"] {
             assert!(cluster.as_object().unwrap().contains_key(key), "簇缺 {key}");

@@ -600,7 +600,7 @@ mod tests {
                 assert_ne!(
                     key, "panic",
                     "release 里 `panic = \"abort\"` 会让 `catch_unwind` 抓不到任何东西，抽取层的兜底形同不存在；本项目要求 unwind。\
-                     见本文件 `pdf_text` 的注释与 `crate::panic_to_err`（终审 C1）。"
+                     见本文件 `pdf_text` 的注释与 `panic_to_err`（终审 C1）。"
                 );
             }
         }
