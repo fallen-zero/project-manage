@@ -272,7 +272,8 @@ fn run_select(conn: &Connection, expr: &str, limit: i64, matched_by: &'static st
 /// 两段用同一个 `query_expression`，即同一套预处理，见 tokenize.rs 的头注释。
 ///
 /// `limit` 原样进 SQL，这里不校验也不补默认值：SQLite 里负数 LIMIT = 不限行、0 = 无行，
-/// clamp 属于调用方的系统边界（Task 10 的 IPC：`limit.unwrap_or(50).clamp(1, 200)`）。
+/// clamp 属于调用方的系统边界（`lib.rs:542` 的 `search_docs` 是唯一做过 clamp 的入口，
+/// 首屏那条走 `search::DOCS_FETCH_LIMIT`）。
 /// 刻意不做第二道校验 —— 本项目只在边界校验一次，两道 clamp 会漂成两个数。
 pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<DocHit>> {
     let q = query.trim();

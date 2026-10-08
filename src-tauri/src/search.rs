@@ -20,6 +20,11 @@ const PER_GROUP_LIMIT: i64 = 50;
 /// 正文段一次向库取多少条。这是**取数**上限，不是展示上限；展示截断走下面三个数。
 /// 顶对齐 IPC 侧 `search_docs` 的 limit clamp（`lib.rs:542`，那里是边界唯一一次校验），
 /// 让首屏与 `/index` 的「试搜正文」试验台在同一条 SQL 上取数。
+///
+/// 下面三个展示计数只**相对本次取到的样本**：库里命中超过这条取数上限时它们会低报
+/// （排在第 201 位的正文根本没进内存，不计进任何 `hidden`）。M4 的线格式里没有「结果被截过」的位
+/// （spec §三 定死那七个字段，M4 不擅自加），所以诚实性落在两处：本注释 + Task 8 的文案措辞 ——
+/// 要说「本次结果里另有 N 条未展开」，不能说「库里还有 N 条」。
 const DOCS_FETCH_LIMIT: i64 = 200;
 /// 段级：一个段最多展示多少个簇。整簇被扔掉的簇数进 `ClusterSection::hidden_clusters`。
 const MAX_CLUSTERS_PER_SECTION: usize = 20;
@@ -50,6 +55,7 @@ pub struct Cluster<T> {
     pub project_name: String,
     pub items: Vec<T>,
     /// 簇内被 `MAX_ITEMS_PER_CLUSTER` 截掉的条数。只显示、不做展开（§十）。
+    /// 只相对本次取到的样本，见 `DOCS_FETCH_LIMIT` 的头注释。
     pub hidden: usize,
 }
 
@@ -58,6 +64,7 @@ pub struct Cluster<T> {
 pub struct ClusterSection<C> {
     pub clusters: Vec<C>,
     /// 被 `MAX_CLUSTERS_PER_SECTION` 整簇扔掉的簇数。
+    /// 只相对本次取到的样本，见 `DOCS_FETCH_LIMIT` 的头注释。
     pub hidden_clusters: usize,
 }
 
@@ -68,6 +75,8 @@ pub struct SearchBundle {
     pub query: String,
     /// `source == "project"` 的命中，平铺，最多 `MAX_PROJECT_HITS` 条。
     pub projects: Vec<FieldHit>,
+    /// 平铺段被截掉的条数。台账段一样只相对本次取到的样本，
+    /// 而且它上面还压着 `PER_GROUP_LIMIT`（每组取数上限），所以低报的方向与正文段相同。
     pub projects_hidden: usize,
     pub ledger: ClusterSection<Cluster<FieldHit>>,
     pub docs: ClusterSection<Cluster<DocHit>>,
@@ -251,8 +260,17 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
 
 /// 段内按项目聚簇。簇间序 = 命中条数降序 → 项目名升序 → 项目 id 升序。
 /// 第三级兜底不是因为库里会有两个同项目（`projects.id` 是主键），而是为了「簇序可复现」：
-/// 前两级在库里**不唯一**（name 无 UNIQUE，条数更是常并列），少了第三级，
-/// `doc_clusters_sort_by_hit_count_then_project_name` 会在不同插入序下翻红。
+/// 前两级在库里**不唯一**（name 无 UNIQUE，条数更是常并列）。
+///
+/// 三键的守护现状（Task 4 实测，别把它读成「三级都有测试」）：
+/// - 第一级条数：`doc_clusters_sort_by_hit_count_then_project_name` 里 Gamma 那 5 条守住；
+/// - 第二级项目名：确定性红在 `section_drops_the_21st_cluster_and_reports_it`（21 个等条数簇，
+///   断的是「名序最大者被扔掉」）；`doc_clusters_sort_by_hit_count_then_project_name` 只能概率性红 ——
+///   `project::create_project` 的 id 是随机 UUID v4（`project.rs:110`），去掉名字键后 Alpha/Beta
+///   谁在前就是抛硬币（首轮实测 10 次里只红 2 次）；
+/// - 第三级 id：**当前没有任何测试能把它打红**。要它生效得有两个同名且同条数的簇，而测试没法把
+///   随机 id 的「插入序 vs id 序」摆成固定先后，`sort_by` 又是稳定排序。有名缺口，交 M5
+///   （补法要么给 `projects.id` 开一个测试注入点，要么在测试里用裸 SQL 固定 id）。
 fn cluster_by_project<T>(
     items: Vec<T>,
     project_of: impl Fn(&T) -> (String, String),
@@ -608,6 +626,25 @@ mod tests {
         assert_eq!(b.indexed_projects, 1, "只有一个项目有 ok 正文行");
     }
 
+    /// 台账段必须有**非空**证据。上一条只断过 `b.ledger.clusters.is_empty()`，
+    /// 于是 `partition` 的谓词怎么写都得空簇 —— Task 4 首轮评审据此判定「三段的三分之一零守护」，
+    /// 且简报原来的变异 6 是等价变异（实测全量 119 条都绿）。这条补上台账段的聚簇与两段不互相漏。
+    #[test]
+    fn ledger_section_clusters_its_own_hits_instead_of_leaking_into_projects() {
+        let (c, pid, mk) = fixture();
+        seed_ledger(&c, &pid, &mk); // 「生产门户」只在 env 表里，逐条读过
+        seed_doc(&c, &pid, "C:/x/合同验收.docx", "甲方要求验收指标见合同附件");
+        let b = unified_bundle(&c, "生产门户").unwrap();
+        assert!(b.projects.is_empty(), "「生产门户」不是项目名，平铺段必须空");
+        assert_eq!(b.ledger.clusters.len(), 1, "五条台账只有 env 命中，应聚成一簇");
+        assert_eq!(b.ledger.hidden_clusters, 0);
+        let cluster = &b.ledger.clusters[0];
+        assert_eq!(cluster.project_id, pid);
+        assert_eq!(cluster.project_name, "政务云迁移");
+        assert_eq!(sources(&cluster.items), ["env"]);
+        assert!(b.docs.clusters.is_empty(), "正文里没有「生产门户」，不该凭空多出正文簇");
+    }
+
     #[test]
     fn doc_clusters_sort_by_hit_count_then_project_name() {
         let (c, _, _) = fixture();
@@ -698,6 +735,8 @@ mod tests {
         let b = unified_bundle(&c, "   ").unwrap();
         assert!(b.projects.is_empty() && b.ledger.clusters.is_empty() && b.docs.clusters.is_empty());
         assert!(!b.relaxed);
+        // 空查询不许留下幽灵计数：把三处 `saturating_sub` 写死成任何非零数都会在这里红。
+        assert_eq!((b.projects_hidden, b.ledger.hidden_clusters, b.docs.hidden_clusters), (0, 0, 0));
     }
 
     #[test]
