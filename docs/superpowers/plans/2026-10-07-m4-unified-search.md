@@ -1774,10 +1774,27 @@ test("有内容的段按 项目 / 台账 / 正文 顺序产出；平铺段的存
   // —— 原本这条的名字写「段里没有簇也能产出」，那是实现里**没有**的行为（`clusters.length === 0` 就不产出，
   // 第 2 条与第 4 条的第一句断言正是钉这个的），照旧名读会诱导出「把空段也产出」的反向整改。
   // 「有簇但簇里 `items` 为空」照样产出这一格，由第 4、5 条用 `items: []` 的夹具守着，不在本条。
+  // 段序守卫（Task 7 首轮评审 I-1 整改）：原本这条只喂单段夹具，名字里的「按 项目 / 台账 / 正文 顺序」
+  // 压根没有被断言 —— 控制方实测过：把 `bundleToSections` 里 ledger 与 docs 两个 `if` 块整个交换，
+  // 8 条照样全绿（`pass 8 / fail 0 / exit=0`）。所以必须有一个**三段同时非空**的夹具来钉住 `out` 的顺序；
+  // 顺手把 `relaxed` 也塞进这个夹具，让「放宽只落在正文段」拿到平铺段与台账段的反面断言（评审 M-2）。
   const hit = { source: "project", id: "p1", projectId: "p1", projectName: "甲", title: "甲", detail: "" };
   const sections = bundleToSections(bundle({ projects: [hit] }));
   assert.deepEqual(sections.map((s) => s.kind), ["projects"]);
   assert.equal(sections[0].title, "项目档案");
+  const cluster = { projectId: "p1", projectName: "甲", items: [], hidden: 0 };
+  const all = bundleToSections(
+    bundle({
+      projects: [hit],
+      ledger: { clusters: [cluster], hiddenClusters: 0 },
+      docs: { clusters: [cluster], hiddenClusters: 0 },
+      relaxed: true,
+    }),
+  );
+  assert.deepEqual(all.map((s) => s.kind), ["projects", "ledger", "docs"]);
+  assert.equal(all[0].note, null, "放宽属于正文段，平铺段不该跟着说");
+  assert.equal(all[1].note, null, "放宽属于正文段，台账段不该跟着说");
+  assert.equal(all[2].note, "含前缀放宽匹配");
 });
 
 test("三个截断计数各自产出一行说明，互不借用", () => {
@@ -1877,7 +1894,7 @@ export interface DocPreview {
 `src/lib/api.ts` 在 `searchLocal` 之后：
 
 ```ts
-// 首屏统一检索：三段一次带回。M4 起页面只用这一个入口，searchLocal 留给旧调用与对照。
+// 首屏统一检索：三段一次带回。页面切到这个入口是 Task 8 的事，`searchLocal` 在迁移完成前仍被旧调用方用着。
 export const searchAll = (query: string) => invoke<SearchBundle>("search_all", { query });
 // 点开正文命中：后端锁内查库、锁外重抽原文，返回窗口文本与码元区间。
 export const docPreview = (docId: string, query: string) =>
@@ -1977,7 +1994,7 @@ npm run build; echo exit=$?
 grep -rn "\"search_all\"\|\"doc_preview\"" src/lib/api.ts; echo exit=$?
 ```
 
-Expected: `npm test` 输出 **`pass 8`**、`fail 0`、`exit=0`；`npm run build` `exit=0`（tsc 段守类型：`ranges: [number, number][]` 与 Rust 的 `Vec<(usize, usize)>` 线格式对不上就会在这里红）；最后一条 grep `exit=0`（Task 6 Step 4 的两侧字面量对账在这里闭环）。
+Expected: `npm test` 输出 **`pass 8`**、`fail 0`、`exit=0`；`npm run build` `exit=0` —— 但**别把这条门禁读成它守不住的东西**（Task 7 首轮评审 M-1 订正：原文写「tsc 段守类型，`ranges: [number, number][]` 与 Rust 的 `Vec<(usize, usize)>` 线格式对不上就会在这里红」，那是假的 —— `invoke<T>` 是类型断言不是校验，前后端之间没有任何编译期耦合，Rust 侧改字段名时 tsc 一个字都不会报。它真正保证的只有 TS 侧自洽）。跨侧对账靠两件事，都要在报告里逐字段落出来：① Rust 侧既有的 `bundle_wire_format_is_camel_case`（`search.rs` 的测试，`serde_json::to_value` 后断言 bundle 的键集合恰好 7 个）；② 本任务落地后由评审读 `search.rs` / `doc_preview.rs` 的 `#[serde(rename_all = "camelCase")]` 结构体逐字段对 TS 类型。**已知缺口登记**：`DocPreview` 那一侧没有对应的 wire 测试（`doc_preview.rs` 里没有 `serde_json::to_value`），当场 grep 过；给它补一条要把 Rust 条数从 134 抬到 135 并动 Task 5 的模块数与整条链，故不在本任务补，登记为推迟到终审统一处置的有名缺口，中间由 Task 9 真机 `invoke("doc_preview")` 的读数兜住。最后一条 grep `exit=0`（Task 6 Step 4 的两侧字面量对账在这里闭环）。
 
 - [ ] **Step 5: 变异取证**
 
@@ -1986,6 +2003,7 @@ Expected: `npm test` 输出 **`pass 8`**、`fail 0`、`exit=0`；`npm run build`
 3. docs 段说明里删掉 `relaxed` 分支：`relaxed 只在正文段追加一次` 必须红。
 4. `emptyStateKind` 的 `indexedProjects === 0` 改成 `indexedProjects < 0`：三态那条必须红。
 5. 往 `search-order.ts` 加一行 `import { toAppError } from "@/lib/ipc";`：value import 门禁必须红，然后删掉。
+6. **段序交换（I-1 整改的自证，必须做）**：把 `bundleToSections` 里 ledger 与 docs 两个 `if` 块整体换到对方前面。第 3 条**必须红**，且失败点要指名「有内容的段按 项目 / 台账 / 正文 顺序产出；平铺段的存在性看 projects.length」。为什么单列这一条：整改前控制方对**同一处**交换得到的读数是 `pass 8 / fail 0 / exit=0`（全绿），也就是说测试名承诺的段序当时零守护 —— 补上三段同现夹具后必须变成可证伪，否则整改没落地。改回来。
 
 Expected: 变异回滚后 `pass 8 / fail 0`。
 
