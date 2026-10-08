@@ -210,7 +210,8 @@ pub struct DocHit {
     /// 两条 M4 要知道的契约（控制方探针实测）：摘要取自**正文列**（`snippet()` 的第 2 个实参固定为 1），
     /// 只靠文件名命中的结果摘要不带 [ ]；且摘要串是预分词后的正文，`cut_for_search` 的复合词原本会
     /// 连着出现两次，M4 起由 `clean_snippet` 的三连折叠收口（见 `tokenize.rs:fold_duplicated_compound`）；
-    /// 窗口首格被 `⋯` 粘住时不折，属已知观感残留。
+    /// 两类残留不折、重复词仍连着出现两次：① 窗口首格被 `⋯` 粘住，② 命中词自己带着 `[ ]` 标记。
+    /// 折叠只作用在这条展示串上，不影响召回，只影响观感。
     /// 要拿原文做摘要得在建表时给虚表加一列 UNINDEXED 正文，不许在检索侧拼。
     pub snippet: String,
     /// exact | prefix：放宽过的命中要能被界面标出来，否则用户会以为是 bug
@@ -530,7 +531,6 @@ mod tests {
         let only_name = hits(&c, "报价单");
         assert_eq!(only_name.len(), 1);
         assert_eq!(only_name[0].snippet, "里面只有付款条件与验收流程");
-        assert!(!only_name[0].snippet.contains('['), "正文没这个词、只靠文件名命中时摘要不带标记");
     }
 
     /// 事实 5：复合词的子词查询靠 cut_for_search 才能命中。

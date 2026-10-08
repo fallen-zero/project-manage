@@ -117,6 +117,7 @@ pub fn clean_snippet(raw: &str) -> String {
 /// 而 `cut_for_search` 吐出的子词组（实测 `付款 条件 付款条件`、`报价 价单 报价单`）恰好铺满。
 /// 带 `[` / `]` 高亮标记的词一律不参与：标记是 `技术方案.md` 6.1 要求暴露给前端的信息，
 /// 为了观感吃掉它，代价比重复词大。
+/// `[` `]` `⋯` 这三个字面量来自 `index_store::SELECT_SQL` 里 `snippet()` 的实参，改那边要同步改这里。
 /// 签名里只给内层 `&str` 命名生命周期：返回值只从词里抄 `&str`，不带外层切片的借用。
 fn fold_duplicated_compound<'a>(tokens: &[&'a str]) -> Vec<&'a str> {
     let mut drop = vec![false; tokens.len()];
@@ -152,14 +153,19 @@ fn foldable_run(tokens: &[&str], w_idx: usize) -> usize {
             || part_chars.len() >= whole.len()
             || part.contains('[')
             || part.contains(']')
-            || !tokens[w_idx].contains(part)
         {
             return 0;
         }
+        // 子串判据就落在这里：`find` 回 None 就是「不是 W 的子串」→ 整组放弃。
         // 用首次出现的区间：稳定，且不会为凑铺满去找最宽松的落点。
-        let start_chars = tokens[w_idx][..tokens[w_idx].find(part).unwrap_or(0)]
-            .chars()
-            .count();
+        // 写计划时这里是「先 `contains` 再 `find(...).unwrap_or(0)`」两处并写，评审后收成一条：
+        // `str::contains` 按定义就是 `find(..).is_some()`，两条并写会让 `unwrap_or(0)` 那个分支
+        // 永不可达（于是它既不能被测试证伪，又把「守卫被删」的回归吞成静默的错区间覆盖），
+        // 而下面那条 `⋯付款` 用例正是靠这一格返回 None 才不折的。
+        let Some(start_byte) = tokens[w_idx].find(part) else {
+            return 0;
+        };
+        let start_chars = tokens[w_idx][..start_byte].chars().count();
         for slot in &mut covered[start_chars..start_chars + part_chars.len()] {
             *slot = true;
         }
