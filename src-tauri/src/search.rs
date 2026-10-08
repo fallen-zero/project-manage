@@ -11,10 +11,22 @@ use rusqlite::{params, Connection, Row};
 use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
+use crate::index_store::{self, DocHit};
 use crate::tokenize::MAX_QUERY_CHARS;
 
 /// 每组最多返回这么多条：命中几千条时把整表灌进前端没有意义，界面也翻不完。
 const PER_GROUP_LIMIT: i64 = 50;
+
+/// 正文段一次向库取多少条。这是**取数**上限，不是展示上限；展示截断走下面三个数。
+/// 顶对齐 IPC 侧 `search_docs` 的 limit clamp（`lib.rs:542`，那里是边界唯一一次校验），
+/// 让首屏与 `/index` 的「试搜正文」试验台在同一条 SQL 上取数。
+const DOCS_FETCH_LIMIT: i64 = 200;
+/// 段级：一个段最多展示多少个簇。整簇被扔掉的簇数进 `ClusterSection::hidden_clusters`。
+const MAX_CLUSTERS_PER_SECTION: usize = 20;
+/// 簇级：一个簇最多展示多少条，被截掉的条数进该簇 `hidden`。
+const MAX_ITEMS_PER_CLUSTER: usize = 10;
+/// 「项目」段是平铺列表，没有簇可挂计数，截掉的条数进 `projects_hidden`。
+const MAX_PROJECT_HITS: usize = 10;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +39,43 @@ pub struct FieldHit {
     pub title: String,
     /// 一行副标题，只由明文列拼成
     pub detail: String,
+}
+
+/// 一个项目在一个段里的命中。两段的簇形状除 `items` 元素类型外逐字段相同，所以只写一个泛型结构；
+/// 泛型不动线格式：serde 按 `T` 的具体实例化生成序列化，`rename_all` 照样生效。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cluster<T> {
+    pub project_id: String,
+    pub project_name: String,
+    pub items: Vec<T>,
+    /// 簇内被 `MAX_ITEMS_PER_CLUSTER` 截掉的条数。只显示、不做展开（§十）。
+    pub hidden: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterSection<C> {
+    pub clusters: Vec<C>,
+    /// 被 `MAX_CLUSTERS_PER_SECTION` 整簇扔掉的簇数。
+    pub hidden_clusters: usize,
+}
+
+/// 首屏一次 IPC 的全部返回。三段之间**不做分数比较**：bm25 与 LIKE 不可比（§3.4）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchBundle {
+    pub query: String,
+    /// `source == "project"` 的命中，平铺，最多 `MAX_PROJECT_HITS` 条。
+    pub projects: Vec<FieldHit>,
+    pub projects_hidden: usize,
+    pub ledger: ClusterSection<Cluster<FieldHit>>,
+    pub docs: ClusterSection<Cluster<DocHit>>,
+    /// 正文段存在 `matchedBy == "prefix"`。段级说明只出一次（D7）。
+    /// 在截断前的 docs 上算：否则放宽命中全被截掉时，这个说明会凭空消失。
+    pub relaxed: bool,
+    /// `index_store::indexed_project_count`：空态文案用它区分「还没建索引」与「没命中」。
+    pub indexed_projects: usize,
 }
 
 /// LIKE 的元字符必须转义，否则用户敲一个 `%` 就把全表都当成命中。
@@ -200,10 +249,71 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
     Ok(hits)
 }
 
+/// 段内按项目聚簇。簇间序 = 命中条数降序 → 项目名升序 → 项目 id 升序。
+/// 第三级兜底不是因为库里会有两个同项目（`projects.id` 是主键），而是为了「簇序可复现」：
+/// 前两级在库里**不唯一**（name 无 UNIQUE，条数更是常并列），少了第三级，
+/// `doc_clusters_sort_by_hit_count_then_project_name` 会在不同插入序下翻红。
+fn cluster_by_project<T>(
+    items: Vec<T>,
+    project_of: impl Fn(&T) -> (String, String),
+) -> ClusterSection<Cluster<T>> {
+    let mut grouped: Vec<(String, String, Vec<T>)> = Vec::new();
+    for item in items {
+        let (project_id, project_name) = project_of(&item);
+        match grouped.iter_mut().find(|(pid, _, _)| *pid == project_id) {
+            Some(entry) => entry.2.push(item),
+            None => grouped.push((project_id, project_name, vec![item])),
+        }
+    }
+    grouped.sort_by(|a, b| {
+        b.2.len()
+            .cmp(&a.2.len())
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    let hidden_clusters = grouped.len().saturating_sub(MAX_CLUSTERS_PER_SECTION);
+    let clusters = grouped
+        .into_iter()
+        .take(MAX_CLUSTERS_PER_SECTION)
+        .map(|(project_id, project_name, mut items)| {
+            let hidden = items.len().saturating_sub(MAX_ITEMS_PER_CLUSTER);
+            items.truncate(MAX_ITEMS_PER_CLUSTER);
+            Cluster { project_id, project_name, items, hidden }
+        })
+        .collect();
+    ClusterSection { clusters, hidden_clusters }
+}
+
+/// 首屏唯一入口：一次调用带回三段与三个截断计数。
+/// 空判与长度守卫都不在这里做（§八：`field_hits` 与 `doc_hits` 各自负责，本项目只在边界校验一次），
+/// 所以 129 字的查询由 `field_hits` 回 `invalid_input`，空白查询回一个空 bundle。
+#[allow(dead_code)] // 第一个 caller 在 Task 6 的 `search_all` IPC，该任务落地时必须删掉本行（与 M3 的豁免同形，不是永久豁免）
+pub fn unified_bundle(conn: &Connection, query: &str) -> AppResult<SearchBundle> {
+    let fields = field_hits(conn, query)?;
+    let docs = index_store::doc_hits(conn, query, DOCS_FETCH_LIMIT)?;
+    // 「项目」段平铺、其余五段聚簇：思维导图把这两类分开画，前端渲染也不同款。
+    let (mut projects, ledger_rows): (Vec<FieldHit>, Vec<FieldHit>) =
+        fields.into_iter().partition(|h| h.source == "project");
+    let projects_hidden = projects.len().saturating_sub(MAX_PROJECT_HITS);
+    projects.truncate(MAX_PROJECT_HITS);
+    // relaxed 取自**截断前**的完整 docs 集合，簇内截断不影响它。
+    let relaxed = docs.iter().any(|h| h.matched_by == "prefix");
+    let indexed_projects = index_store::indexed_project_count(conn)?;
+    Ok(SearchBundle {
+        query: query.trim().to_owned(),
+        projects,
+        projects_hidden,
+        ledger: cluster_by_project(ledger_rows, |h| (h.project_id.clone(), h.project_name.clone())),
+        docs: cluster_by_project(docs, |h| (h.project_id.clone(), h.project_name.clone())),
+        relaxed,
+        indexed_projects,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{db, ledger, project, vault};
+    use crate::{db, index_scan::ScannedFile, index_store, ledger, project, vault};
     use rusqlite::Connection;
 
     const SECRET: &str = "机密串-Zhang@2026";
@@ -302,6 +412,27 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    /// 一条可搜的正文行。`path` 在同一项目内唯一（`db.rs:297` `index_docs` 的 `UNIQUE (project_id, path)`）。
+    fn seed_doc(conn: &Connection, pid: &str, path: &str, body: &str) {
+        index_store::write_doc(
+            conn,
+            pid,
+            &ScannedFile {
+                path: path.to_owned(),
+                file_name: path.rsplit(['/', '\\']).next().unwrap_or(path).to_owned(),
+                ext: "docx".to_owned(),
+                size: 1024,
+                mtime: 1_700_000_000,
+            },
+            index_store::DocOutcome::Ok(body.to_owned()),
+        )
+        .unwrap();
+    }
+
+    fn cluster_names(section: &ClusterSection<Cluster<DocHit>>) -> Vec<String> {
+        section.clusters.iter().map(|c| c.project_name.clone()).collect()
     }
 
     fn sources(hits: &[FieldHit]) -> Vec<&'static str> {
@@ -457,5 +588,151 @@ mod tests {
         let (conn, _pid, _mk) = fixture();
         let e = field_hits(&conn, &"啊".repeat(200)).unwrap_err();
         assert_eq!(e.code, "invalid_input");
+    }
+
+    #[test]
+    fn bundle_splits_three_sections_without_letting_one_borrow_another() {
+        let (c, pid, mk) = fixture();
+        seed_ledger(&c, &pid, &mk); // 五类台账各一条，逐条读过：没有一条含「验收」
+        seed_project(&c, "验收流程梳理"); // 「项目」段的命中只可能来自这里
+        seed_doc(&c, &pid, "C:/x/合同验收.docx", "甲方要求验收指标见合同附件");
+        let b = unified_bundle(&c, "验收").unwrap();
+        assert_eq!(b.query, "验收");
+        assert_eq!(b.projects.len(), 1, "项目名命中只进「项目」段");
+        assert_eq!(b.projects[0].title, "验收流程梳理");
+        assert_eq!(b.projects[0].source, "project");
+        assert!(b.ledger.clusters.is_empty(), "台账没有「验收」，正文命中不该被塞进台账段");
+        assert_eq!(b.docs.clusters.len(), 1);
+        assert_eq!(b.docs.clusters[0].items.len(), 1);
+        assert_eq!(b.docs.clusters[0].project_name, "政务云迁移");
+        assert_eq!(b.indexed_projects, 1, "只有一个项目有 ok 正文行");
+    }
+
+    #[test]
+    fn doc_clusters_sort_by_hit_count_then_project_name() {
+        let (c, _, _) = fixture();
+        // 先建 Beta（2 条）再建 Alpha（2 条）：并列时若按插入序排会得 Beta,Alpha，
+        // 这条阳性对照保证守的是「项目名升序」。Gamma 5 条，条数降序排第一。
+        let beta = seed_project(&c, "Beta 项目");
+        let alpha = seed_project(&c, "Alpha 项目");
+        let gamma = seed_project(&c, "Gamma 项目");
+        for i in 0..2 {
+            seed_doc(&c, &beta, &format!("C:/b/{i}.docx"), "甲方要求验收指标");
+            seed_doc(&c, &alpha, &format!("C:/a/{i}.docx"), "甲方要求验收指标");
+        }
+        for i in 0..5 {
+            seed_doc(&c, &gamma, &format!("C:/g/{i}.docx"), "甲方要求验收指标");
+        }
+        let b = unified_bundle(&c, "验收").unwrap();
+        assert_eq!(cluster_names(&b.docs), ["Gamma 项目", "Alpha 项目", "Beta 项目"]);
+    }
+
+    #[test]
+    fn items_keep_the_bm25_order_that_doc_hits_returns() {
+        let (c, pid, _) = fixture();
+        for name in ["C:/x/甲.docx", "C:/x/乙.docx", "C:/x/丙.docx"] {
+            seed_doc(&c, &pid, name, "甲方要求验收指标见合同附件");
+        }
+        let b = unified_bundle(&c, "验收").unwrap();
+        let cluster = &b.docs.clusters[0];
+        assert_eq!(cluster.items.len(), 3, "对照：三条命中都在同一簇");
+        let in_bundle: Vec<String> = cluster.items.iter().map(|h| h.doc_id.clone()).collect();
+        // 这里**刻意引常量而不是写字面量 200**：一是 Step 5 的 grep 门禁要过，二是把
+        // 「上限改成 1」这种变异交给上一条 `items.len() == 3` 去打红，而不是靠两条硬编码数字互证。
+        let from_store: Vec<String> = index_store::doc_hits(&c, "验收", DOCS_FETCH_LIMIT)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.doc_id)
+            .collect();
+        assert!(from_store.len() == 3 && from_store.windows(2).all(|w| w[0] != w[1]));
+        assert_eq!(in_bundle, from_store, "M4 不许重排 bm25 序（§3.4：只做聚簇，不做再排序）");
+    }
+
+    #[test]
+    fn section_drops_the_21st_cluster_and_reports_it() {
+        let (c, _, _) = fixture();
+        for i in 0..21 {
+            let pid = seed_project(&c, &format!("p{i:02}"));
+            seed_doc(&c, &pid, "C:/x/合同.docx", "甲方要求验收指标");
+        }
+        let b = unified_bundle(&c, "验收").unwrap();
+        assert_eq!(b.docs.clusters.len(), 20);
+        assert_eq!(b.docs.hidden_clusters, 1, "整簇被扔掉的簇数要有承载，否则等于静默丢弃");
+        assert!(
+            !cluster_names(&b.docs).iter().any(|n| n == "p20"),
+            "名序最大者被截：{:?}",
+            cluster_names(&b.docs)
+        );
+    }
+
+    #[test]
+    fn cluster_keeps_10_items_and_reports_the_other_2() {
+        let (c, pid, _) = fixture();
+        for i in 0..12 {
+            seed_doc(&c, &pid, &format!("C:/x/{i:02}.docx"), "甲方要求验收指标");
+        }
+        let b = unified_bundle(&c, "验收").unwrap();
+        assert_eq!(b.docs.clusters.len(), 1);
+        assert_eq!(b.docs.clusters[0].items.len(), 10);
+        assert_eq!(b.docs.clusters[0].hidden, 2);
+        assert_eq!(b.docs.hidden_clusters, 0);
+    }
+
+    #[test]
+    fn flat_project_section_truncates_into_projects_hidden() {
+        let (c, _, _) = fixture();
+        for i in 0..15 {
+            seed_project(&c, &format!("验收{i:02}"));
+        }
+        let b = unified_bundle(&c, "验收").unwrap();
+        assert_eq!(b.projects.len(), 10);
+        assert_eq!(b.projects_hidden, 5, "平铺段没有簇可挂计数，只能单独给一个数");
+        assert!(b.docs.clusters.is_empty());
+        assert_eq!(b.indexed_projects, 0, "有命中 ≠ 有正文索引，两个数不许互相推出来");
+    }
+
+    #[test]
+    fn empty_query_yields_an_empty_bundle_instead_of_an_error() {
+        let (c, pid, _) = fixture();
+        seed_doc(&c, &pid, "C:/x/合同.docx", "甲方要求验收指标");
+        let b = unified_bundle(&c, "   ").unwrap();
+        assert!(b.projects.is_empty() && b.ledger.clusters.is_empty() && b.docs.clusters.is_empty());
+        assert!(!b.relaxed);
+    }
+
+    #[test]
+    fn over_long_query_is_rejected_by_the_existing_guard() {
+        let (c, _, _) = fixture();
+        let err = unified_bundle(&c, &"验".repeat(129)).unwrap_err();
+        assert_eq!(err.code, "invalid_input", "聚合层不许再加第三道长度校验");
+    }
+
+    #[test]
+    fn relaxed_is_the_prefix_stage_and_nothing_else() {
+        let (c, pid, _) = fixture();
+        seed_doc(&c, &pid, "C:/x/维保期说明.docx", "维保期为十二个月");
+        seed_doc(&c, &pid, "C:/x/合同验收.docx", "甲方要求验收指标见合同附件");
+        let loose = unified_bundle(&c, "维保").unwrap();
+        assert!(loose.relaxed, "库里只有「维保期」，落到前缀段要说得出口");
+        assert_eq!(loose.docs.clusters[0].items[0].matched_by, "prefix");
+        let tight = unified_bundle(&c, "验收").unwrap();
+        assert!(!tight.relaxed, "精确段命中了就不该出段级说明");
+    }
+
+    #[test]
+    fn bundle_wire_format_is_camel_case() {
+        let (c, pid, _) = fixture();
+        seed_doc(&c, &pid, "C:/x/合同.docx", "甲方要求验收指标");
+        let v = serde_json::to_value(unified_bundle(&c, "验收").unwrap()).unwrap();
+        let obj = v.as_object().unwrap();
+        for key in ["query", "projects", "projectsHidden", "ledger", "docs", "relaxed", "indexedProjects"] {
+            assert!(obj.contains_key(key), "缺 {key}：{:?}", obj.keys().collect::<Vec<_>>());
+        }
+        assert!(!obj.contains_key("projects_hidden"));
+        let cluster = &v["docs"]["clusters"][0];
+        for key in ["projectId", "projectName", "items", "hidden"] {
+            assert!(cluster.as_object().unwrap().contains_key(key), "簇缺 {key}");
+        }
+        assert!(v["ledger"].as_object().unwrap().contains_key("hiddenClusters"));
     }
 }

@@ -157,6 +157,24 @@ pub fn status_counts(conn: &Connection, project_id: &str) -> AppResult<Vec<Statu
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// 有几个项目已经有可搜的正文了。首屏空态要在「正文还没建索引」和「建了但没命中」之间分开
+/// （M3 的 m8：文案对「根不存在」和「0 个可索引文件」说了同一句话），所以这里的谓词
+/// **必须与 `SELECT_SQL` 同口径**：少半个谓词就会出现「文案说正文有索引、正文段却是空的」。
+/// 取数走原生 `i64` 再转 `usize`：rusqlite 0.40.2 的 `from_sql_integral!(usize)`（`src/types/from_sql.rs:146`）
+/// 挂在 `#[cfg(feature = "fallible_uint")]` 后面，本项目没开该 feature，所以 `usize` 直接 `get` 编译不过
+/// （简报此处按「直取」写，实测 E0277）。`count(DISTINCT …)` 恒非负，转换不丢信息。
+pub fn indexed_project_count(conn: &Connection) -> AppResult<usize> {
+    let n = conn.query_row(
+        "SELECT count(DISTINCT d.project_id)
+           FROM index_docs d
+           JOIN projects p ON p.id = d.project_id
+          WHERE d.index_status = 'ok' AND p.deleted_at IS NULL",
+        [],
+        |r| r.get::<_, i64>(0),
+    )?;
+    Ok(n as usize)
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocRow {
@@ -425,6 +443,20 @@ mod tests {
         assert!(got.contains(&("ok".to_string(), 2)), "{got:?}");
         assert!(got.contains(&("skipped".to_string(), 1)), "{got:?}");
         assert!(!got.iter().any(|(s, _)| s == "failed"), "另一个项目的行不该混进来：{got:?}");
+    }
+
+    /// 与 `SELECT_SQL` 同口径是这条的唯一价值：`ok` 之外不算、项目软删了不算。
+    #[test]
+    fn indexed_project_count_matches_the_search_predicate() {
+        let c = conn();
+        seed_project(&c, "p_ok");
+        write_doc(&c, "p_ok", &file("C:/x/合同.docx"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        seed_project(&c, "p_skipped");
+        write_doc(&c, "p_skipped", &file("C:/x/大图.png"), DocOutcome::Skipped("超出大小上限")).unwrap();
+        seed_project(&c, "p_deleted");
+        write_doc(&c, "p_deleted", &file("C:/x/验收.docx"), DocOutcome::Ok("验收指标".into())).unwrap();
+        c.execute("UPDATE projects SET deleted_at = datetime('now') WHERE id = 'p_deleted'", []).unwrap();
+        assert_eq!(indexed_project_count(&c).unwrap(), 1, "只有 p_ok 既在库里又没被软删");
     }
 
     /// 事实 3 的另一半：删的时候两边都要删。`delete_doc` 已按上面的裁定移出本任务，
