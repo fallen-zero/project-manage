@@ -7,7 +7,6 @@
 //! 2. **抽取必须包在 panic 边界里**（`extract::panic_to_err`）。预览跑在 IPC 命令线程上，
 //!    没有边界的话，一份畸形 docx 被用户在首屏点开就当场终止应用进程。
 
-
 use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;

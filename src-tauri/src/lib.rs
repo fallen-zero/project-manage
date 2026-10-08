@@ -478,7 +478,8 @@ fn index_overview(state: State<'_, AppState>) -> AppResult<IndexOverview> {
         (opts, targets, counts, fts5_available(&conn))
     }; // conn 守卫到此离开作用域被 drop，下面再碰文件系统已经不持锁
 
-    // 出锁段：`is_dir()` 可以慢，但此时别的 IPC 进得来。
+    // 出锁段：`is_dir()` 可以慢，但已不再排 `Mutex<Connection>`；命令本身仍是 sync，
+    // 所以这段时间消息泵还被它占着，别的 IPC 进不来（Task 6 复审 Important-1 核到的口径）。
     let projects = targets
         .into_iter()
         .zip(counts)
@@ -551,9 +552,10 @@ fn search_docs(
 }
 
 /// 原文预览：**锁内查库、锁外抽盘**，所以必须分两步。
-/// 握着 `state.conn` 去读盘会让其他每条命令都等一次慢 IO（网络盘上一个大文件就是秒级卡顿，
-/// 而首屏正是最容易连点的地方），因此这里刻意不写成 `let conn = db(&state)?; preview(&conn, ..)`。
-#[tauri::command]
+/// 握着 `state.conn` 去读盘会让别的命令等一次慢 IO（网络盘上一个大文件就是秒级卡顿，而首屏正是
+/// 最容易连点的地方），所以这里刻意不写成 `let conn = db(&state)?; preview(&conn, ..)`。
+/// 光出锁还不够：`async` 那一行把命令体挪出 IPC 所在线程，见下面那段「为什么必须有 async」。
+#[tauri::command(async)]
 fn doc_preview(
     state: State<'_, AppState>,
     doc_id: String,
