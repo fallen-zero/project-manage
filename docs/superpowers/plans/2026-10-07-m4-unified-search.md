@@ -324,7 +324,7 @@ Expected: 两条门 `exit=0`；提交只含这两个文件。
 `index_text` 用 `cut_for_search`，复合词会连同子词一起写进那一列，实测 `cut_for_search("里面只有付款条件与验收流程")` = `里面 只有 付款 条件 付款条件 与 验收 流程`，`snippet()` 取的就是这一列，于是摘要读成「里面只有付款条件**付款条件**与验收流程」。本任务在展示清洗层折掉它，**不碰索引**（spec D5：加 UNINDEXED 正文列要付全量重扫的代价）。
 
 **Files:**
-- Modify: `src-tauri/src/tokenize.rs:76-93`（`clean_snippet` 重构 + 折叠助手 + 2 条新测试）
+- Modify: `src-tauri/src/tokenize.rs:76-93`（`clean_snippet` 重构 + 折叠助手 + 2 条新测试；另有 Step 5 的三处注释保鲜，落点在 `MAX_QUERY_CHARS` 头注释、`query_terms` 头注释与结构守卫的注释）
 - Modify: `src-tauri/src/index_store.rs:209-213`（`DocHit.snippet` 的契约注释：重复词已被折叠）与 `:516-520` 附近那条测试的探针注释 + 断言升级为逐字相等
 
 **Interfaces:**
@@ -488,7 +488,21 @@ Expected: `108 passed; 0 failed`（106 + 2）。
 2. 删掉两个 `part.contains('[')` 守卫：标记那条必须红。改回来。
 3. 把 `fold_duplicated_compound` 整个函数换成 `tokens.to_vec()`（不折）：新正例与 `index_store` 那条逐字相等都必须红。改回来。
 
-- [ ] **Step 5: clippy 两道 + 提交**
+- [ ] **Step 5: 三处注释保鲜（Task 1 评审登记的 Minor，随本任务一起做）**
+
+本任务已经在改 `tokenize.rs`，这三处是注释级、零行为回归的修正，**不单独开派发轮**；除下面三处外不许动同文件里的任何代码。
+
+1. `MAX_QUERY_CHARS` 的头注释（`:12-13`）里那句「之前 `search.rs:87` 与 `index_store.rs:262` 各写了一遍字面量 128」改用**函数名**定位，因为行号每改一次就漂：
+   `/// 之前 \`search::field_hits\` 与 \`index_store::doc_hits\` 的守卫各写了一遍字面量 128，改一处就会让两边口径分家。`
+2. `query_terms` 的头注释里「`doc_preview` 拿它决定原文里高亮哪些词」指向的是**本里程碑后面任务**才存在的模块，加一个去向标记，别让它读起来像已经存在：
+   `/// 两个消费方：\`query_expression\` 拼 FTS5 语法，\`doc_preview\`（M4 Task 5 落地）拿它决定原文里高亮哪些词。`
+3. 结构守卫 `query_side_has_exactly_one_cut` 的注释末尾补一条**给下一个人的规矩**（它数的是整份源文本，注释和测试里的同款字面量一样会命中）：
+   `/// 因此本文件里不许出现第二处带点的 \`cut\` 字面量——注释与测试里也算。要在文档里提这个调用，写成 \`cut(...)\` 或用反引号把点断开，否则这条守卫会在没有任何代码回归的情况下红。`
+
+Run: `cd src-tauri && cargo test --lib tokenize; echo exit=$?`
+Expected: `9 passed; 0 failed`（条数不变；第 3 处补的注释里**不能**出现带点的 cut 字面量，否则这条守卫自己会红）。
+
+- [ ] **Step 6: clippy 两道 + 提交**
 
 ```bash
 cd src-tauri && cargo clippy --lib -- -D warnings; echo exit=$?
@@ -915,6 +929,10 @@ Expected: 两条 `exit=0` 且 0 条 warning；提交只含这两个文件。
 
 **Files:**
 - Create: `src-tauri/src/doc_preview.rs`（模块声明与命令归 Task 6，本任务只交付可单测的库层函数）
+- Modify: `src-tauri/Cargo.toml:46`（注释里的 `index_job::panic_to_err` 改成 `extract::panic_to_err`，并把预览这条新通路写进「哪些路径受 panic 边界保护」那句）
+- Modify: `src-tauri/src/extract.rs:577` 附近（`release_profile_does_not_abort_so_panic_guards_work` 的 doc 里「以及 `index_job` 的两道边界」改成指认搬迁后的真实归属）
+
+这两处 Modify 是 **Task 2 评审登记的 plan-mandated 范围遗漏**（`f72a5c8` 把边界助手搬到 `extract.rs` 后，`Cargo.toml:46` 的注释字面悬空指向一个不存在的符号，而 Task 2 的 grep 门只扫 `src/`、提交范围只有两个文件，够不着它）。落在本任务而不是回头补 Task 2，是因为本任务正是**第三条**按 path 调用抽取器的通路：那两条注释说的「哪些路径有边界兜着」必须在本任务之后才为真，改在别处都还要再改一次。两处都是纯注释、零行为回归，**不许**顺手动同文件里的任何代码。
 
 **Interfaces:**
 - Consumes：Task 1 的 `tokenize::query_terms`（**预览的词只从这一处拿**，spec §五.4）、Task 2 的 `extract::panic_to_err`（`pub(crate) fn panic_to_err<T, F: FnOnce() -> T>(f: F, what: &str) -> AppResult<T>`）、既有 `extract::extract_text`（`pub fn extract_text(path: &Path) -> AppResult<String>`）、`index_store::write_doc` + `DocOutcome` + `ScannedFile`（只用于造库里的行）。
@@ -1369,16 +1387,36 @@ grep -rn "\.cut(\|cut_for_search" src/doc_preview.rs; echo exit=$?
 
 Expected: 两条都 `exit=1`（0 命中）。第一条守「预览不含自己的读盘路径，红线仍只需 grep `extract.rs`」；第二条守「词只从 `query_terms` 拿」。
 
-- [ ] **Step 6: clippy 两道 + 提交**
+- [ ] **Step 6: 两处悬空注释指针更正 + clippy 两道 + 提交**
+
+`src-tauri/Cargo.toml:45-48` 那段（`[profile.release]` 上方的注释）整段替换为：
+
+```toml
+# 不许在这里写 panic = "abort"：abort 下 panic 不展开，`extract::pdf_text` 与
+# `extract::panic_to_err`（M4 从 index_job 提上来，索引与预览两条路共用）/ worker 线程体里的
+# catch_unwind 在发布包里一个都抓不到，一个畸形文件就直接终止整个进程。由
+# `extract::tests::release_profile_does_not_abort_so_panic_guards_work` 钉住（终审 C1）。
+```
+
+`src-tauri/src/extract.rs` 里 `release_profile_does_not_abort_so_panic_guards_work` 的 doc 注释，把
+`/// \`catch_unwind\`（以及 \`index_job\` 的两道边界）在发布包里**抓不到任何东西**，`
+改为
+`/// \`catch_unwind\`（以及 \`panic_to_err\` 那道边界与 worker 线程体的最外层 \`catch_unwind\`）在发布包里**抓不到任何东西**，`
+—— 搬完之后再写「`index_job` 的两道」就把读者指到一个已经没有边界助手的文件里去了。同一句里
+`/// 一个畸形文件直接终止整个应用 —— 而 96 条单测全绿` 的 **`96`** 是 M3 收口时的快照数，本任务之后就是 133，
+任何后续里程碑都会再漂一次，所以把数字换成不随条数漂移的说法：`—— 而全仓单测都跑在 dev profile 上，一条都不会红`。
+
+这三处都是**纯注释**，不许顺手动同一函数体内的任何代码；改完 `cargo test --lib` 必须仍是 `133 passed`。
 
 ```bash
 cd src-tauri && cargo clippy --lib -- -D warnings; echo exit=$?
 cargo clippy --lib --all-targets -- -D warnings; echo exit=$?
-git add src-tauri/src/doc_preview.rs
+grep -rn "index_job::panic_to_err" . --include=*.rs --include=*.toml; echo exit=$?
+git add src-tauri/src/doc_preview.rs src-tauri/Cargo.toml src-tauri/src/extract.rs
 git commit -m "feat: M4 原文预览：锁外重抽 + panic 边界 + UTF-16 码元高亮区间"
 ```
 
-Expected: 两条 `exit=0` 且 0 条 warning（`PathBuf` 若最终没用就删掉那一行 import，别留 `unused_imports`）；提交只含这一个文件。
+Expected: 两条 clippy `exit=0` 且 0 条 warning（`PathBuf` 若最终没用就删掉那一行 import，别留 `unused_imports`）；第三条 grep 是全仓（含 `*.toml`）扫悬空符号，`exit=1`（0 命中）；提交含这三个文件，不多不少。
 
 ---
 
