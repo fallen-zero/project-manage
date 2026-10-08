@@ -61,7 +61,7 @@ M4 本轮交付的形状（权威定义在 spec，不要从本文件重述去实
 **当前逐模块实数**（11:46 从全量输出按 `^test <模块>::tests::` 数出来的，不是筛选命令的聚合行）：
 tokenize 9 / extract 15 / index_job 12 / index_store 15 / search 20 / db 8 / index_scan 10 / ledger 12 / project 10 / vault 9 = **120**。`doc_preview` 模块还不存在，它是 T5 的产出（+14 → 134）。
 
-**SDD 工件现状**（`.superpowers/sdd/2026-10-07-m4-unified-search/`）：账本 `progress.md` 135 行（预检 10 行表 + 红线 + T1–T4 四个 complete 节 + 全部 `Ruling:` + 末尾「暂停点（2026-10-08）」）；简报 T1–T6 已生成（T5 495 行、T6 139 行，都是计划修订后**重切**的）；报告 T1–T4；评审包 6 份 diff。
+**SDD 工件现状**（`.superpowers/sdd/2026-10-07-m4-unified-search/`）：账本 `progress.md`（预检 10 行表 + 红线 + T1–T4 四个 complete 节 + 全部 `Ruling:` + 暂停点 + **`## Task 5 派发前预检`**）；简报 T1–T6 已生成（T5 **513 行**、T6 **140 行**，都是 10-08 恢复后按修订重切的）；报告 T1–T4；评审包 6 份 diff。
 
 ---
 
@@ -106,7 +106,7 @@ cd src-tauri && cargo test --lib   # 应为 120 passed / 0 failed
 tail -40 ../.superpowers/sdd/2026-10-07-m4-unified-search/progress.md   # 账本最后一节 = Task 4: complete
 ```
 
-账本里没有 `Task N: complete` 的第一个任务就是下一个要派的：**Task 5**（简报 `.superpowers/sdd/2026-10-07-m4-unified-search/task-5-brief.md`，495 行，已是最新计划文本切出来的，**不需要重切**）。派发前记 BASE（`git rev-parse HEAD`），派发词只带：一句话上下文 + 简报路径 + T1–T4 产出的接口名 + 红线 + 报告路径。
+账本里没有 `Task N: complete` 的第一个任务就是下一个要派的：**Task 5**（简报 `.superpowers/sdd/2026-10-07-m4-unified-search/task-5-brief.md`，513 行）。**注意**：恢复后的派发前预检发现计划原文有两处会让 Task 5 通不过自己的门禁（`mod doc_preview;` 被划给了 Task 6；文件头注释带着自家 grep 门要扫的字面量），已走「改计划本体 → 重切简报 → 账本记 Ruling」收口，权威文本在账本 `## Task 5 派发前预检`。简报是修订后重切的，别再按本文件下面 §4.2/§4.3 的旧描述派发。派发前记 BASE（`git rev-parse HEAD`），派发词只带：一句话上下文 + 简报路径 + T1–T4 产出的接口名 + 红线 + 报告路径。
 
 助手脚本（都在 SDD skill 目录下）：`scripts/task-brief PLAN_FILE N`（切简报）、`scripts/review-package PLAN_FILE BASE HEAD`（评审包，BASE 必须是**派发前**记的 HEAD，绝不 `HEAD~1`）、`scripts/sdd-workspace PLAN_FILE`（工作目录）。
 
@@ -114,8 +114,8 @@ tail -40 ../.superpowers/sdd/2026-10-07-m4-unified-search/progress.md   # 账本
 
 | 任务 | 动什么 | 该任务终态 |
 |---|---|---|
-| T5 | 新模块 `doc_preview.rs`：重抽原文 + 窗口拼接 + UTF-16 码元区间；顺带收口 `Cargo.toml:46` 悬空指针（Files 含 `Cargo.toml` 与 `extract.rs`，各只动注释/文案） | **134**（doc_preview 14） |
-| T6 | 两条 IPC 命令接线（`search_all` 锁内查库；`doc_preview` **锁内查库、锁外抽盘**，刻意不写成一条持锁调用） | **134**，handler 39 → **41** |
+| T5 | 新模块 `doc_preview.rs`：重抽原文 + 窗口拼接 + UTF-16 码元区间；顺带收口 `Cargo.toml:46` 悬空指针；**并按预检修订自带 `mod doc_preview;` + 一块 Task 6 回收的 `#![allow(dead_code)]`**（Files 含 `lib.rs`，`Cargo.toml` 与 `extract.rs` 各只动注释/文案） | **134**（doc_preview 14） |
+| T6 | 两条 IPC 命令接线（`search_all` 锁内查库；`doc_preview` **锁内查库、锁外抽盘**，刻意不写成一条持锁调用）；回收 `search.rs` 与 `doc_preview.rs` 两块豁免 | **134**，handler 39 → **41** |
 | T7 | 前端类型 `src/types/search.ts` + `api.ts` 的 `searchAll`/`docPreview` + 纯逻辑 `src/lib/search-order.ts` + `tests/*.test.ts` | Rust 仍 **134**、`node --test` **pass 8** |
 | T8 | store 的 seq 守卫、`doc-preview-dialog.tsx`、`search-bundle.tsx`、`pages/search.tsx` 薄壳 | `npm run build` exit 0，不新增单测 |
 | T9 | 真机验收 + D6 上限实测裁定 + 文档收口（含 §3 那条归属口径） | 见 4.4 |
@@ -126,8 +126,8 @@ tail -40 ../.superpowers/sdd/2026-10-07-m4-unified-search/progress.md   # 账本
 ### 4.3 T6 有四处**不可省**的活（今天为它新增的，别按旧简报做）
 
 1. **新增的 Step 4**：T4 定向复审登记的 6 条逐字替换块（4 条文本级 + 1 条测试强度 + 1 条旧任务号指针）——含把键集合断言补成 `assert_eq!(obj.len(), 7, ...)`，配一条证伪取证：临时往 `SearchBundle` 加一个 `pub docs_capped: bool` 这条**必须红**，然后**删干净**。这道闸是给「M4 不加线格式字段」那条裁定上的，不是装饰。
-2. **回收 T4 那行临时豁免**：删掉 `unified_bundle` 上方的 `#[allow(dead_code)]`（现在在 `search.rs:308`，按「紧贴 `pub fn unified_bundle` 的那行」定位，行号会漂）。门禁 `grep -rn "allow(dead_code)" src/search.rs` 期望 **exit=1（0 命中）**。
-3. Files 里已点名三个文件（`lib.rs` / `search.rs` / `index_store.rs`，后两者只动注释与那一处断言），`git add` 也是这三个 —— 别让实现者以为无权改 `index_store.rs`。
+2. **回收两块临时豁免**：删掉 `unified_bundle` 上方的 `#[allow(dead_code)]`（现在在 `search.rs:308`，按「紧贴 `pub fn unified_bundle` 的那行」定位，行号会漂），**以及 `doc_preview.rs` 文件头那块 5 行的 `#![allow(dead_code)]`**（Task 5 按预检修订开的，形态同形）。门禁 `grep -rn "allow(dead_code)" src/search.rs src/doc_preview.rs` 期望 **exit=1（0 命中）**，一次扫两个文件。
+3. Files 里已点名四个文件（`lib.rs` / `search.rs` / `doc_preview.rs` / `index_store.rs`，后三者只动注释、那一处断言与那 5 行豁免），`git add` 也是这四个 —— 别让实现者以为无权改 `index_store.rs` 或 `doc_preview.rs`。
 4. Step 5 的字面量对账：`grep -rn "\"search_all\"\|\"doc_preview\"" ../src/lib/api.ts` 在 **T7 落地前必然 exit=1**，T7 之后必须 exit=0 —— T7 要重跑这条并写进它的 Expected。
 
 ### 4.4 完成判据（计划里的原话，可逐条核对）
@@ -232,7 +232,7 @@ tail -40 ../.superpowers/sdd/2026-10-07-m4-unified-search/progress.md   # 账本
 50. **数字链一改就要全链同步**：补一条测试 = 该模块 +1、该任务终态 +1、后续每个任务的 Expected、完成判据、交接文档表格与分模块清单全部跟着改。控制方用 `grep -n "旧数"` 收口，别指望实现者发现。
 51. **随机 id 让「删除排序键」这种变异变成抛硬币**：`project::create_project` 用 UUID v4（`project.rs:110`），并列簇在去掉名字键后按随机 id 序排，实测 10 次只红 2 次。做排序键的变异取证要用**反转比较方向**，不要用删行；确实无法守护的键（如第三级 id）就写成「预期不红」的取证条目并登记有名缺口，别伪造确定性。
 
-### G. 今天（10-08）新加的六条
+### G. 今天（10-08）新加的八条
 
 52. **presence-only 断言锁不住键集合**：`contains_key("projectId")` 只证明「该在的在」，不证明「不该在的不存在」。线格式是契约时要用 `assert_eq!(obj.len(), 7)`，并配对一条证伪取证（临时加一个字段 → 必须红 → 删干净）。M4 的教训具体形态：T4 的 `bundle_wire_format_is_camel_case` 被控制方当成「7 字段契约已守住」报了出去，复审不采信，才补出 T6 Step 4 那条长度断言 —— **「我们决定不加 `docsCapped`」这条裁定在补断言之前没有任何闸门**。
 53. **等价变异全绿 = 那段代码零守护的客观证据**，不是「测试很稳」。某条变异改完**全量照绿**（T4 当时是 119 条），结论必须是「补测试」，而不是「这条变异不成立」。T4 的变异 6 就是靠这条把「三段之一的台账段从没被测过」查出来的。
@@ -240,6 +240,8 @@ tail -40 ../.superpowers/sdd/2026-10-07-m4-unified-search/progress.md   # 账本
 55. **控制方不能在跑着「会提交的实现者」的 worktree 里提交任何东西**，哪怕纯文档：会和它的 `git add`/`commit` 抢 `index.lock`，而且 HEAD 中途移动会让 `review-package` 的 BASE/HEAD 对不上报告里写的范围。今天 11:33 那次交接文档提交是刻意**压到 fix round 落地之后**才做的。
 56. **「注释级 / 断言级零行为回归」不配开新的一轮派发+复审**：折进下一个本来就要改那个文件的任务（今天 6 条全进 T6 Step 4）。但**必须同时把文件名列进那个任务的 Files 和 `git add`**，否则实现者按简报的边界无权改，残留在下一轮又弹出来。
 57. **报告与简报的行号指针必然漂**（今天实测 ±1 到 ±3，还有一处顺序颠倒）：判定标准是语义目标（那段注释 / 那个函数），不是行号。要求 fix round 在报告新章节里按**本轮终态**重出全部指针；报告是 git-ignored 的 SDD 工件，漂了由控制方直接改文本，不开轮。
+58. **改计划 markdown 时，代码围栏的配对是给 `task-brief` 用的**：该脚本的 awk 按每行 `^``` ` 翻一个 `infence` 标志，围栏总数一旦变**奇数**，后续所有 `### Task N` 都被判成「在代码块里」，于是不再切边界 —— 今天插了一段带闭合围栏的散文，Task 5 简报直接暴涨到 1333 行（一路吃到文件尾），Task 6 报 `exit 3 / no heading matching`。改完计划先 `grep -c '^```' PLAN` 验偶数，再生成简报；简报行数暴涨/为 0 就是这个信号。
+59. **「模块声明归下一个任务」是计划级陷阱**：Rust 里没被 `mod` 声明的文件不参与编译，本任务的 RED 期望、`N passed`、全量条数、`cargo clippy --lib` 全都不会成立，而且失败形态是**静默的**（`cargo test --lib` 一声不响停在旧数）。补上声明后又有第二层：`cargo clippy --lib` 不带 `--tests`，`cfg(test)` 关闭时该模块每个 pub 项都没有 caller，会被逐条判 `dead_code`（`%TEMP%\dcprobe` 用 `rustc --crate-type lib --deny warnings` 实测复现）—— 所以必须同形开一块**带具名回收点**的 `#![allow(dead_code)]`，并把回收门扩成一次扫所有豁免所在文件。
 
 ---
 
@@ -250,9 +252,9 @@ tail -40 ../.superpowers/sdd/2026-10-07-m4-unified-search/progress.md   # 账本
 | M4 spec（决策权威） | `docs/superpowers/specs/2026-10-07-m4-unified-search-design.md` | 决策表 `20`；契约 `32`；排序与截断 `87`；预览通路 `95`；测试策略 `138`；真机与性能 `161`；**不在本轮 `171`**；风险 `194`（共 199 行） |
 | M4 实施计划（执行权威） | `docs/superpowers/plans/2026-10-07-m4-unified-search.md` | Global Constraints `13`；**已实测事实 `37`、条数链 `58`**；文件结构 `62`；T1–T9 `88/240/324/536/1003/1498/1637/1909/2227`；**完成判据 `2293`**；本轮不做 `2306`（共 2314 行；行号随计划修订漂动，用 `grep -n "^### Task"` 现取） |
 | SDD 账本（恢复地图） | `.superpowers/sdd/2026-10-07-m4-unified-search/progress.md` | 预检 10 行表 `9-20`；红线 `24`；T1/T2/T3 complete `55/67/81`；**T4 裁定节 `96`、T4 complete `110`、计划修订 `124`、暂停点 `129`**（共 135 行，`grep -n "^## " progress.md \| tail -4` 现取） |
-| 下一个任务的简报 | `.superpowers/sdd/2026-10-07-m4-unified-search/task-5-brief.md` | 495 行，已按 `cdc5163` 的计划文本重切，期望 134 |
+| 下一个任务的简报 | `.superpowers/sdd/2026-10-07-m4-unified-search/task-5-brief.md` | 513 行（10-08 恢复后按「T5 派发前预检」修订重切），期望 134 |
 | T1–T4 实现者报告 | 同目录 `task-{1,2,3,4}-report.md` | T4 报告 391 行，尾部 §八 是 fix round 1 的追加与全部变异实测记录 |
 | 评审包 | 同目录 `review-*.diff` | 6 份，命名即 BASE..HEAD |
 | 里程碑与证据史 | `docs/开发进度.md` | 里程碑表 `5-20`（**M4 行 `13` 还写「未开始」，T9 收口时改**）；环境结论 `22-45`；M3 验收证据 `70`；M3 已知缺口 `107-112`（**归属待按 spec §十 更正**） |
 | 技术方案（更早的权威） | `docs/技术方案.md` | §3.4「不做假的归一化」是 D2/D3 的依据 |
-| 上一版交接（10-08 11:33 增量刷新） | `git show 9108c47:docs/HANDOFF.md` | 51 条坑、且 §1–§4 仍是 10-07 的「未开始」状态；本文件已含那 51 条并按今天扩到 57 条 |
+| 上一版交接（10-08 11:33 增量刷新） | `git show 9108c47:docs/HANDOFF.md` | 51 条坑、且 §1–§4 仍是 10-07 的「未开始」状态；本文件已含那 51 条并扩到 59 条 |

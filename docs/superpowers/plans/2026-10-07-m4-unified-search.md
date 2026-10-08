@@ -69,7 +69,7 @@ src-tauri/src/
   index_store.rs   [改] indexed_project_count()；摘要串契约注释更正；一条折叠的集成断言
   search.rs        [改] Cluster<T> / ClusterSection<C> / SearchBundle + unified_bundle()
   doc_preview.rs   [新] 预览：查库 → 抽原文（包 panic 边界）→ 定位 → 窗口化 → UTF-16 range
-  lib.rs           [改] mod doc_preview + 两条命令 + generate_handler（39 → 41）
+  lib.rs           [改] `mod doc_preview;`（归 Task 5，否则本文件的测试根本不参与编译）+ 两条命令 + generate_handler（39 → 41，归 Task 6）
 
 src/
   types/search.ts               [改] SearchBundle / Cluster<T> / ClusterSection<T> / DocPreview
@@ -1003,11 +1003,14 @@ Expected: 两条 `exit=0` 且 0 条 warning；提交只含这两个文件。
 ### Task 5: `doc_preview.rs` —— 重抽原文 + UTF-16 码元高亮区间
 
 **Files:**
-- Create: `src-tauri/src/doc_preview.rs`（模块声明与命令归 Task 6，本任务只交付可单测的库层函数）
+- Create: `src-tauri/src/doc_preview.rs`（两条命令归 Task 6，本任务只交付可单测的库层函数）
+- Modify: `src-tauri/src/lib.rs`（`mod` 区 `:1-11` 按字母序加一行 `mod doc_preview;`，落在 `mod db;` 与 `mod error;` 之间。**这一行必须在本任务落地**：没有它 `doc_preview.rs` 不属于这个 crate，Step 2 期望的那条编译错误、Step 3 的 `14 passed` 与 `134 passed` 全都不可达，`cargo test --lib` 会一声不响地停在 120）
 - Modify: `src-tauri/Cargo.toml:46`（注释里的 `index_job::panic_to_err` 改成 `extract::panic_to_err`，并把预览这条新通路写进「哪些路径受 panic 边界保护」那句）
 - Modify: `src-tauri/src/extract.rs:577` 附近（`release_profile_does_not_abort_so_panic_guards_work` 的 doc 里「以及 `index_job` 的两道边界」改成指认搬迁后的真实归属）
 
-这两处 Modify 是 **Task 2 评审登记的 plan-mandated 范围遗漏**（`f72a5c8` 把边界助手搬到 `extract.rs` 后，`Cargo.toml:46` 的注释字面悬空指向一个不存在的符号，而 Task 2 的 grep 门只扫 `src/`、提交范围只有两个文件，够不着它）。落在本任务而不是回头补 Task 2，是因为本任务正是**第三条**按 path 调用抽取器的通路：那两条注释说的「哪些路径有边界兜着」必须在本任务之后才为真，改在别处都还要再改一次。两处都是纯注释、零行为回归，**不许**顺手动同文件里的任何代码。
+`Cargo.toml` 与 `extract.rs` 这两处 Modify 是 **Task 2 评审登记的 plan-mandated 范围遗漏**（`f72a5c8` 把边界助手搬到 `extract.rs` 后，`Cargo.toml:46` 的注释字面悬空指向一个不存在的符号，而 Task 2 的 grep 门只扫 `src/`、提交范围只有两个文件，够不着它）。落在本任务而不是回头补 Task 2，是因为本任务正是**第三条**按 path 调用抽取器的通路：那两条注释说的「哪些路径有边界兜着」必须在本任务之后才为真，改在别处都还要再改一次。两处都是纯注释、零行为回归，**不许**顺手动同文件里的任何代码。
+
+`lib.rs` 那一行是**控制方派发前预检补进来的计划修订**（原计划把模块声明整条划给 Task 6，与本任务自己的 RED 期望和条数门禁冲突）。它的连带后果是 `cargo clippy --lib -- -D warnings`：该命令不带 `--tests`，即 `cfg(test)` 关闭，此时 `#[cfg(test)] mod tests` 不参与编译，本格里每个 `pub` 项（含 `PreviewRow`/`DocPreview` 的字段）在 lib 目标里都没有 caller，rustc 会逐条报 `dead_code`（控制方用 `rustc --crate-type lib --deny warnings` 在最小夹具上实测过）。所以 Step 1 的文件头要带一行**具名回收点**的模块级豁免，形态与 Task 4 给 `search::unified_bundle` 开的那行同形，由 Task 6 的 Step 3 grep 门回收。
 
 **Interfaces:**
 - Consumes：Task 1 的 `tokenize::query_terms`（**预览的词只从这一处拿**，spec §五.4）、Task 2 的 `extract::panic_to_err`（`pub(crate) fn panic_to_err<T, F: FnOnce() -> T>(f: F, what: &str) -> AppResult<T>`）、既有 `extract::extract_text`（`pub fn extract_text(path: &Path) -> AppResult<String>`）、`index_store::write_doc` + `DocOutcome` + `ScannedFile`（只用于造库里的行）。
@@ -1020,20 +1023,33 @@ Expected: 两条 `exit=0` 且 0 条 warning；提交只含这两个文件。
 
 **两条算术不变量**（spec §三、§五.5）：`ranges` 用 **UTF-16 码元**下标（前端 `text.slice` 零换算），所以必须有「不是字节偏移」和「BMP 外字符记 2 码元」两条测试各自钉住；窗口分隔串 `PREVIEW_GAP` 留在 `text` 里，`ranges` 按构造不跨它。
 
-- [ ] **Step 1: 写文件头与常量、DTO（先让红测试能编译到函数名）**
+- [ ] **Step 1: 登记模块，并写文件头与常量、DTO（先让红测试能编译到函数名）**
+
+`src-tauri/src/lib.rs` 的 `mod` 区加一行（按字母序落在 `mod db;` 与 `mod error;` 之间）：
+
+```rust
+mod doc_preview;
+```
+
+`src-tauri/src/doc_preview.rs` 的文件头：
 
 ```rust
 //! 点开正文命中后的原文预览：查库拿路径 → 锁外重抽原文 → 在原文上定位 → 窗口化 → 码元区间。
 //!
 //! 两条红线在这一格里：
-//! 1. **本模块不含任何 `File::open`**，读盘只经 `extract::extract_text`（同一条扩展名分派表、
+//! 1. **本模块不自己开文件读盘**，读盘只经 `extract::extract_text`（同一条扩展名分派表、
 //!    同一套 chardetng + encoding_rs）。这样「索引与检索对磁盘的唯一动作是读」仍只需 grep
 //!    `extract.rs` 一处（今天只有 `:44` 与 `:130`）。
 //! 2. **抽取必须包在 panic 边界里**（`extract::panic_to_err`）。预览跑在 IPC 命令线程上，
 //!    没有边界的话，一份畸形 docx 被用户在首屏点开就当场终止应用进程。
 
-use std::path::{Path, PathBuf};
+// 临时豁免，Task 6 落地 `doc_preview` IPC 时必须删掉这一段（Step 3 有 grep 门守着，与
+// `search::unified_bundle` 在 Task 4 的同形豁免一起回收）：本模块的第一个 caller 在 Task 6，
+// 而 `cargo clippy --lib` 不带 `--tests`，cfg(test) 关闭时下面每个 pub 项都没有 caller，
+// rustc 会逐条判 dead_code。
+#![allow(dead_code)]
 
+use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
@@ -1070,6 +1086,8 @@ pub struct DocPreview {
     pub truncated: bool,
 }
 ```
+
+这一格里两处新东西各有讲究：`#![allow(dead_code)]` 是带具名回收点的临时豁免（Task 6 Step 3 的 grep 门负责回收，形态与 Task 4 给 `search::unified_bundle` 开的那行同形）；而豁免那 4 行注释里**不许**写 Step 5 门要扫的那几个字面量形态 —— 本文件被 `File::open` 那条门扫，把它写进注释就把自己弄红（M4 已登记的坑第 49 条的同一个形状）。同理，文件头第 1 条红线写「本模块不自己开文件读盘」是刻意避开那个字面量的写法，不是漏写，语义与原句一致。
 
 - [ ] **Step 2: 写 14 条红测试**
 
@@ -1460,7 +1478,7 @@ cd src-tauri && grep -rn "File::open\|std::fs::read\|read_to_string" src/doc_pre
 grep -rn "\.cut(\|cut_for_search" src/doc_preview.rs; echo exit=$?
 ```
 
-Expected: 两条都 `exit=1`（0 命中）。第一条守「预览不含自己的读盘路径，红线仍只需 grep `extract.rs`」；第二条守「词只从 `query_terms` 拿」。
+Expected: 两条都 `exit=1`（0 命中）。第一条守「预览不含自己的读盘路径，红线仍只需 grep `extract.rs`」；第二条守「词只从 `query_terms` 拿」。第一条命中的话先看文件头 —— 注释里出现了那个字面量就是注释写错（Step 1 给的是避开它的写法），**不许**为了让门变绿而把门改成只扫代码行。
 
 - [ ] **Step 6: 两处悬空注释指针更正 + clippy 两道 + 提交**
 
@@ -1487,30 +1505,31 @@ Expected: 两条都 `exit=1`（0 命中）。第一条守「预览不含自己�
 cd src-tauri && cargo clippy --lib -- -D warnings; echo exit=$?
 cargo clippy --lib --all-targets -- -D warnings; echo exit=$?
 grep -rn "index_job::panic_to_err" . --include=*.rs --include=*.toml; echo exit=$?
-git add src-tauri/src/doc_preview.rs src-tauri/Cargo.toml src-tauri/src/extract.rs
+git add src-tauri/src/doc_preview.rs src-tauri/src/lib.rs src-tauri/Cargo.toml src-tauri/src/extract.rs
 git commit -m "feat: M4 原文预览：锁外重抽 + panic 边界 + UTF-16 码元高亮区间"
 ```
 
-Expected: 两条 clippy `exit=0` 且 0 条 warning（`PathBuf` 若最终没用就删掉那一行 import，别留 `unused_imports`）；第三条 grep 是全仓（含 `*.toml`）扫悬空符号，`exit=1`（0 命中）；提交含这三个文件，不多不少。
+Expected: 两条 clippy `exit=0` 且 0 条 warning（`PathBuf` 若最终没用就删掉那一行 import，别留 `unused_imports`）；第三条 grep 是全仓（含 `*.toml`）扫悬空符号，`exit=1`（0 命中）；提交含这四个文件，不多不少。
 
 ---
 
 ### Task 6: 两条 IPC 命令接线（`search_all` / `doc_preview`）
 
 **Files:**
-- Modify: `src-tauri/src/lib.rs`（`mod` 区 `:1-11` 加一行；`search_local`（`:255-259`）之后加 `search_all`；`search_docs`（`:536-543`）之后加 `doc_preview`；`generate_handler!`（`:562-602`）末尾加两条）
+- Modify: `src-tauri/src/lib.rs`（`search_local`（`:255-259`）之后加 `search_all`；`search_docs`（`:536-543`）之后加 `doc_preview`；`generate_handler!`（`:562-602`）末尾加两条。`mod doc_preview;` 那一行**已由 Task 5 落地**，本任务只核它在位，不要重复加）
+- Modify: `src-tauri/src/doc_preview.rs`（**只删 Task 5 为「caller 还不存在」开的那块临时豁免**：以 `// 临时豁免，Task 6 落地` 开头的 4 行注释，加上紧跟它的那行 `#![allow(dead_code)]`，共 5 行（它们前后各留一个空行，别把空行也删掉）。除这 5 行之外的任何字节都不许变，尤其不许动文件头那条红线注释的语义。）
 - Modify: `src-tauri/src/search.rs`（**删掉 Task 4 为「caller 还不存在」开的那行临时豁免**：`unified_bundle` 上方的 `#[allow(dead_code)]`（Task 4 落地时在 `:290`，行号会漂，按「紧贴 `pub fn unified_bundle` 的那行 `#[allow(dead_code)]`」定位）。它的注释里写死了「第一个 caller 在 Task 6 的 `search_all` IPC，该任务落地时必须删掉本行」——本任务就是那个落地点，不删就永久化（M3 的豁免账教训：临时豁免必须有具名回收点与一条 grep 门）。除删这行和 Step 4 点名的四处**注释/断言**之外，不许动 `search.rs` 的任何表达式。）
 - Modify: `src-tauri/src/index_store.rs`（**只改注释**：`query_guards_and_limit_pass_straight_through` 的头注释里那条「Task 10 的 IPC 写 `limit.unwrap_or(50).clamp(1, 200)`」旧指针，落点在 `:671` 附近，按注释文本定位；见 Step 4）
+
+M4 在这一格只有两个 `#[allow(dead_code)]`（`search.rs` 一处、`doc_preview.rs` 一处），两块豁免都由本任务回收，Step 3 的门一次扫两个文件 —— 少收一个就是永久豁免。
 
 **Interfaces:**
 - Consumes：Task 4 的 `search::unified_bundle`、Task 5 的 `doc_preview::{row_for_preview, render_preview, DocPreview}`、既有 `db(&state)`（`lib.rs` 内取锁的助手，毒锁回 `db_poisoned`）。
 - Produces：前端可调用的命令名 `search_all`（入参 `{ query }`）与 `doc_preview`（入参 `{ docId, query }`，camelCase → snake_case 由 Tauri 映射，`removeDir`/`ledgerList` 已是先例）。
 
-- [ ] **Step 1: 加模块声明与两条命令**
+- [ ] **Step 1: 加两条命令**
 
-```rust
-mod doc_preview;
-```
+先确认 `src-tauri/src/lib.rs` 的 `mod` 区里 `mod doc_preview;` 已在位（Task 5 Step 1 落的地），本任务不重复加它。以下这一格才是本步的产出：
 
 ```rust
 /// 首屏统一检索：一次 IPC 带回三段与三个截断计数。这一格只持锁查库，不碰磁盘。
@@ -1555,10 +1574,10 @@ fn doc_preview(
 cd src-tauri && cargo test --lib; echo exit=$?
 cargo clippy --lib -- -D warnings; echo exit=$?
 cargo clippy --lib --all-targets -- -D warnings; echo exit=$?
-grep -rn "allow(dead_code)" src/search.rs; echo exit=$?
+grep -rn "allow(dead_code)" src/search.rs src/doc_preview.rs; echo exit=$?
 ```
 
-Expected: `134 passed; 0 failed`（本任务 0 条新单测：命令体只是转发，`unified_bundle` 与 `doc_preview::*` 的逻辑已各自守住）；两条 clippy `exit=0`；第四条 **`exit=1`（0 命中）**——它就是「Task 4 那行临时豁免已被本任务回收」的证据，接线之后 `unified_bundle` 有了真 caller，豁免留着就永远不会有人发现它过期了。
+Expected: `134 passed; 0 failed`（本任务 0 条新单测：命令体只是转发，`unified_bundle` 与 `doc_preview::*` 的逻辑已各自守住）；两条 clippy `exit=0`；第四条 **`exit=1`（0 命中）**——它就是「Task 4 与 Task 5 那两块临时豁免都被本任务回收」的证据，接线之后 `unified_bundle` 与 `doc_preview::*` 都有了真 caller，豁免留着就永远不会有人发现它过期了。两个文件一起扫：只要还剩一处命中，输出里会点名是哪个文件，别把它读成「另一个也快了」。
 
 - [ ] **Step 4: Task 4 定向复审登记的四处文本残留（四处全零行为，本任务不新增测试）**
 
@@ -1628,7 +1647,7 @@ Expected: 第一条列出 handler 里的两行（`mod doc_preview;` 与 `fn doc_
 - [ ] **Step 6: 提交**
 
 ```bash
-git add src-tauri/src/lib.rs src-tauri/src/search.rs src-tauri/src/index_store.rs
+git add src-tauri/src/lib.rs src-tauri/src/search.rs src-tauri/src/doc_preview.rs src-tauri/src/index_store.rs
 git commit -m "feat: M4 索引接线：search_all 与 doc_preview 两条 IPC 命令（后者锁内查库、锁外抽盘）"
 ```
 
