@@ -50,6 +50,7 @@ M4 本轮交付的形状（权威定义在 spec，不要从本文件重述去实
 - **实施计划定稿**（`a44cdac`，2143 行）：`docs/superpowers/plans/2026-10-07-m4-unified-search.md`，9 个任务，每个任务都是「失败测试 → 跑红 → 最小实现 → 跑绿 → 变异取证 → 门禁 → 按名 stage 提交」的可照抄粒度，含 Global Constraints 与「已实测事实」表。
 - **计划自评审当场修掉的 5 类缺陷**（这些正是下一个实现者会踩的，已写进正文）：
   1. 条数链第一版凭累加写成 109/120/134 —— 改成逐 target 实数：104 → T1 106 → T2 106 → T3 108 → T4 119 → T5 133 → T6 133 → T7 Rust 仍 133 + `node --test` pass 8。
+     **2026-10-08 更正**：Task 4 首轮评审查出「台账段三段的三分之一零守护」，补了第 11 条测试，链改为 …T4 **120** → T5 **134** → T6 **134** → T7 Rust 仍 **134** + `node --test` pass 8（终态 search 由 19 变 **20**，合计 **134**）。教训写进了账本：**凡改一条链，要连同下游每个写死的 Expected 一起改**，计划正文与本文档都算。
   2. Task 5 测试夹具为绕 `&'static str` 快 invent 了一个 `static_str` 助手 —— 统一成 `fn body(text: String)`，9 个调用点全部 `.to_owned()`。
   3. Task 8 的预览对话框把「打开项目」写成 `params={{ projectId: data.docId }}` —— **错**：`docId` 是文档行 id。改成 `Props` 加 `projectId: string | null`、由 `search-bundle.tsx` 从 `cluster.projectId` 传入（不为一个按钮去改 Task 4/5 已定稿的线格式和它们的 10+14 条测试）。同时把 `React.ReactNode` 补成 `import { type ReactNode }`、删掉本项目路由不用的 `search={undefined}`、两个 `DialogFooter` 并成一个。
   4. Task 7 承诺 `pass 7` 但写出来的文件有 8 条测试 —— 5 处 + 链数一起改成 `pass 8`。
@@ -60,12 +61,14 @@ M4 本轮交付的形状（权威定义在 spec，不要从本文件重述去实
 
 ## 3. 当前卡在哪
 
-**没有被技术问题卡住** —— 是被要求暂停在「Task 1 实现者尚未派发」这一步。恢复时不需要重新理解上下文，账本和文件都在。
+**2026-10-08 更新（原文写于 10-07 暂停点，进度已往前走，别让下一个读者按旧状态行事）**：Task 1 / 2 / 3 已完整收口（实现 → 双 verdict 评审 → 修复轮 → 定向复审 → 账本 `Task N: complete`），Task 4 首轮实现已提交（`899b58c`）、评审给了 Spec ✅ / Needs fixes，正在跑第 1 轮整改。**没有被技术问题卡住**；唯一需要人点头的两件事是 ① 「结果被取数上限截过」要不要让用户看得见（`docsCapped` 线格式位，控制方本轮的裁定是不加、只在注释与文案措辞上讲实话），② Task 9 的真机点击（原生目录对话框、`revealItemInDir`、窗口 confirm）只能人做。
+
+（以下 10-07 原文保留作历史。）**没有被技术问题卡住** —— 是被要求暂停在「Task 1 实现者尚未派发」这一步。恢复时不需要重新理解上下文，账本和文件都在。
 
 三个明确的尾巴，都不影响正确性、恢复后顺手处理：
 
-1. **任务清单只建到 #34 / #35**（M4 Task 1、Task 2）。Task 3–9 的 todo 还没建。恢复地图是账本不是 todo，所以这不是阻塞项；但要么补齐、要么就只靠账本，别混着记。
-2. **Task 2–9 的简报未生成**。这是刻意的：简报必须在派发前现生成，提前批量导出后一旦计划文本被修订就过期（`task-brief` 是按任务正文从计划里切的）。
+1. ~~**任务清单只建到 #34 / #35**~~（10-08 已补齐到 Task 9；#34/#35 之后是 #36–#42）。Task 3–9 的 todo 还没建。恢复地图是账本不是 todo，所以这不是阻塞项；但要么补齐、要么就只靠账本，别混着记。
+2. ~~**Task 2–9 的简报未生成**~~（10-08：T2–T6 已按需生成；**计划文本一旦修订就要用 `task-brief` 重新切那一条**，Task 4 就是这么在整改前重生成过一次 467 行的简报）。这是刻意的：简报必须在派发前现生成，提前批量导出后一旦计划文本被修订就过期（`task-brief` 是按任务正文从计划里切的）。
 3. **归属口径不一致（这条值得优先记住）**：`docs/开发进度.md` 的 M3 已知缺口第 6–11 条（`107-112` 行）以及 `125` 行都写着「归 M4」，但 spec §十已把同一批（`m-3` 措辞、`m-4` emit 重复终态、`m-5` 外层 `report_failure` 无再上兜底、`m-6` 裸字符串比较判改指、`set_root_dir` 的 `DELETE`+`INSERT` 窄竞态、`ON DELETE CASCADE` 另一半）收回 **M5 / 待真机**。M4 计划里**没有**这些活。下一个读者若按 `开发进度.md` 去 M4 找，会找不到。**Task 9 文档收口时必须把 `docs/开发进度.md` 那几行的归属改成与 spec §十一致**，否则这笔账会在两个文档之间反复弹。
 
 ---
@@ -77,7 +80,7 @@ M4 本轮交付的形状（权威定义在 spec，不要从本文件重述去实
 ```bash
 cd /e/zero/demo/2026/project-files-manage
 git branch --show-current          # 应为 feat/m4-unified-search
-git rev-parse HEAD                 # 应为 a44cdac（尚未写 M4 代码）
+git rev-parse HEAD                 # 见账本最后一节的提交号；已写完的任务都带 `Task N: complete`
 cat .superpowers/sdd/2026-10-07-m4-unified-search/progress.md   # 账本第一行认计划路径 = 这张图没串线
 # 账本里没有 `Task N: complete` 的任务就是没做过的，从第一个没做过的接着派
 bash "C:/Users/zero/.qoder/plugins/cache/qoder-marketplace/superpowers/6.3.0/skills/subagent-driven-development/scripts/task-brief" \
@@ -93,10 +96,10 @@ bash "C:/Users/zero/.qoder/plugins/cache/qoder-marketplace/superpowers/6.3.0/ski
 | T1 | `tokenize.rs`：查询侧唯一切词 `query_terms` + `MAX_QUERY_CHARS` | 106 passed |
 | T2 | `panic_to_err` 从 `index_job.rs` 提到 `extract.rs` 做 `pub(crate)` | 106（extract +1、index_job −1） |
 | T3 | `clean_snippet` 的 `A B AB` 三连折叠 | 108 |
-| T4 | `search::unified_bundle` 三段聚合 + 段内聚簇 + 三个截断计数；`index_store::indexed_project_count` | 119 |
-| T5 | 新模块 `doc_preview.rs`：重抽原文 + 窗口拼接 + UTF-16 码元区间 | 133 |
-| T6 | 两条 IPC 命令接线（锁内查库 / 锁内取行、锁外抽盘） | 133，handler 39 → **41** |
-| T7 | 前端类型 + `api.ts` + 纯逻辑 `lib/search-order.ts` + `tests/*.test.ts` | Rust 仍 133、`node --test` **pass 8** |
+| T4 | `search::unified_bundle` 三段聚合 + 段内聚簇 + 三个截断计数；`index_store::indexed_project_count` | **120**（评审整改后 search 11+9=20） |
+| T5 | 新模块 `doc_preview.rs`：重抽原文 + 窗口拼接 + UTF-16 码元区间 | **134** |
+| T6 | 两条 IPC 命令接线（锁内查库 / 锁内取行、锁外抽盘） | **134**，handler 39 → **41**；并回收 Task 4 那行 `#[allow(dead_code)]`（有 grep 门禁） |
+| T7 | 前端类型 + `api.ts` + 纯逻辑 `lib/search-order.ts` + `tests/*.test.ts` | Rust 仍 **134**、`node --test` **pass 8** |
 | T8 | store 的 seq 守卫、`doc-preview-dialog.tsx`、`search-bundle.tsx`、`pages/search.tsx` 薄壳 | `npm run build` exit 0，不新增单测 |
 | T9 | 真机验收 + D6 上限实测裁定 + 文档收口 | 见 4.4 |
 
@@ -104,7 +107,7 @@ bash "C:/Users/zero/.qoder/plugins/cache/qoder-marketplace/superpowers/6.3.0/ski
 
 ### 4.3 完成判据（计划里的原话，可逐条核对）
 
-- `cargo test --lib` → **133 passed; 0 failed**（分模块：tokenize 9 / extract 15 / index_job 12 / index_store 15 / search 19 / doc_preview 14 / db 8 / index_scan 10 / ledger 12 / project 10 / vault 9）
+- `cargo test --lib` → **134 passed; 0 failed**（分模块：tokenize 9 / extract 15 / index_job 12 / index_store 15 / search 20 / doc_preview 14 / db 8 / index_scan 10 / ledger 12 / project 10 / vault 9）
 - `node --test "tests/**/*.test.ts"` → **pass 8 / fail 0 / exit=0**；`npm test` 与 `npm run build` 两条 exit 0
 - 两道 clippy（`--lib -- -D warnings`、`--lib --all-targets -- -D warnings`）都 exit 0 且输出里 0 条 warning
 - 四条结构 grep：`chars().count() > 128` → exit 1；`index_job::panic_to_err` → exit 1；`\.cut\(` 在 `tokenize.rs` 恰好 1 行；`File::open` 在 `doc_preview.rs` → exit 1
@@ -191,6 +194,12 @@ bash "C:/Users/zero/.qoder/plugins/cache/qoder-marketplace/superpowers/6.3.0/ski
 43. **评审包给「代码面」并声明 diff 是地图**，评审提问固定包含一条「跨模块不变量有没有被破坏」。
 44. **裁定评审发现时自己复现最便宜的那个实验**；数据生命周期类问题走成因修法，不要推到下一个里程碑只压症状；整改派发只做高价值 Minor。
 45. 本会话一个平台事实：`Agent` 工具**不暴露 model 参数**，所以「为子代理显式选模型」这条做不到，一律继承会话模型 —— 已在账本口径里记为 inherited，不要假装做过分级。
+46. **变异还原用的备份必须是「本轮编辑之后」的那份**。拿「开工前」备份 `cp` 回去会把自己本轮刚做的编辑一起回滚，而且除了 CR 计数（338→332）表面上完全看不出来。每次还原后 `diff -q` + 数 CR。
+47. **`cargo test --lib <模块名>` 的聚合行不是模块真数**：筛选走全路径子串匹配，`search` 会连 `extract::tests::real_pdf_yields_searchable_chinese_text` 这类同名巧合一起算进去（首轮报出 22 passed，模块真数是 19）。数模块条数要从全量输出按 `^test <模块>::tests::` 行首数，或 `-- --list`。
+48. **`#[allow(dead_code)]` 这类临时豁免必须在本里程碑内被一条 grep 门禁回收**（M4 的形态：Task 6 落地后 `grep -rn "allow(dead_code)" src/search.rs` 期望 exit=1）。只写在注释里的「Task N 记得删」等于没人负责。
+49. **注释与测试文本也算进 grep 门禁的命中范围**：计划里给实现者的示例注释若含 `unwrap_or(50)`、`, 200)` 这类字面量，会直接把自己的门禁弄红。指针一律写「函数名 + 行号」，不写被门扫描的字面量形态。
+50. **数字链一改就要全链同步**：补一条测试 = 该模块 +1、该任务终态 +1、后续每个任务的 Expected、完成判据、交接文档表格与分模块清单全部跟着改。控制方用 `grep -n "旧数"` 收口，别指望实现者发现。
+51. **随机 id 让「删除排序键」这种变异变成抛硬币**：`project::create_project` 用 UUID v4（`project.rs:110`），并列簇在去掉名字键后按随机 id 序排，实测 10 次只红 2 次。做排序键的变异取证要用**反转比较方向**，不要用删行；确实无法守护的键（如第三级 id）就写成「预期不红」的取证条目并登记有名缺口，别伪造确定性。
 
 ---
 
@@ -199,7 +208,7 @@ bash "C:/Users/zero/.qoder/plugins/cache/qoder-marketplace/superpowers/6.3.0/ski
 | 东西 | 路径 | 关键位置 |
 |---|---|---|
 | M4 spec（决策权威） | `docs/superpowers/specs/2026-10-07-m4-unified-search-design.md` | 决策表 `24-30`；契约 `32`；排序与截断 `87`；预览通路 `95`；测试策略 `138`；真机与性能 `161`；**不在本轮 `171`**；风险 `194` |
-| M4 实施计划（执行权威） | `docs/superpowers/plans/2026-10-07-m4-unified-search.md` | Global Constraints `13`；**已实测事实 `37`、条数链 `58`**；文件结构 `60`；T1–T9 `86/238/322/502/914/1385/1465/1737/2055`；**完成判据 `2121`**；本轮不做 `2134` |
+| M4 实施计划（执行权威） | `docs/superpowers/plans/2026-10-07-m4-unified-search.md` | Global Constraints `13`；**已实测事实 `37`、条数链 `58`**；文件结构 `62`；T1–T9 `88/240/324/536/1003/1498/1580/1852/2170`；**完成判据 `2236`**；本轮不做 `2249`（行号随计划修订漂动，用 `grep -n "^### Task"` 现取） |
 | SDD 账本（恢复地图） | `.superpowers/sdd/2026-10-07-m4-unified-search/progress.md` | 预检 10 行表 + 红线 + 进度节 |
 | Task 1 简报 | `.superpowers/sdd/2026-10-07-m4-unified-search/task-1-brief.md` | 152 行，从计划正文切的 |
 | 里程碑与证据史 | `docs/开发进度.md` | 里程碑表 `8-20`；环境结论 `22-45`；M3 验收证据 `70`；M3 已知缺口 `107-112`（**归属待按 spec §十 更正**） |
