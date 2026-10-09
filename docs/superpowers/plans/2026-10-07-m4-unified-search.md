@@ -2442,7 +2442,9 @@ cd "$APPDATA" && ls -la dev.zero.pfm 2>/dev/null && stat -c '%n %s %Y' dev.zero.
 
 **这一格的实测读数（10-09）**：并发发「`search_all` + `db_status`」⇒ `searchAllMs = 612`、`dbStatusMs = 620`、**`dbReturnedFirst = false`** ⇒ `db_status` 被顶到 `search_all` 后面，**sync 的 `search_all` 确实在占消息泵**（对照：同样并发下 async 的 `doc_preview` 期间 `db_status` 3 ms 就回了）。但写死的判据是「`search_all` > 800 ms **且** `db_status` 被推到后面」，本轮稳态没越过 800 ms ⇒ **判据不成立，不在本轮加 `async`**。登记为终审的独立 finding：议题写成「首屏每次键入都会短冻消息泵约 0.6–0.8 s，是否值得给 `search_all` 也加 `async`（加了之后前端 `seq` 守卫就从'防御性'变成'正在承重'）」，而不是「它超过 800 ms 了」。
 
-- [ ] **Step 4: 清场 + 文档收口**
+- [x] **Step 4: 清场 + 文档收口（10-09 完成）**
+
+**执行记录**：清场 —— dev 进程按 PID 逐个核身份后停掉（`node.exe` 占 1520、`msedgewebview2.exe` 占 9222、`project-files-manage.exe`），复查两端口无监听；沙盒三处删净（`%APPDATA%\dev.zero.pfm.m4test`、`%TEMP%\pfm-m4-fix`、`%TEMP%\pfm-m4-scale` 49,000 份 / 211.7 MB）。真实目录 `stat -c '%n %s %Y'` 三行与 Step 1 基线**逐字一致** ⇒ 只读红线守住。文档收口 —— `docs/开发进度.md` 的 M4 行改为 ✅、新增「M4 验收证据」整节（门禁 / 两条命令 / 八格真机读数 / D6 裁定与两条诚实附注 / 需求方三下点验 / **11 条**没能自动验证清单），并把 M3 已知缺口第 6–11 条与 m2 另一半的**归属按 spec §十 改对**（第 6 条其实已被 M4 做掉）。
 
 ```bash
 # 1) 关掉 dev 进程；2) 删一次性沙盒：`%APPDATA%\dev.zero.pfm.m4test\`（沙盒库，Step 2 说的就是它）
