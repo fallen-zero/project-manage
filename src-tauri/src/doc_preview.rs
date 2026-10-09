@@ -4,8 +4,18 @@
 //! 1. **本模块不自己开文件读盘**，读盘只经 `extract::extract_text`（同一条扩展名分派表、
 //!    同一套 chardetng + encoding_rs）。这样「索引与检索对磁盘的唯一动作是读」仍只需 grep
 //!    `extract.rs` 一处（今天只有 `:44` 与 `:130`）。
-//! 2. **抽取必须包在 panic 边界里**（`extract::panic_to_err`）。预览跑在 IPC 命令线程上，
-//!    没有边界的话，一份畸形 docx 被用户在首屏点开就当场终止应用进程。
+//! 2. **抽取必须包在 panic 边界里**（`extract::panic_to_err`）。预览自 T6 起是 `async` 形态，命令体不在
+//!    IPC 所在线程上，而是跑在 `async_runtime::spawn` 投出去的 tokio worker 上。所以没有这道边界时，
+//!    panic 不再终止进程，而是让那一次 `invoke` **永不返回**：`tauri-2.12.0/src/ipc/mod.rs` 的
+//!    `respond_async_serialized_inner` 先 `task.await` 再 `return_result`，panic 时后半截根本走不到，
+//!    callback 与 error 一个都不发，前端的 `await` 一直挂着；本仓没装 panic 钩子（那条「钩子零命中」的
+//!    grep 门不许被这句注释打红，所以这里刻意不写它的字面量），界面上连一条提示都没有，而 `main.rs` 的
+//!    `windows_subsystem` 又让 release 包连 stderr 都看不见。
+//!    这道边界包的是**抽取器**那半段，不含 `row_for_preview` 那半段（查库在 `panic_to_err` 之外）：
+//!    真在那半段 panic 的话 tokio 只把它吞成 `JoinError`，而 panic 穿过 `Mutex<Connection>` 的 guard
+//!    会把锁打成 poisoned ⇒ 此后每一条 IPC 都回 `db_poisoned`。今天 rusqlite 那条路径只回 `Err` 不 panic，
+//!    所以它是暴露面而非缺陷；别把这句读成「整条命令体都在边界内」，也别顺手把查库那半塞进
+//!    `panic_to_err`（那会得到一个语义错的 `extract_failed`）。
 
 use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -291,6 +301,15 @@ mod tests {
         assert_eq!(utf16_slice(&p.text, &p.ranges[0]), "验收");
         assert_eq!(p.doc_id, "d1");
         assert!(!p.truncated, "正文短到一扇窗装得下时不该说自己是截断的");
+        // 线格式（终审 I-2）：六个 `pub` 字段 + `rename_all = "camelCase"` 就是前端拿到的键集合。
+        // `invoke<DocPreview>` 是类型断言不是校验，前后端零编译期耦合 ⇒ 任一字段改名只有这里会红。
+        // 形状照 `search.rs` 的 `bundle_wire_format_is_camel_case`，键数从 7 换成 6。
+        let obj = serde_json::to_value(&p).unwrap().as_object().unwrap().clone();
+        for key in ["docId", "path", "projectName", "text", "ranges", "truncated"] {
+            assert!(obj.contains_key(key), "缺 {key}：{:?}", obj.keys().collect::<Vec<_>>());
+        }
+        assert!(!obj.contains_key("doc_id"), "snake_case 漏到线上就是前端静默 undefined 的开始");
+        assert_eq!(obj.len(), 6, "DocPreview 的键集合就是这六个，多一个都要红");
     }
 
     /// 钉「不是字节偏移」：中文一处就翻 3 倍，前端 slice 会整段错位。
@@ -352,6 +371,20 @@ mod tests {
         assert!(!p.truncated, "相接的两处命中该并成一扇，窗数没超上限不该截断");
         assert!(!p.text.contains(PREVIEW_GAP), "两窗相接还分开拼就会多出一个假省略号");
         assert_eq!(p.text, text);
+
+        // 同一格再钉一条**中带**（两处命中的间距 6000，落在「一个半宽 ~ 两个半宽」那条带里）。
+        // 上面那条只钉住相接（间距 8000 ⇒ 第二扇窗的左沿 `lo` 恰等于上一扇右沿），重叠 0 个 char，
+        // 所以「正文吐两遍」那半个失效形态它抓不到。中带这里 `lo = 2002 < 4002`，两扇窗真的重叠
+        // 2000 char：并窗判据一旦从新窗**左沿**退回命中**起点**，这里就会拼成
+        // `[0,4002] + PREVIEW_GAP + [2002,6004]` —— 多一个假 `⋯` 又把 2002..4002 那段吐两遍，
+        // 正是 Task 5 首轮评审 Important-1 的原始失效形态。两条断言各自守一半。
+        let middle = format!("验收{}验收", "字".repeat(6_000));
+        let m = render_preview_with("d1", &row_for("C:/x/a.docx"), "验收", body(middle.clone())).unwrap();
+        assert_eq!(middle.chars().count(), 6_004, "中带夹具的间距算错了就退化成单命中");
+        assert_eq!(m.ranges, vec![(0, 2), (6_002, 6_004)], "间距 6000 < 两个半宽，两处该并进同一扇窗");
+        assert!(!m.truncated, "并成一扇、窗数没超上限，不该说截断");
+        assert!(!m.text.contains(PREVIEW_GAP), "重叠带分开拼就是假省略号");
+        assert_eq!(m.text, middle, "重叠带分开拼还会把中间那段正文吐两遍");
     }
 
     #[test]

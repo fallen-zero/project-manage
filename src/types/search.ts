@@ -23,9 +23,6 @@ export const SOURCE_LABELS: Record<HitSource, string> = {
   note: "备注台账",
 };
 
-// 分组顺序固定，M4 要把文件正文结果插进来时改这里即可。
-export const SOURCE_ORDER: HitSource[] = ["project", "env", "credential", "server", "link", "note"];
-
 // —— M4 统一检索的线格式，与 Rust 侧 search.rs / doc_preview.rs 逐字段对应（serde camelCase）。
 
 export interface Cluster<T> {

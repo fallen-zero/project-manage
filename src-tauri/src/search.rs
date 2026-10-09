@@ -3,8 +3,9 @@
 //! 密文列（`*_cipher` / `*_nonce`）根本不出现在 SQL 里，所以「用密码去搜索不到」
 //! 是结构性的，而不是查出来再过滤 —— 后者只要漏一处就泄漏。
 //!
-//! 结果是一条扁平列表，每条自带 `source`（哪一类）与 `project_id`（属于哪个项目），
-//! 分组与聚合交给 M4 的首屏结果页做，这里不预先按分数排序：SQL 匹配与 FTS 的 BM25
+//! `field_hits` 自身仍回一条扁平列表，每条带 `source`（哪一类）与 `project_id`（属于哪个项目）；
+//! 分组/聚簇/截断都在本文件的 `unified_bundle` 里做（spec §六 D1 裁定合并与聚合留在 Rust 侧），
+//! 前端只渲染三段、不再自己聚合。这里也不预先按分数排序：SQL 匹配与 FTS 的 BM25
 //! 分数不可比，硬归一化只会造假。
 
 use rusqlite::{params, Connection, Row};
@@ -18,13 +19,15 @@ use crate::tokenize::MAX_QUERY_CHARS;
 const PER_GROUP_LIMIT: i64 = 50;
 
 /// 正文段一次向库取多少条。这是**取数**上限，不是展示上限；展示截断走下面三个数。
-/// 顶对齐 IPC 侧 `search_docs` 的 limit clamp（`lib.rs:542`，那里是边界唯一一次校验），
-/// 让首屏与 `/index` 的「试搜正文」试验台在同一条 SQL 上取数。
+/// 顶对齐 IPC 侧的 limit clamp（`lib.rs` 的 `fn search_docs`，那道 clamp 在命令体内、上界 200，
+/// 是边界唯一一次校验），让首屏与 `/index` 的「试搜正文」试验台在同一条 SQL 上取数。
 ///
 /// 下面三个展示计数只**相对本次取到的样本**：库里命中超过这条取数上限时它们会低报
 /// （排在第 201 位的正文根本没进内存，不计进任何 `hidden`）。M4 的线格式里没有「结果被截过」的位
-/// （spec §三 定死那七个字段，M4 不擅自加），所以诚实性落在两处：本注释 + Task 8 的文案措辞 ——
-/// 要说「本次结果里另有 N 条未展开」，不能说「库里还有 N 条」。
+/// （spec §三 定死那七个字段，M4 不擅自加），所以诚实性落在两处：本注释 + 前端已落地的截断文案
+/// （`search-order.ts` 的 `clusterNote`「还有 N 条未显示」、`bundleToSections` 的
+/// 「另有 N 个项目未显示」与平铺段「还有 N 个项目未显示」）。两处口径一致：这些 N 只相对本次
+/// 取到的样本，**会低报、不会虚报**，所以界面那句话不许被读成「库里还有 N 条」。
 const DOCS_FETCH_LIMIT: i64 = 200;
 /// 段级：一个段最多展示多少个簇。整簇被扔掉的簇数进 `ClusterSection::hidden_clusters`。
 const MAX_CLUSTERS_PER_SECTION: usize = 30;

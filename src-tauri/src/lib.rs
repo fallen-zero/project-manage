@@ -463,7 +463,8 @@ struct IndexOverview {
 fn index_overview(state: State<'_, AppState>) -> AppResult<IndexOverview> {
     // 持锁段：只做库内的读。文件系统探测一条都不放进来 ——
     // `AppState.conn` 是全 crate 唯一那把 `Mutex<Connection>`，`db_status` / `project_list` /
-    // `ledger_list` / `index_docs` / `search_docs` 全排在它后面；而未挂载的 SMB/网络盘上的
+    // `ledger_list` / `index_docs` / `search_docs` 全排在它后面，**排队的时段只是下面那个取锁块
+    // （`let conn = db(&state)?` 到它所属作用域结束）**，出锁后锁就空出来了；而未挂载的 SMB/网络盘上的
     // `Path::is_dir()` 在 Windows 上能阻塞几十秒。持着它去 stat N 个根目录 = 一次界面刷新
     // 卡住整条 IPC（Task 10 评审的 Important 1，代价实测过口径，不是推测）。
     let (opts, targets, counts, has_fts) = {
@@ -478,8 +479,10 @@ fn index_overview(state: State<'_, AppState>) -> AppResult<IndexOverview> {
         (opts, targets, counts, fts5_available(&conn))
     }; // conn 守卫到此离开作用域被 drop，下面再碰文件系统已经不持锁
 
-    // 出锁段：`is_dir()` 可以慢，但已不再排 `Mutex<Connection>`；命令本身仍是 sync，
-    // 所以这段时间消息泵还被它占着，别的 IPC 进不来（Task 6 复审 Important-1 核到的口径）。
+    // 出锁探测段（上面那个取锁块结束后到 `collect()` 之前）：`is_dir()` 可以慢，锁也确实空出来了，
+    // 但命令本身仍是 sync，这段时间消息泵还被它占着 —— **连那些排在上面那块锁后面、此刻已经拿得到锁的
+    // 别的 IPC 也一样进不来**（两条时段各有各的堵法，别把上面那句「全排在它后面」读到这里，
+    // 也别把这句读成持锁段；Task 6 复审 Important-1 核到的口径）。
     let projects = targets
         .into_iter()
         .zip(counts)

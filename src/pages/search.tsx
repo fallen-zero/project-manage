@@ -26,7 +26,7 @@ export function SearchPage() {
         autoFocus
         value={text}
         onChange={(e) => setText(e.target.value)}
-        placeholder="搜项目、网址、账号用途、备注…"
+        placeholder="搜项目档案、信息台账、文档正文…"
         className="h-12 text-base"
       />
 

@@ -50,6 +50,10 @@ export function DocPreviewDialog({ docId, projectId, query, onOpenChange }: Prop
   };
 
   useEffect(() => {
+    // M-8：`notice` 挂在**总是挂载**的组件上（宿主无条件渲染本组件，关窗只卸载 DialogContent），
+    // 而下面两条清理分支原本只碰 `data`/`error` ⇒ 同一结果集里换文档时，上一条「操作失败：…」的红字
+    // 会跟着新文档一起来，甚至在「正在抽原文」的加载窗口里同屏。收口在 effect 最顶，不放分支里。
+    setNotice(null);
     if (!docId) {
       setData(null);
       setError(null);
@@ -83,9 +87,9 @@ export function DocPreviewDialog({ docId, projectId, query, onOpenChange }: Prop
         {!error && data && (
           <p className="text-xs text-muted-foreground">
             {data.ranges.length === 0
-              ? "正文里没有这个词，命中的是文件名。"
+              ? "正文里没有这个词，命中的是文件名或折叠后认不到的词。"
               : data.truncated
-                ? "只显示命中附近的窗口，中间以 ⋯ 分隔。"
+                ? "只显示命中附近的窗口，窗口拼接时多扇之间才以 ⋯ 分隔。"
                 : "整篇已在上面。"}
           </p>
         )}

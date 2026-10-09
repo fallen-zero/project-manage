@@ -272,8 +272,8 @@ fn run_select(conn: &Connection, expr: &str, limit: i64, matched_by: &'static st
 /// 两段用同一个 `query_expression`，即同一套预处理，见 tokenize.rs 的头注释。
 ///
 /// `limit` 原样进 SQL，这里不校验也不补默认值：SQLite 里负数 LIMIT = 不限行、0 = 无行，
-/// clamp 属于调用方的系统边界（`lib.rs:542` 的 `search_docs` 是唯一做过 clamp 的入口，
-/// 首屏那条走 `search::DOCS_FETCH_LIMIT`）。
+/// clamp 属于调用方的系统边界（`lib.rs` 的 `fn search_docs` 是唯一做过 clamp 的入口，
+/// 那道 clamp 在它的命令体内、上界 200；首屏那条走 `search::DOCS_FETCH_LIMIT`）。
 /// 刻意不做第二道校验 —— 本项目只在边界校验一次，两道 clamp 会漂成两个数。
 pub fn doc_hits(conn: &Connection, query: &str, limit: i64) -> AppResult<Vec<DocHit>> {
     let q = query.trim();
@@ -668,8 +668,8 @@ mod tests {
     /// 两条 guard 分支和 limit 的去向。`search.rs` 给自己的同名 guard 留了测试
     /// （断 `invalid_input`），这里补齐，否则「空白查询不扫库」「超长要拒绝」全靠肉眼。
     /// limit 那三条钉的是**现状**不是意图：SQLite 里负数 LIMIT = 不限行、0 = 无行，
-    /// `doc_hits` 不做二次校验，clamp 归调用方边界（`lib.rs:542` 的 `search_docs`，
-    /// 首屏那条走 `search::DOCS_FETCH_LIMIT`）。
+    /// `doc_hits` 不做二次校验，clamp 归调用方边界（`lib.rs` 的 `fn search_docs`，
+    /// 它的 clamp 在命令体内、上界 200；首屏那条走 `search::DOCS_FETCH_LIMIT`）。
     #[test]
     fn query_guards_and_limit_pass_straight_through() {
         let c = seeded_with_docs();
