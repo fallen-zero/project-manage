@@ -2393,7 +2393,7 @@ Expected: `git status --porcelain` 之前先看 `git diff --cached --name-only`�
 - 脚本**只回断言结果**（布尔、条数、`matchedBy`、文案前缀、码元区间长度），**绝不打印抽出的正文或任何解密内容**。
 - 断言失败是 **finding**，不许绕；数字变了照实报，绝不为凑数改测试。
 
-- [ ] **Step 1: 基线快照（真实目录只读证明）**
+- [x] **Step 1: 基线快照（真实目录只读证明）—— 10-09 已拍，清场后逐字复核一致**
 
 ```bash
 cd "$APPDATA" && ls -la dev.zero.pfm 2>/dev/null && stat -c '%n %s %Y' dev.zero.pfm/* 2>/dev/null
@@ -2401,7 +2401,9 @@ cd "$APPDATA" && ls -la dev.zero.pfm 2>/dev/null && stat -c '%n %s %Y' dev.zero.
 
 把输出的三行（文件名/字节数/mtime）记进报告。若目录不存在（本机从没真跑过），就如实登记「真实库不存在，只读红线本轮无从违反」。
 
-- [ ] **Step 2: 种子一个沙盒库并跑通 6 条断言 + 2 格实测**
+**实测**：目录存在，基线三行 `ledger.db 4096 1790732655` / `ledger.db-shm 32768 1790739693` / `ledger.db-wal 399672 1790737509`（已存 `.superpowers/sdd/2026-10-07-m4-unified-search/t9-realdir-baseline.txt`）。沙盒跑完并删净之后复核，**三行逐字相同** ⇒ 只读红线本轮守住。
+
+- [x] **Step 2: 种子一个沙盒库并跑通 6 条断言 + 2 格实测**
 
 （这一节标题原本写「5 条断言」而下面编号到 8 —— 坑 63 在本文件自己身上第四次应验。实际形状是 **6 条断言 + 2 格实测**：第 7、8 条不给通过/失败判据，只给数字与写死的裁定口径，所以不能混进「必须回绿」的清单里。）
 
@@ -2417,15 +2419,28 @@ cd "$APPDATA" && ls -la dev.zero.pfm 2>/dev/null && stat -c '%n %s %Y' dev.zero.
 7. **预览载荷长度（Task 5 复审 Minor-1 的有名缺口，实测而非断言）**：在沙盒 tempdir 里造一份长文（≥ 4 万 char，命中每隔约 8000 char 一个，间距刻意落在合并带 `(4000, 8002]` 内），`invoke("doc_preview", …)` 后**只回三个数字**：`text` 的码元长度、`ranges.len()`、`truncated`。并窗判据在 fix round 1 换成了「新窗左沿」，合并带随之翻倍，`MAX_PREVIEW_WINDOWS` 只封顶窗数不封顶窗长，所以链式合并会把一扇窗拉到接近整篇 —— 这是裁定过并接受的行为（要断开就得让窗相接，那正是 Important-1 的重复段落失效形态），但对话框是否还读得动只有真机看得见。**判据写死**：若单次预览的 `text` 超过 6 万码元且页面渲染明显卡顿或滚动失效，把它登记为终审的独立 finding（讨论「给合并加长度上限 + 上限处宁可多插一个 `⋯`」这条备选路），不在本任务里顺手改算术；不卡就在 `docs/开发进度.md` 记数字收口。
 8. **`async` 的运行时兑现（Task 6 复审 Important-1 裁的那条，全链条上唯一的证据就在这一格）**：光有第 3 条只证明预览能回，不证明它**不占消息泵**。做法：沙盒 tempdir 里造一份足以让抽取慢到肉眼可辨的文件（几百 MB 级纯文本，或页数很多的 PDF，反正只读、跑完删），在页面里**同一时刻**并发发两条：`invoke("doc_preview", {慢的那份})` 与一条便宜的 `invoke("db_status")`，只回两个数字 —— 各自的墙钟毫秒与「`db_status` 是否先返回」。**判据写死**：`db_status` 先回 ⇒ `async` 生效（sync 形态下它必然排在慢命令后面，因为整条 IPC 都在消息泵那一个线程上）；`db_status` 等到 `doc_preview` 之后才回 ⇒ 属性没起作用，登记为终审的独立 finding 并附两个毫秒数。**第三种读数同样是结论，必须记下来，不许当成「这一格没跑出来」跳过**：任何一条**始终不返回**（超时也不回）⇒ 那说明命令体在 spawn 出去的 future 里 panic 或挂死了，而 async 形态下这**不会**终止进程、也**不会**给界面任何提示（`ipc/mod.rs:375-388` 的 `return_result` 排在 `task.await` 之后，panic 时走不到它；本仓没有 `panic::set_hook`）—— 这一格正是 `doc_preview.rs` 那句 panic 边界注释唯一的真机反证，遇到就按终审独立 finding 登记并写清是哪一条没回。这条同时是 `lib.rs` 里 `doc_preview` 那段注释（「锁外抽盘」+「`async` 那一行把命令体挪出 IPC 所在线程」）唯一的真机对账，跑不通就不许在收口文档里说它成立。
 
-- [ ] **Step 3: D6 的实测决定（20/10/10 是不是合适）**
+**Step 2 的实测读数（10-09，沙盒 `dev.zero.pfm.m4test`；入库全部走应用自己的 `project_create` → `project_set_root` → `index_start` 管线，没有手拼分词、没有裸写 SQL）**
 
-沙盒里灌一份**贴近真实规模**的数据（5 万行 `index_docs`，正文列填 1～2 KB 的随机 CJK 串，全在 `%TEMP%`），然后量两件事，只回数字：
-- `search_all` 一次往返的墙钟毫秒（首屏的体验线）。
-- 命中分布：有多少个簇的 `items.len()` 触到 10、多少个段触到 20 簇。
+- 断言 1–5 **全绿**：① `a1_missingKeys = []`（线格式 7 键在真机侧闭环，补上 Task 4 那条 serde 断言只能守 Rust 单测的缺口）；② 正文段 2 簇、`snippetChars = 29`、无分词空格残留；③ `text.slice(ranges[0]) === "验收"`（码元契约成立，整条链唯一能证明前端 `slice` 对齐的证据）；④ `skipped` 行 → `code = "preview_unavailable"`；⑤ 删掉夹具文件后 → `code = "preview_file_missing"`。
+- 断言 6（UI 连打）**成立但前提要改写**：`search_all` 是 sync 命令、两次调用被消息泵串行 ⇒ 这一格守的是「UI 层旧结果覆盖新结果」，**不是** `async` 的乱序。乱序只存在于 `doc_preview`，而它的守卫是 Task 8 的 `alive` cleanup —— 那一格登记为有名缺口（需要数百毫秒级预览才能构造切档窗口，而那只能靠对抗夹具，与 D6 的干净语料不能同库同批）。
+- 第 7 格（载荷上界，Task 5 复审 Minor-1 的唯一真机证据）：对抗夹具（单文件 3.4 MB / 96 万字符 / 命中间隔 16 字）→ `doc_preview` **257,983 ms 与 266,093 ms** 两次，`text.length = 1,139,999` 码元，`ranges.length = 60,000`，**`truncated = false`**；合并带尺寸夹具（48,000 字符 / 6 命中 / 间距 8,010）→ `28 ms`、`textUnits = 42,727`、`rangesLen = 6`、`truncated = true`（间距略大于合并带上沿 ⇒ 六窗没并起来，符合 Task 5 判据）。⇒ `MAX_PREVIEW_WINDOWS` 封的是**窗数不是窗长**在真机成立。
+- 第 7 格的升级判据「`text` > 6 万码元 **且** 渲染明显卡顿或滚动失效」——**字面「且」不成立**：60,000 个 `<mark>` 落完之后 `requestAnimationFrame` 1 ms、20 万次同步循环 2 ms、`longTasks` 全程为空 ⇒ 主线程没被占住。真正不可用的是**等 160–266 秒且对话框没有取消入口**（关闭只卸载前端，后端那次抽取照跑完）。裁定：登记为终审独立 finding，**议题按证据写成「极端单文档成本 + 无取消」而不是「渲染卡顿」**，免得下一轮照着错的议题去给合并加长度上限（那会重新制造 Task 5 Important-1 已修掉的相接窗失效形态）。
+- 第 8 格（`async` 运行时兑现，全链唯一证据）：并发「慢预览 + `db_status`」⇒ **`dbStatusMs = 3` 先回、慢预览 266,093 ms 后回** ⇒ 判据「先回 = 生效」满足，`#[tauri::command(async)]` 确实把命令体挪出了消息泵那一个线程。
+- 顺带补做的一条（Task 8 复审留下的 M-8）：`A 预览成功 → 删磁盘文件 → 点「在资源管理器中选中」失败出红字 → 关闭 → **同一结果集内**点另一行` ⇒ `redOnSecondDoc = ["操作失败：path doesn't exist"]` 而那份文档自己的正文照常渲染 ⇒ **M-8 真机成立**（修法一行级，落终审）。反过来「重新搜索」时红字消失，原因是 `search.tsx` 的 `busy` 那格与 `<SearchBundleView>` 互斥渲染 ⇒ 整棵结果树卸载、`notice` 归零 —— 需求方肉眼报的「没残留」与此一致，不是矛盾。
 
-裁定口径写死在这里，不用再问人：**若 5 万行下一次往返 > 800 ms，把 `DOCS_FETCH_LIMIT` 降到 100 并在 `docs/开发进度.md` 登记「取数上限由 200 降到 100，因为 X ms」；若「触顶簇」占比 > 30%，说明 `MAX_ITEMS_PER_CLUSTER = 10` 太小，把三个数一起上调（20/10/10 → 30/15/15）并同步改 Task 4 的三条截断测试期望值与 spec §四。** 两个都没触到就维持原值，只在文档里记数字。**不许**为了「看起来更快」而偷偷放宽 `truncated`/`hidden` 的语义。
+- [x] **Step 3: D6 的实测决定（20/10/10 是不是合适）—— 10-09 已实测并落地，`ef49c1a`**
+
+**实测读数（一次性沙盒 `dev.zero.pfm.m4test`，49,003 行 `index_docs`，正文 1–2 KB，全部走应用自己的索引管线入库）**：
+
+- 往返毫秒：`验收` 846（冷首值）/ 680 / 725 / 699 / 675，两词查询 `里程碑割接` 737，唯一编号的稀疏对照 56–60 ⇒ **稳态未越过 800 ms ⇒ `DOCS_FETCH_LIMIT` 维持 200**。
+- 触顶分布：五个常用词查询里 **每一个返回的簇都触到 10 条上限**（`docsClusters = 1`、`cappedClusters = 1` ⇒ 占比 100% > 30%），最坏一簇 `hidden = 190`（实际命中 200 条只显 10 条）。对照读数证明指标不是夹具假象：拿文档里的唯一编号当查询词时 `items = 1 / capped = 0`。
+- ⇒ 按上面写死的口径执行：**三个上限 20/10/10 → 30/15/15**（`MAX_CLUSTERS_PER_SECTION` / `MAX_ITEMS_PER_CLUSTER` / `MAX_PROJECT_HITS`），三条截断测试的夹具规模与期望值连同**测试名里嵌的数字**一起改（`section_drops_the_31st_cluster_and_reports_it` / `cluster_keeps_15_items_and_reports_the_other_2` / `flat_project_section_truncates_into_projects_hidden`），spec §四 同步。条数链不动：仍 **134 passed**。
+- 诚实附注一条：**簇级那个 20 本轮没有证据**（语料只有 4 个项目、`docsClusters` 最多 2，从未接近 20/30），它是随批次一起调的，不是实测推出来的；而 `hidden = 190` 说明**15 也照样触顶** ⇒ 真正解得了它的是簇内分页/展开那次 deferred IPC（第十节），不是继续调大数字。`truncated`/`hidden` 语义一字未放宽。
+- 可证伪取证（实现者做的）：把 `MAX_ITEMS_PER_CLUSTER` 临时改回 `17` ⇒ `cluster_keeps_15_items_and_reports_the_other_2` 红（`left: 17 / right: 15`，exit=101）；改回 `15` ⇒ 绿 ⇒ 这条测试**真在守着常量**，不是零守护。另两条截断测试没做同等探针（计划只点名第 2 条），留作终审可补项。
 
 顺带记第三个数字（Task 6 的 Important-1 把这条列成了 `search_all` 的待裁定项，本轮它保持 sync）：**`search_all` 往返期间并发那条便宜的 `db_status`，它是否被占住**（口径同 Step 2 第 8 条）。若 `search_all` 本身已 > 800 ms 且 `db_status` 被推到它后面，那说明首屏每次键入都在冻消息泵，`search_all` 也该加 `#[tauri::command(async)]` —— 但**不在本任务改代码**：把两个毫秒数与结论写进 `docs/开发进度.md`，作为终审那轮的独立 finding 落地（终审只有一次 fix 派发，正好把它和别的整改一起做）。
+
+**这一格的实测读数（10-09）**：并发发「`search_all` + `db_status`」⇒ `searchAllMs = 612`、`dbStatusMs = 620`、**`dbReturnedFirst = false`** ⇒ `db_status` 被顶到 `search_all` 后面，**sync 的 `search_all` 确实在占消息泵**（对照：同样并发下 async 的 `doc_preview` 期间 `db_status` 3 ms 就回了）。但写死的判据是「`search_all` > 800 ms **且** `db_status` 被推到后面」，本轮稳态没越过 800 ms ⇒ **判据不成立，不在本轮加 `async`**。登记为终审的独立 finding：议题写成「首屏每次键入都会短冻消息泵约 0.6–0.8 s，是否值得给 `search_all` 也加 `async`（加了之后前端 `seq` 守卫就从'防御性'变成'正在承重'）」，而不是「它超过 800 ms 了」。
 
 - [ ] **Step 4: 清场 + 文档收口**
 

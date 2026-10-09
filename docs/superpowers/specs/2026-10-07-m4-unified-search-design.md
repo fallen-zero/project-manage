@@ -37,7 +37,7 @@ Rust 侧新增（`search.rs`）与前端 `src/types/search.ts` 逐字段对应�
 #[derive(Serialize)] #[serde(rename_all = "camelCase")]
 pub struct SearchBundle {
     pub query: String,
-    pub projects: Vec<FieldHit>,      // source == "project" 的命中，最多 10 条
+    pub projects: Vec<FieldHit>,      // source == "project" 的命中，最多 15 条
     /// 被 `MAX_PROJECT_HITS` 截掉的条数。「项目」段是平铺列表，没有簇可挂计数。
     pub projects_hidden: usize,
     pub ledger: ClusterSection<Cluster<FieldHit>>,
@@ -89,7 +89,7 @@ fn doc_preview(state: State<AppState>, doc_id: String, query: String) -> AppResu
 数值全部写成具名常量，**不许在两处各写一个字面量**。落点：取数与展示上限在 `search.rs` 顶部，预览侧（`PREVIEW_WINDOW_CHARS` / `MAX_PREVIEW_WINDOWS` / `PREVIEW_GAP`）在 `doc_preview.rs` 顶部，查询长度守卫见下面第三条。
 
 - 取数：`field_hits` 沿用既有 `PER_GROUP_LIMIT = 50`（`search.rs:16`，不动）；`doc_hits` 取 200，与 `search_docs` 现有 clamp 上界一致（`lib.rs:542` 的 `clamp(1, 200)`），不新造数字。
-- 展示：`MAX_CLUSTERS_PER_SECTION = 20`、`MAX_ITEMS_PER_CLUSTER = 10`、`MAX_PROJECT_HITS = 10`。三处截断各有承载，漏一个就等于把结果悄悄扔掉：簇内被截掉的条数进该簇 `hidden`；整簇被段级上限扔掉的簇数进 `ClusterSection.hidden_clusters`；「项目」段是平铺列表没有簇可挂，截掉的条数进 `projects_hidden`。三个数都只显示、**不做展开** —— 被截掉的行压根没进 bundle，要真展开得再发一次带分页的 IPC，本轮不做（第十节）。
+- 展示：`MAX_CLUSTERS_PER_SECTION = 30`、`MAX_ITEMS_PER_CLUSTER = 15`、`MAX_PROJECT_HITS = 15`（**2026-10-09 按真机 5 万行实测从 20/10/10 上调**；读数、对照探针与裁定口径记录在计划 Task 9 Step 3，本轮实测的原始 JSON 落 `.superpowers/sdd/2026-10-07-m4-unified-search/t9-d6.json`）。三处截断各有承载，漏一个就等于把结果悄悄扔掉：簇内被截掉的条数进该簇 `hidden`；整簇被段级上限扔掉的簇数进 `ClusterSection.hidden_clusters`；「项目」段是平铺列表没有簇可挂，截掉的条数进 `projects_hidden`。三个数都只显示、**不做展开** —— 被截掉的行压根没进 bundle，要真展开得再发一次带分页的 IPC，本轮不做（第十节）。**上调不改变这条边界，也不把 `hidden` 的语义放宽**：实测里最坏一簇 `hidden = 190`，15 条仍然触顶 ⇒ 真正解得了它的是簇内分页/展开那次 deferred IPC，不是继续调大数字。
 - 查询守卫：`MAX_QUERY_CHARS = 128`。今天这个数在 `search.rs:87` 与 `index_store.rs:262` 各写了一遍字面量 128，本轮提到一处共享常量。落点选 `tokenize.rs`（查询侧模块，`index_store` 本来就引它），而不是 `search.rs` —— 后者要新造一条 `index_store → search` 的反向依赖，只为搬一个数。
 
 ## 五、预览通路
