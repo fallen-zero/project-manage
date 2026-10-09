@@ -13,7 +13,7 @@ M3 已经交出两条互不相认的检索通路：`search_local` → `FieldHit[
 1. `search_all` —— 一次 IPC 往返回一个带分组结构的 bundle
 2. 三段渲染（项目档案 / 台账条目 / 文件正文），台账与正文两段**段内按项目聚簇**
 3. `doc_preview` —— 点开正文命中时按行 id 从磁盘重抽原文、在原文上做大小写不敏感子串高亮
-4. 预览里的三个动作：打开文件 / 打开所在目录 / 复制路径（全部复用 M1 已有能力）
+4. 预览里的三个动作：在资源管理器中选中（`revealItemInDir`）/ 复制完整路径 / 跳项目详情页（**刻意不含「用外部程序打开文件」**——`openPath` 会把文件交给外部应用，而那个应用随时可以保存回写，这条工具的立身边界是「只读源文件」；取舍写进 `doc-preview-dialog.tsx` 的注释。原稿这一条写的是「打开文件 / 打开所在目录 / 复制路径」，2026-10-09 整分支终审核出规格与代码不一致，按代码改）
 
 **边界**：M3 划给 M4 的 12 项账，本轮实际拉进来的只有一件，而且不是清账、是避免制造账——见第五节末尾。其余 11 项列在第十节，逐项写明归属与为什么。
 
@@ -88,7 +88,7 @@ fn doc_preview(state: State<AppState>, doc_id: String, query: String) -> AppResu
 
 数值全部写成具名常量，**不许在两处各写一个字面量**。落点：取数与展示上限在 `search.rs` 顶部，预览侧（`PREVIEW_WINDOW_CHARS` / `MAX_PREVIEW_WINDOWS` / `PREVIEW_GAP`）在 `doc_preview.rs` 顶部，查询长度守卫见下面第三条。
 
-- 取数：`field_hits` 沿用既有 `PER_GROUP_LIMIT = 50`（`search.rs:16`，不动）；`doc_hits` 取 200，与 `search_docs` 现有 clamp 上界一致（`lib.rs:542` 的 `clamp(1, 200)`），不新造数字。
+- 取数：`field_hits` 沿用既有 `PER_GROUP_LIMIT = 50`（`search.rs:16`，不动）；`doc_hits` 取 200，与 `search_docs` 现有 clamp 上界一致（`lib.rs` 的 `fn search_docs` 命令体内那个 `clamp(1, 200)`），不新造数字。**10-09 终审订正**：本行原写「`lib.rs:542` 的 `clamp(1, 200)`」，那个行号今天已是空行（clamp 在它下面几行）⇒ 一律换成符号指针，理由见 `docs/HANDOFF.md` 坑 86 同族的行号指针漂移（本仓已把内部行号指针统一改为符号指针）。
 - 展示：`MAX_CLUSTERS_PER_SECTION = 30`、`MAX_ITEMS_PER_CLUSTER = 15`、`MAX_PROJECT_HITS = 15`（**2026-10-09 按真机 5 万行实测从 20/10/10 上调**；读数、对照探针与裁定口径记录在计划 Task 9 Step 3，本轮实测的原始 JSON 落 `.superpowers/sdd/2026-10-07-m4-unified-search/t9-d6.json`）。三处截断各有承载，漏一个就等于把结果悄悄扔掉：簇内被截掉的条数进该簇 `hidden`；整簇被段级上限扔掉的簇数进 `ClusterSection.hidden_clusters`；「项目」段是平铺列表没有簇可挂，截掉的条数进 `projects_hidden`。三个数都只显示、**不做展开** —— 被截掉的行压根没进 bundle，要真展开得再发一次带分页的 IPC，本轮不做（第十节）。**上调不改变这条边界，也不把 `hidden` 的语义放宽**：实测里最坏一簇 `hidden = 190`，15 条仍然触顶 ⇒ 真正解得了它的是簇内分页/展开那次 deferred IPC，不是继续调大数字。
 - 查询守卫：`MAX_QUERY_CHARS = 128`。今天这个数在 `search.rs:87` 与 `index_store.rs:262` 各写了一遍字面量 128，本轮提到一处共享常量。落点选 `tokenize.rs`（查询侧模块，`index_store` 本来就引它），而不是 `search.rs` —— 后者要新造一条 `index_store → search` 的反向依赖，只为搬一个数。
 
@@ -105,7 +105,7 @@ fn doc_preview(state: State<AppState>, doc_id: String, query: String) -> AppResu
 
 另外，因为 D4 把 `path` 从入参里拿掉了，M3 的 m5（路径未归一化）在本轮**不再是安全前提**，它退回「同一目录的另一种写法会落成两行」的观感/去重问题，仍归 M5。
 
-**线程口径：光出锁不够，`doc_preview` 必须换线程跑（Task 6 首轮复审 Important-1 的裁定）**。上面第 1–5 条描述的是一条会做无上限磁盘 IO + pdf/docx 抽取的通路，而 Tauri 的命令默认 `execution_context = Blocking`：Windows/WebView2 上 `ipc_handler` 是在 `add_WebMessageReceived` 的 COM 回调里**同步调用**的，所以 sync 形态的命令体占的就是消息泵那一个线程 —— 期间没有任何别的 `invoke` 进得来，「锁外抽盘」买到的东西被 sync 形态原地退掉。因此本节的契约是：`doc_preview` 命令带 `#[tauri::command(async)]`（对非 `async fn` 走 `sync_threadpool`，命令体落进 `async_runtime::spawn` 的 future），`search_all` 本轮保持 sync（它只做 SQL 且取数有 200 行上限，是否也要换线程由第九节的实测说话，与其它上限的裁定同一条口径：由数字说话不由推测说话）。两条推论都必须在实现里成文：① 出锁从此**真的承重** —— 全仓那把 `Mutex<Connection>` 过去只有 IPC 线程取（后台索引线程自己开连接），有了第二条线程之后，「锁内查库、锁外抽盘」才是防住并发命令排队在慢 IO 上的那道闸；② `async` 让同类命令**可能乱序返回**（sync 形态下由消息泵天然串行，这在以前不可能发生），所以第六节 `src/stores/local-search.ts` 那条自增 `seq` 守卫（以及第八节点名的 `search-order.ts::isNewest`）从防御性写法升为承重设计，前端不许把它当可选优化省掉。
+**线程口径：光出锁不够，`doc_preview` 必须换线程跑（Task 6 首轮复审 Important-1 的裁定）**。上面第 1–5 条描述的是一条会做无上限磁盘 IO + pdf/docx 抽取的通路，而 Tauri 的命令默认 `execution_context = Blocking`：Windows/WebView2 上 `ipc_handler` 是在 `add_WebMessageReceived` 的 COM 回调里**同步调用**的，所以 sync 形态的命令体占的就是消息泵那一个线程 —— 期间没有任何别的 `invoke` 进得来，「锁外抽盘」买到的东西被 sync 形态原地退掉。因此本节的契约是：`doc_preview` 命令带 `#[tauri::command(async)]`（命令体落进 `async_runtime::spawn` 的 future，跑在 tokio **多线程 runtime 的 worker** 上 —— 2026-10-09 整分支终审在 `tauri-macros-2.7.0/src/command/wrapper.rs` 亲验：`respond_async_serialized(async move { let result = $path(...) })`，`$path` 确实在 `async move` 块内；但 `command_wrapper` 的 Async 分支**不看** `asyncness`，那个 `kind = "sync_threadpool"` 只是 tracing span 的一个字段、全文件没有一次 `spawn_blocking` ⇒ 早期稿子把「标签」当成了「机制」，现按实测改写），`search_all` 本轮保持 sync（它只做 SQL 且取数有 200 行上限，是否也要换线程由第九节的实测说话，与其它上限的裁定同一条口径：由数字说话不由推测说话）。两条推论都必须在实现里成文：① 出锁从此**真的承重** —— 全仓那把 `Mutex<Connection>` 过去只有 IPC 线程取（后台索引线程自己开连接），有了第二条线程之后，「锁内查库、锁外抽盘」才是防住并发命令排队在慢 IO 上的那道闸；② `async` 让同类命令**可能乱序返回**（sync 形态下由消息泵天然串行，这在以前不可能发生），所以第六节 `src/stores/local-search.ts` 那条自增 `seq` 守卫（以及第八节点名的 `search-order.ts::isNewest`）从防御性写法升为承重设计，前端不许把它当可选优化省掉。
 
 ## 六、模块与文件切分
 
@@ -166,7 +166,7 @@ Rust 单测（内存库 `db::open_in_memory()` + 夹具只在 `tempfile::tempdir
 
 静态看不见、只能真机证的四格：
 
-1. 对话框里三个动作真的唤起系统程序 / 资源管理器 / 原生剪贴板（`opener` 的 `{path:["**"]}` scope 与 clipboard 焦点问题都是 M1 踩过的）。
+1. 对话框里三个动作真的唤起资源管理器 / 原生剪贴板 / 路由跳转（`opener` 的 `{path:["**"]}` scope 与 clipboard 焦点问题都是 M1 踩过的）。**2026-10-09 需求方亲手点完的读数**：目录选择框弹出且能选中、`revealItemInDir` 真的弹出资源管理器并高亮在该文件上、`window.confirm` 取消拦得住且确认能真删掉；原稿这一条里的「唤起系统程序」随 §一.4 一并撤掉（那个动作刻意不做）。
 2. `±4000` 字符窗口与高亮在真实中文正文上的观感（`snippet` 的重复词折叠是否真的生效）。**含 Task 5 复审登记的一条有名缺口**：并窗判据取「新窗左沿」后合并带翻倍（见第五节第 5 条），`MAX_PREVIEW_WINDOWS` 只封顶窗数不封顶窗长，命中每隔不到两个半宽出现一次时长文的 `text` 会接近整篇 —— 载荷上界没了这件事是裁度过、可接受的，但「对话框还读不读得动」只有真机看得见，所以真机侧灌一份命中间隔约 8000 char 的长文，只回 `text` 码元长度、`ranges.len()`、`truncated` 三个数字，明显卡顿才升级为终审 finding。
 3. **性能实测（D6 的前置）**：往沙盒灌 5 万行量级的 `index_docs`（复用 M3 那批自造 `.txt` 的手法），量 `search_all` 从键入停止到回包的往返耗时若干次取分布；同时量一次「台账段 LIKE 全扫」与「正文段 FTS」各自的占比。数字写进 `docs/开发进度.md` 的验收证据。若 LIKE 那半段明显拖住首屏，再回来决定 D6 要不要拆段——**拆不拆由这次实测说话，不由推测说话**。
 4. **`async` 到底有没有兑现（第五节那条线程口径的唯一运行时证据）**：单测里证明不了「不占消息泵」这件事，134 条 Rust 测试一条都不覆盖它。做法是在沙盒 tempdir 造一份慢到可辨的文件（几百 MB 纯文本或多页 PDF，只读、跑完删净），在页面里同一时刻并发发 `invoke("doc_preview", {慢文件})` 与一条便宜的 `invoke("db_status")`，只回两个毫秒数和「`db_status` 是否先返回」。`db_status` 先回 = 属性生效；它被推到 `doc_preview` 之后 = 属性没起作用，升级为终审的独立 finding；**任一条始终不返回同样是结论，不许当作「没跑出来」跳过** —— async 形态下命令体里的 panic 既不终止进程也不提示界面，而是让那一次 `invoke` 永不落地，这一格正好是「抽取必须包在 panic 边界里」那条红线的唯一真机反证。同一口径顺手量 `search_all`：5 万行那次往返期间并发 `db_status`，若 `search_all` 已 > 800 ms 且把 `db_status` 顶到后面，就在 `docs/开发进度.md` 写明「首屏检索也在冻消息泵，`search_all` 应一并换 `async`」，交给终审落地 —— 本轮不趁真机顺手改 Rust，免得绕过任务评审这道闸。
@@ -199,4 +199,6 @@ M3 划给 M4 的账，逐项写明为什么不进来：
 1. `bm25` 与 LIKE 的召回口径不同，三段并列会让用户以为「排在前面的段更相关」——段序固定为「项目档案 / 台账条目 / 文件正文」并在页面上写一句「三类结果各自排序，不代表相关度高低」。
 2. `clean_snippet` 的三连折叠有误折风险，所以规则收窄到「第三个 token 恰等于前两个按原序拼接」，且这三个 token 任一携带高亮标记就整组不折。正向、反向（不满足拼接关系）、括号守卫三条测试必须同时存在，再加一条「真重复正文 `甲方 甲方` 原样输出」兜住篡改风险。
 3. 预览按行 id 取，意味着「已注销根目录但行还在」的那批文件仍可能被预览到——M3 的轮末 `sweep_unrooted_projects` 会在本轮或下一轮末尾把它们清掉，清掉后 `doc_id` 就查不出行了。窗口期内可预览是已知且可接受的。
-4. 5 万行量级的 LIKE 全表扫是首屏新引入的每键开销，debounce 250 ms 挡不住一次全量扫描；第九节的实测就是为这一条准备的，实测不过关就要改方案。
+4. 5 万行量级的 LIKE 全表扫是首屏新引入的每键开销，debounce 250 ms 挡不住一次全量扫描；第九节的实测就是为这一条准备的，实测不过关就要改方案。**2026-10-09 实测结论**：稳态 675–737 ms 未越过写死的 800 ms 线 ⇒ 不改方案；但同一轮量到「`search_all` 往返期间 `db_status` 被顶到后面（612 vs 620 ms）」⇒ 这条冻结是真的，只是没到触发线，M5 的优先项是**分段渲染 / 合并那 6 条 LIKE**，不是把 `search_all` 换成 `async`（换了只是把冻结从消息泵搬到 tokio worker 池，并顺带把下面第 6 条的 worker 占用问题引进来，而 `Mutex<Connection>` 那个串行点一点没变）。
+5. **预览按 `index_docs.path` 重抽 ⇒ 绕过了全仓唯一那道尺寸门**（2026-10-09 整分支终审 I-4，M4 新开的格子，M3 期这条通路不存在）。`max_file_bytes` 只在 `index_scan` 的扫描循环里判（超限落 `skipped/too_large`，根本不打开文件），而 `doc_preview` 拿登记过的 path 直接 `extract_text`，`extract_text` 的 doc 注释自己写着「不做大小校验（上限归扫描器）」。后果：① 合法 20 MB 文件一次预览会被 `render_preview_with` 放大成约 4 份全量驻留（`raw` String + `hit_ranges` 里的 `lower_first` String + `chars`/`hay` 两份 `Vec<char>`，char 4 字节）⇒ 约 120–140 MB 峰值；② 文件在索引后膨胀 ⇒ 抽取不再受任何上限约束，而分配失败是 **abort**，`panic_to_err` 抓不到、也不在它边界内。归 M5：最小修法是从 `row_for_preview` 带出登记的 `d.size` 或读 settings 的 `index_max_file_bytes` 再决定抽不抽（动的是 Task 5 已定稿的模块形状，故不在本轮）。
+6. **预览没有并发/取消闸门**（同上终审 I-5，由第 5 条的实测机制升级而来，不是 UX 抱怨）。真机单次慢预览 257,983 / 266,093 ms，而对话框只有「关闭」——关掉只卸载前端，后端那次抽取照跑完；命令体直接跑在 tokio **多线程** runtime 的 worker 上（本机 12 逻辑核 ⇒ 12 个 worker，全仓无 `spawn_blocking`），所以连点 N 份慢文档 = N 个 worker 被占死，之后**所有** async 命令与插件 async 任务一起排队。归 M5 的最小可用缓解是一个 `AtomicBool` 单飞闸门（约 8 行，占用中回 `preview_unavailable`）。

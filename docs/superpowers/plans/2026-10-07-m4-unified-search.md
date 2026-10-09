@@ -2433,7 +2433,7 @@ cd "$APPDATA" && ls -la dev.zero.pfm 2>/dev/null && stat -c '%n %s %Y' dev.zero.
 **实测读数（一次性沙盒 `dev.zero.pfm.m4test`，49,003 行 `index_docs`，正文 1–2 KB，全部走应用自己的索引管线入库）**：
 
 - 往返毫秒：`验收` 846（冷首值）/ 680 / 725 / 699 / 675，两词查询 `里程碑割接` 737，唯一编号的稀疏对照 56–60 ⇒ **稳态未越过 800 ms ⇒ `DOCS_FETCH_LIMIT` 维持 200**。
-- 触顶分布：五个常用词查询里 **每一个返回的簇都触到 10 条上限**（`docsClusters = 1`、`cappedClusters = 1` ⇒ 占比 100% > 30%），最坏一簇 `hidden = 190`（实际命中 200 条只显 10 条）。对照读数证明指标不是夹具假象：拿文档里的唯一编号当查询词时 `items = 1 / capped = 0`。
+- 触顶分布：五个常用词查询共返回 **6** 个正文簇，其中 **5** 个触到 10 条上限 ⇒ 占比 **5/6**（远超写死的 30% 线，裁定不受影响）；最坏一簇 `hidden = 190`（实际命中 200 条只显 10 条）。对照读数证明指标不是夹具假象：拿文档里的唯一编号当查询词时 `items = 1 / capped = 0`。**10-09 由控制方按归档的 `t9-d6.json` 复核订正**：本行原写「每一个返回的簇都触顶（`docsClusters = 1`、`cappedClusters = 1` ⇒ 占比 100%）」是拿单条查询当代表写的，`验收` 那次实为 `docsClusters = 2 / cappedClusters = 1`，其余四条各 `1 / 1`；同一轮附带的「稀疏对照 56–60 ms」与「两词查询 737 ms」两条数字**没有归档 JSON 出处**（只有当轮 CDP 读数），五个常用查询的毫秒数与簇数、以及 `conc` 三条都在 `t9-d6.json` 里。
 - ⇒ 按上面写死的口径执行：**三个上限 20/10/10 → 30/15/15**（`MAX_CLUSTERS_PER_SECTION` / `MAX_ITEMS_PER_CLUSTER` / `MAX_PROJECT_HITS`），三条截断测试的夹具规模与期望值连同**测试名里嵌的数字**一起改（`section_drops_the_31st_cluster_and_reports_it` / `cluster_keeps_15_items_and_reports_the_other_2` / `flat_project_section_truncates_into_projects_hidden`），spec §四 同步。条数链不动：仍 **134 passed**。
 - 诚实附注一条：**簇级那个 20 本轮没有证据**（语料只有 4 个项目、`docsClusters` 最多 2，从未接近 20/30），它是随批次一起调的，不是实测推出来的；而 `hidden = 190` 说明**15 也照样触顶** ⇒ 真正解得了它的是簇内分页/展开那次 deferred IPC（第十节），不是继续调大数字。`truncated`/`hidden` 语义一字未放宽。
 - 可证伪取证（实现者做的）：把 `MAX_ITEMS_PER_CLUSTER` 临时改回 `17` ⇒ `cluster_keeps_15_items_and_reports_the_other_2` 红（`left: 17 / right: 15`，exit=101）；改回 `15` ⇒ 绿 ⇒ 这条测试**真在守着常量**，不是零守护。另两条截断测试没做同等探针（计划只点名第 2 条），留作终审可补项。
