@@ -519,11 +519,12 @@ fn index_overview(state: State<'_, AppState>) -> AppResult<IndexOverview> {
     })
 }
 
-/// 某一项目的文件清单（分页）。`limit` 的 clamp 是本路径唯一的边界校验：`list_docs`
-/// （`index_store.rs:156-183`，只有一条 prepared statement）拿到负数时，SQLite 的语义是「不限行」，
+/// 某一项目的文件清单（分页）。`limit` 的 clamp 是本路径唯一的边界校验：`index_store::list_docs`
+/// （只有一条 prepared statement，不做二次校验）拿到负数时，SQLite 的语义是「不限行」，
 /// 于是一次拉出整个项目（上限 50000 行）进 IPC 载荷。别把 clamp 挪进 `index_store.rs`：
 /// `doc_hits` 的既有测试正靠 `limit=0`/`limit=-1` 钉住 SQLite 的原语义
-/// （`index_store.rs:623`「负数 = 不限行」、`:624`「0 就是 0 行，不许悄悄变成默认值」），
+/// （`index_store` 测试 `query_guards_and_limit_pass_straight_through` 里那两条断言：「负数 limit
+/// 原样交给 SQL（SQLite：不限行）」与「0 就是 0 行，不许悄悄变成默认值」），
 /// clamp 一旦下沉，那两条断言当场失去对象。
 #[tauri::command]
 fn index_docs(
