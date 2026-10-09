@@ -2022,6 +2022,7 @@ Expected: 提交只含这五个文件（`package-lock.json` 不该动，因为�
 
 **Files:**
 - Modify: `src/stores/local-search.ts`（`hits: FieldHit[]` → `bundle: SearchBundle | null`，保留 `seq` 守卫并改走 `isNewest`）
+- Modify: `src/lib/api.ts`（store 迁完之后 `searchLocal` 就零调用方了，本任务把那个 wrapper 删掉；见 Step 1 末）
 - Modify: `src/pages/search.tsx`（只留输入框 + debounce + 三种空态 + 组合）
 - Create: `src/components/search-bundle.tsx`
 - Create: `src/components/doc-preview-dialog.tsx`
@@ -2085,6 +2086,8 @@ export const useLocalSearchStore = create<LocalSearchState>((set) => ({
   },
 }));
 ```
+
+**Step 1 还要顺手删掉 `api.ts` 里那个已经零调用方的 wrapper**（裁定见账本 `## Task 8 派发前预检`）：删 `src/lib/api.ts:36` 整行 `searchLocal`，并删它上面 `:38` 那句现在就变成假话的注释；`api.ts:7` 的类型 import 里 `FieldHit` 只有这一处在用，**必须同时删掉**（留着就是 `noUnusedLocals` 的 `TS6196`，本任务自己的 `npm run build` 当场红 —— 与 Task 7 预检抓到的那处同形）。改完那一行是 `import type { DocPreview, SearchBundle } from "@/types/search";`。**Rust 侧的 `search_local` 命令与它的 handler 注册一个字都不动**（41 条不变，M3 的测试也不碰前端），Task 9 要做两侧对照时直接用 CDP `invoke("search_local", …)`，不需要 TS wrapper。
 
 - [ ] **Step 2: `src/components/doc-preview-dialog.tsx`**
 
@@ -2201,8 +2204,8 @@ import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Badge } from "@/components/ui/badge";
 import { DocPreviewDialog } from "@/components/doc-preview-dialog";
-import { bundleToSections, clusterNote, type SectionKind } from "@/lib/search-order";
-import { SOURCE_LABELS, type FieldHit, type HitSource, type SearchBundle } from "@/types/search";
+import { bundleToSections, clusterNote } from "@/lib/search-order";
+import { SOURCE_LABELS, type FieldHit, type SearchBundle } from "@/types/search";
 import type { DocHit } from "@/types/index";
 
 function FieldRow({ hit }: { hit: FieldHit }) {
@@ -2216,7 +2219,7 @@ function FieldRow({ hit }: { hit: FieldHit }) {
           </p>
         )}
       </div>
-      <Badge variant="outline" className="shrink-0">{SOURCE_LABELS[hit.source as HitSource]}</Badge>
+      <Badge variant="outline" className="shrink-0">{SOURCE_LABELS[hit.source]}</Badge>
       <Badge variant="outline" className="shrink-0">{hit.projectName}</Badge>
       <Link
         to="/projects/$projectId"
@@ -2229,12 +2232,34 @@ function FieldRow({ hit }: { hit: FieldHit }) {
   );
 }
 
+/** 正文段的一行：点开才去磁盘重抽原文，所以这里只有路径与摘要。 */
+function DocRow({ hit, onOpen }: { hit: DocHit; onOpen: (docId: string) => void }) {
+  return (
+    <button
+      className="rounded-md border bg-background px-3 py-2 text-left text-sm hover:bg-muted/50"
+      onClick={() => onOpen(hit.docId)}
+    >
+      <p className="truncate font-mono text-xs">{hit.path}</p>
+      <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{hit.snippet}</p>
+      {hit.matchedBy === "prefix" && <Badge variant="outline" className="mt-1">放宽匹配</Badge>}
+    </button>
+  );
+}
+
+/** 簇头那一行：项目名 + 簇内截断说明。两段的簇头同形，所以共用这一个小组件。 */
+function ClusterHead({ name, hidden }: { name: string; hidden: number }) {
+  const note = clusterNote(hidden);
+  return (
+    <p className="px-1 text-xs text-muted-foreground">
+      {name}
+      {note && <span className="ml-2">{note}</span>}
+    </p>
+  );
+}
+
 export function SearchBundleView({ bundle }: { bundle: SearchBundle }) {
   const [open, setOpen] = useState<{ docId: string; projectId: string } | null>(null);
   const sections = bundleToSections(bundle);
-
-  const ledgerOf = (kind: SectionKind) =>
-    kind === "ledger" ? bundle.ledger.clusters : kind === "docs" ? bundle.docs.clusters : [];
 
   return (
     <div className="grid gap-4">
@@ -2245,29 +2270,28 @@ export function SearchBundleView({ bundle }: { bundle: SearchBundle }) {
             {s.note && <span className="ml-2 font-normal">{s.note}</span>}
           </h2>
           {s.kind === "projects" && bundle.projects.map((h) => <FieldRow key={h.id} hit={h} />)}
-          {ledgerOf(s.kind).map((c) => (
-            <div key={c.projectId} className="grid gap-1">
-              <p className="px-1 text-xs text-muted-foreground">
-                {c.projectName}
-                {clusterNote(c.hidden) && <span className="ml-2">{clusterNote(c.hidden)}</span>}
-              </p>
-              {"snippet" in c.items[0]
-                ? (c.items as DocHit[]).map((h) => (
-                    <button
-                      key={h.docId}
-                      className="rounded-md border bg-background px-3 py-2 text-left text-sm hover:bg-muted/50"
-                      onClick={() => setOpen({ docId: h.docId, projectId: c.projectId })}
-                    >
-                      <p className="truncate font-mono text-xs">{h.path}</p>
-                      <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{h.snippet}</p>
-                      {h.matchedBy === "prefix" && (
-                        <Badge variant="outline" className="mt-1">放宽匹配</Badge>
-                      )}
-                    </button>
-                  ))
-                : (c.items as FieldHit[]).map((h) => <FieldRow key={h.id} hit={h} />)}
-            </div>
-          ))}
+          {s.kind === "ledger" &&
+            bundle.ledger.clusters.map((c) => (
+              <div key={c.projectId} className="grid gap-1">
+                <ClusterHead name={c.projectName} hidden={c.hidden} />
+                {c.items.map((h) => (
+                  <FieldRow key={h.id} hit={h} />
+                ))}
+              </div>
+            ))}
+          {s.kind === "docs" &&
+            bundle.docs.clusters.map((c) => (
+              <div key={c.projectId} className="grid gap-1">
+                <ClusterHead name={c.projectName} hidden={c.hidden} />
+                {c.items.map((h) => (
+                  <DocRow
+                    key={h.docId}
+                    hit={h}
+                    onOpen={(docId) => setOpen({ docId, projectId: c.projectId })}
+                  />
+                ))}
+              </div>
+            ))}
         </section>
       ))}
       <DocPreviewDialog
@@ -2281,7 +2305,7 @@ export function SearchBundleView({ bundle }: { bundle: SearchBundle }) {
 }
 ```
 
-`"snippet" in c.items[0]` 是这一格里唯一的运行时判别，也是它把两段的 `items` 联合起来的位置：`ClusterSection<Cluster<FieldHit>>` 与 `ClusterSection<Cluster<DocHit>>` 在 TS 里没法靠 `kind` 自动收窄，而 `ledgerOf` 返回的是两者的联合。**空 `items` 不存在**（簇必然由至少一条命中产生，`cluster_by_project` 按构造保证），所以 `c.items[0]` 不会越界；`c.items.length === 0` 的那条只在测试夹具里出现，界面上到不了。若 tsc 对这个联合类型不接受，就在 `search-order.ts` 里加一个 `export type AnyCluster = Cluster<FieldHit> | Cluster<DocHit>` 并显式标注 `ledgerOf` 的返回类型——**别改成 `any`**。
+两个聚簇段各自直接读 `bundle.ledger.clusters` 与 `bundle.docs.clusters`，所以 `c.items` 在每个分支里本来就是具体类型（`FieldHit[]` / `DocHit[]`）：**不需要运行时判别、不需要 `as` 转换、也就没有联合类型要收窄**。原先那版把两段收进一个 `ledgerOf(kind)` 里，联合是在那一格造出来的，然后又要靠 `"snippet" in c.items[0]` 拆回去 —— 同一个表达式先制造问题再解决问题，还会把「`items[0]` 会不会越界」变成需要额外论证的东西（簇必然由至少一条命中产生，`cluster_by_project` 按构造保证，界面上到不了空簇；但按分支写就不必论证）。**文案纪律**：段级说明只有 `s.note`（「另有 N 个项目未显示」/「含前缀放宽匹配」），簇级只有 `clusterNote(c.hidden)`（「还有 N 条未显示」）；两者不许互换，也不许在簇头再补一次段级文案。
 
 - [ ] **Step 4: `src/pages/search.tsx` 收成薄壳**
 
@@ -2325,14 +2349,16 @@ Expected: `exit=0`。若 tsc 在 `search-order.ts` 报未用变量或联合类�
 ```
 
 Run: `npm run build; echo exit=$?` 与 `node --test "tests/**/*.test.ts"; echo exit=$?`
-Expected: 两条 `exit=0`，node 侧仍 `pass 8 / fail 0`（本任务没动纯逻辑层）。
+Expected: 两条 `exit=0`，node 侧仍 `pass 8 / fail 0`（本任务没动纯逻辑层）。第三条门是 Step 1 那次删除的回收证据：`grep -rn "searchLocal" src/`（注意别用 `tail`/管道包它，读的是它自己的退出码）→ 期望 **exit=1（0 命中）**；还能搜到就说明 store 没迁干净或 wrapper 只删了一半。
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add src/stores/local-search.ts src/pages/search.tsx src/components/search-bundle.tsx src/components/doc-preview-dialog.tsx src/pages/index-status.tsx
+git add src/stores/local-search.ts src/lib/api.ts src/pages/search.tsx src/components/search-bundle.tsx src/components/doc-preview-dialog.tsx src/pages/index-status.tsx
 git commit -m "feat: M4 首屏渲染：三段结果、簇内计数与原文预览对话框"
 ```
+
+Expected: `git status --porcelain` 之前先看 `git diff --cached --name-only`，**恰好这六个文件**（`package-lock.json` 不该动，因为没装新依赖）。Rust 侧一个字都没改，所以 `cargo test --lib` 仍 134 passed 是**无回归检查**而不是本任务的产出。
 
 ---
 
