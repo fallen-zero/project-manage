@@ -27,11 +27,11 @@ const PER_GROUP_LIMIT: i64 = 50;
 /// 要说「本次结果里另有 N 条未展开」，不能说「库里还有 N 条」。
 const DOCS_FETCH_LIMIT: i64 = 200;
 /// 段级：一个段最多展示多少个簇。整簇被扔掉的簇数进 `ClusterSection::hidden_clusters`。
-const MAX_CLUSTERS_PER_SECTION: usize = 20;
+const MAX_CLUSTERS_PER_SECTION: usize = 30;
 /// 簇级：一个簇最多展示多少条，被截掉的条数进该簇 `hidden`。
-const MAX_ITEMS_PER_CLUSTER: usize = 10;
+const MAX_ITEMS_PER_CLUSTER: usize = 15;
 /// 「项目」段是平铺列表，没有簇可挂计数，截掉的条数进 `projects_hidden`。
-const MAX_PROJECT_HITS: usize = 10;
+const MAX_PROJECT_HITS: usize = 15;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -264,8 +264,8 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
 ///
 /// 三键的守护现状（Task 4 两轮实测，别把它读成「三级都有测试」）：
 /// - 第一级条数：`doc_clusters_sort_by_hit_count_then_project_name` 里 Gamma 那 5 条守住；
-/// - 第二级项目名：**反转比较方向**时两条测试都确定性红 —— `section_drops_the_21st_cluster_and_reports_it`
-///   （21 个等条数簇，断「名序最大者被扔掉」）与 `doc_clusters_sort_by_hit_count_then_project_name`
+/// - 第二级项目名：**反转比较方向**时两条测试都确定性红 —— `section_drops_the_31st_cluster_and_reports_it`
+///   （31 个等条数簇，断「名序最大者被扔掉」）与 `doc_clusters_sort_by_hit_count_then_project_name`
 ///   （并列对翻反）。**删掉这一行**则两条都只剩概率性红：`project::create_project` 的 id 是随机
 ///   UUID v4（`project.rs:110`），并列簇改按 id 升序，首轮实测 10 次只红 2 次 —— 所以本仓的排序键
 ///   变异取证一律用反转形态；
@@ -686,31 +686,31 @@ mod tests {
     }
 
     #[test]
-    fn section_drops_the_21st_cluster_and_reports_it() {
+    fn section_drops_the_31st_cluster_and_reports_it() {
         let (c, _, _) = fixture();
-        for i in 0..21 {
+        for i in 0..31 {
             let pid = seed_project(&c, &format!("p{i:02}"));
             seed_doc(&c, &pid, "C:/x/合同.docx", "甲方要求验收指标");
         }
         let b = unified_bundle(&c, "验收").unwrap();
-        assert_eq!(b.docs.clusters.len(), 20);
+        assert_eq!(b.docs.clusters.len(), 30);
         assert_eq!(b.docs.hidden_clusters, 1, "整簇被扔掉的簇数要有承载，否则等于静默丢弃");
         assert!(
-            !cluster_names(&b.docs).iter().any(|n| n == "p20"),
+            !cluster_names(&b.docs).iter().any(|n| n == "p30"),
             "名序最大者被截：{:?}",
             cluster_names(&b.docs)
         );
     }
 
     #[test]
-    fn cluster_keeps_10_items_and_reports_the_other_2() {
+    fn cluster_keeps_15_items_and_reports_the_other_2() {
         let (c, pid, _) = fixture();
-        for i in 0..12 {
+        for i in 0..17 {
             seed_doc(&c, &pid, &format!("C:/x/{i:02}.docx"), "甲方要求验收指标");
         }
         let b = unified_bundle(&c, "验收").unwrap();
         assert_eq!(b.docs.clusters.len(), 1);
-        assert_eq!(b.docs.clusters[0].items.len(), 10);
+        assert_eq!(b.docs.clusters[0].items.len(), 15);
         assert_eq!(b.docs.clusters[0].hidden, 2);
         assert_eq!(b.docs.hidden_clusters, 0);
     }
@@ -718,11 +718,11 @@ mod tests {
     #[test]
     fn flat_project_section_truncates_into_projects_hidden() {
         let (c, _, _) = fixture();
-        for i in 0..15 {
+        for i in 0..20 {
             seed_project(&c, &format!("验收{i:02}"));
         }
         let b = unified_bundle(&c, "验收").unwrap();
-        assert_eq!(b.projects.len(), 10);
+        assert_eq!(b.projects.len(), 15);
         assert_eq!(b.projects_hidden, 5, "平铺段没有簇可挂计数，只能单独给一个数");
         assert!(b.docs.clusters.is_empty());
         assert_eq!(b.indexed_projects, 0, "有命中 ≠ 有正文索引，两个数不许互相推出来");
