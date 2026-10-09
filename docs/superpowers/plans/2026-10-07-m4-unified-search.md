@@ -2044,7 +2044,6 @@ import { isNewest } from "@/lib/search-order";
 import type { SearchBundle } from "@/types/search";
 
 interface LocalSearchState {
-  query: string;
   bundle: SearchBundle | null;
   searched: boolean;
   busy: boolean;
@@ -2057,7 +2056,6 @@ interface LocalSearchState {
 let seq = 0;
 
 export const useLocalSearchStore = create<LocalSearchState>((set) => ({
-  query: "",
   bundle: null,
   searched: false,
   busy: false,
@@ -2065,7 +2063,7 @@ export const useLocalSearchStore = create<LocalSearchState>((set) => ({
 
   run: async (query) => {
     const mine = ++seq;
-    set({ query, busy: true, error: null });
+    set({ busy: true, error: null });
     if (!query.trim()) {
       set({ bundle: null, searched: false, busy: false });
       return;
@@ -2082,12 +2080,14 @@ export const useLocalSearchStore = create<LocalSearchState>((set) => ({
 
   clear: () => {
     seq++;
-    set({ query: "", bundle: null, searched: false, busy: false, error: null });
+    set({ bundle: null, searched: false, busy: false, error: null });
   },
 }));
 ```
 
-**Step 1 还要顺手删掉 `api.ts` 里那个已经零调用方的 wrapper**（裁定见账本 `## Task 8 派发前预检`）：删 `src/lib/api.ts:36` 整行 `searchLocal`，并删它上面 `:38` 那句现在就变成假话的注释；`api.ts:7` 的类型 import 里 `FieldHit` 只有这一处在用，**必须同时删掉**（留着就是 `noUnusedLocals` 的 `TS6196`，本任务自己的 `npm run build` 当场红 —— 与 Task 7 预检抓到的那处同形）。改完那一行是 `import type { DocPreview, SearchBundle } from "@/types/search";`。**Rust 侧的 `search_local` 命令与它的 handler 注册一个字都不动**（41 条不变，M3 的测试也不碰前端），Task 9 要做两侧对照时直接用 CDP `invoke("search_local", …)`，不需要 TS wrapper。
+**（`LocalSearchState.query` 是首轮评审 M-6：写进 store 但全仓没有读取方（页面自己的输入框是 `search.tsx` 里的 `text`，预览对话框用的是 `bundle.query`），所以这一格从定稿里删掉。留着它 tsc 不报、测试不抓，是 D-5 那一形的「写了没人读」版本。）**
+
+**Step 1 还要顺手删掉 `api.ts` 里那个已经零调用方的 wrapper**（裁定见账本 `## Task 8 派发前预检`）：删 `searchLocal` 那一整行（`export const searchLocal = (query: string) => invoke<FieldHit[]>("search_local", { query });`），**并删 `searchAll` 之上那句注释**（「首屏统一检索：三段一次带回。页面切到这个入口是 Task 8 的事…」—— 本任务一落地它就变成假话）。**删完不给 `searchAll` 补新注释**：那一行 `invoke<SearchBundle>("search_all", { query })` 自己说得清，而非-obvious 的那半（锁内查库、锁外抽盘）已经写在紧邻的 `docPreview` 注释里，两处都写就是重复。`api.ts:7` 的类型 import 里 `FieldHit` 只有这一处在用，**必须同时删掉**（留着就是 `noUnusedLocals` 的 `TS6196`，本任务自己的 `npm run build` 当场红 —— 与 Task 7 预检抓到的那处同形）。改完那一行是 `import type { DocPreview, SearchBundle } from "@/types/search";`。**Rust 侧的 `search_local` 命令与它的 handler 注册一个字都不动**（41 条不变，M3 的测试也不碰前端），Task 9 要做两侧对照时直接用 CDP `invoke("search_local", …)`，不需要 TS wrapper。
 
 - [ ] **Step 2: `src/components/doc-preview-dialog.tsx`**
 
@@ -2125,9 +2125,25 @@ function Highlighted({ text, ranges }: { text: string; ranges: [number, number][
 }
 
 export function DocPreviewDialog({ docId, projectId, query, onOpenChange }: Props) {
+  // 没有 busy 这一格：定稿的 JSX 里没有任何读取方，加载中由 DialogDescription 的
+  // `data === null` 分支说出去。留着就是 noUnusedLocals 的 TS6133，按「谁没被用就删谁」删掉。
   const [data, setData] = useState<DocPreview | null>(null);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** footer 那两个动作的失败回执，与 `error`（预览本体失败）分开：预览失败会整段不渲染正文，
+   *  而「复制路径失败」必须留着正文让用户再试一次。 */
+  const [notice, setNotice] = useState<string | null>(null);
+
+  /** 复用 `project-detail.tsx::guard` 的形态：失败要说出来。`copyText` 在窗口失焦时抛（`api.ts`
+   *  那句注释自己点名的），`revealFolder` 在文件已被移走时抛（后端专造了 `preview_file_missing`），
+   *  两者都不是不可能的边角，静默吞掉就是让用户以为成功。 */
+  const guard = async (fn: () => Promise<void>) => {
+    try {
+      await fn();
+      setNotice(null);
+    } catch (e) {
+      setNotice(`操作失败：${toAppError(e).message}`);
+    }
+  };
 
   useEffect(() => {
     if (!docId) {
@@ -2136,14 +2152,14 @@ export function DocPreviewDialog({ docId, projectId, query, onOpenChange }: Prop
       return;
     }
     let alive = true;
-    setBusy(true);
+    // 换一份预览前先清空上一份：否则新文件的正文没回来时，界面上是拿旧文档的正文配新标题。
+    setData(null);
     setError(null);
     api
       .docPreview(docId, query)
       .then((d) => alive && setData(d))
       // 预览失败只让对话框变红，绝不让整段结果消失（spec §七）。
-      .catch((e) => alive && setError(toAppError(e).message))
-      .finally(() => alive && setBusy(false));
+      .catch((e) => alive && setError(toAppError(e).message));
     return () => {
       alive = false;
     };
@@ -2169,13 +2185,14 @@ export function DocPreviewDialog({ docId, projectId, query, onOpenChange }: Prop
                 : "整篇已在上面。"}
           </p>
         )}
+        {notice && <p className="text-xs text-destructive">{notice}</p>}
         <DialogFooter className="flex-wrap gap-x-4">
           {data && (
             <>
-              <button className="text-xs underline" onClick={() => void api.revealFolder(data.path)}>
+              <button className="text-xs underline" onClick={() => void guard(() => api.revealFolder(data.path))}>
                 在资源管理器中选中
               </button>
-              <button className="text-xs underline" onClick={() => void api.copyText(data.path)}>
+              <button className="text-xs underline" onClick={() => void guard(() => api.copyText(data.path))}>
                 复制完整路径
               </button>
               {projectId && (
@@ -2305,7 +2322,7 @@ export function SearchBundleView({ bundle }: { bundle: SearchBundle }) {
 }
 ```
 
-两个聚簇段各自直接读 `bundle.ledger.clusters` 与 `bundle.docs.clusters`，所以 `c.items` 在每个分支里本来就是具体类型（`FieldHit[]` / `DocHit[]`）：**不需要运行时判别、不需要 `as` 转换、也就没有联合类型要收窄**。原先那版把两段收进一个 `ledgerOf(kind)` 里，联合是在那一格造出来的，然后又要靠 `"snippet" in c.items[0]` 拆回去 —— 同一个表达式先制造问题再解决问题，还会把「`items[0]` 会不会越界」变成需要额外论证的东西（簇必然由至少一条命中产生，`cluster_by_project` 按构造保证，界面上到不了空簇；但按分支写就不必论证）。**文案纪律**：段级说明只有 `s.note`（「另有 N 个项目未显示」/「含前缀放宽匹配」），簇级只有 `clusterNote(c.hidden)`（「还有 N 条未显示」）；两者不许互换，也不许在簇头再补一次段级文案。
+两个聚簇段各自直接读 `bundle.ledger.clusters` 与 `bundle.docs.clusters`，所以 `c.items` 在每个分支里本来就是具体类型（`FieldHit[]` / `DocHit[]`）：**不需要运行时判别、不需要 `as` 转换、也就没有联合类型要收窄**。原先那版把两段收进一个 `ledgerOf(kind)` 里，联合是在那一格造出来的，然后又要靠 `"snippet" in c.items[0]` 拆回去 —— 同一个表达式先制造问题再解决问题，还会把「`items[0]` 会不会越界」变成需要额外论证的东西（簇必然由至少一条命中产生，`cluster_by_project` 按构造保证，界面上到不了空簇；但按分支写就不必论证）。**文案纪律**：段级说明只有 `s.note`（平铺段是「还有 N 个项目未显示」，两个聚簇段是「另有 N 个项目未显示」，正文段还可能是「另有…；含前缀放宽匹配」这种并起来的形态），簇级只有 `clusterNote(c.hidden)`（「还有 N 条未显示」）；两者不许互换，也不许在簇头再补一次段级文案。
 
 - [ ] **Step 4: `src/pages/search.tsx` 收成薄壳**
 
@@ -2326,7 +2343,7 @@ const { bundle, searched, busy, error, run, clear } = useLocalSearchStore();
   </p>
 ) : searched && bundle && emptyStateKind(bundle) === "no-hit" ? (
   <p className="text-sm text-muted-foreground">
-    没有命中「{text.trim()}」。只登记过路径的项目不会凭空出现在正文里。
+    没有命中「{bundle.query}」。只登记过路径的项目不会凭空出现在正文里。
   </p>
 ) : bundle ? (
   <SearchBundleView bundle={bundle} />
