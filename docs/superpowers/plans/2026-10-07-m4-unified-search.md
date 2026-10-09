@@ -2388,7 +2388,7 @@ Expected: `git status --porcelain` 之前先看 `git diff --cached --name-only`�
 **红线（逐字来自项目约定，违反即任务失败）**：
 - 真实数据目录 `%APPDATA%\dev.zero.pfm\`（库文件名 `ledger.db`）**只读**。验证前 `stat` 拍 size+mtime 基线，验证后逐文件对上；对不上立刻停手上报。
 - **绝不跑 `npm run dev`（纯浏览器里没有 `__TAURI_INTERNALS__`，`invoke` 必失败，那不能证明任何东西），也绝不为验证改 `src-tauri/tauri.conf.json`。**
-- 真机一律用一次性 identifier `dev.zero.pfm.m4test` + `%TEMP%` 下的沙盒数据目录；跑完删净。`-c '{...}'` 那段 JSON 要穿 git-bash→npm→Windows 三层引号，碎了就改用仓库外的一次性 override 文件。
+- 真机一律用一次性 identifier `dev.zero.pfm.m4test`（数据目录由它决定 ⇒ 沙盒库落在 `%APPDATA%\dev.zero.pfm.m4test\`，见 Step 2），**被索引的文件夹具**放 `%TEMP%`；跑完两处都删净。`-c '{...}'` 那段 JSON 要穿 git-bash→npm→Windows 三层引号，碎了就改用仓库外的一次性 override 文件。
 - 原生对话框（`revealItemInDir` 触发的资源管理器、`openDialog`）这一类**点不通**（M2 已实测），照实登记为「由人点验」；读/查/改类命令可用 CDP 全程驱动：`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222"` + Node 全局 WebSocket 发 `Runtime.evaluate`；React 受控输入要用原型 `value` setter 再派发 `input` 事件。
 - 脚本**只回断言结果**（布尔、条数、`matchedBy`、文案前缀、码元区间长度），**绝不打印抽出的正文或任何解密内容**。
 - 断言失败是 **finding**，不许绕；数字变了照实报，绝不为凑数改测试。
@@ -2401,9 +2401,11 @@ cd "$APPDATA" && ls -la dev.zero.pfm 2>/dev/null && stat -c '%n %s %Y' dev.zero.
 
 把输出的三行（文件名/字节数/mtime）记进报告。若目录不存在（本机从没真跑过），就如实登记「真实库不存在，只读红线本轮无从违反」。
 
-- [ ] **Step 2: 种子一个沙盒库并跑通 5 条断言**
+- [ ] **Step 2: 种子一个沙盒库并跑通 6 条断言 + 2 格实测**
 
-用 `verify-tauri-ipc-via-seeded-sandbox-db` 那一套：`%TEMP%` 下建一次性数据目录 → 用 python 的 `sqlite3` 按 `db.rs` 的 schema 建 `ledger.db`（或先让应用自启一次建库、再灌数据，二者择一）→ 灌 3 个项目、每个项目 1 条正文命中的 `index_docs` + FTS 行（正文取自 `tokenize::index_text` 的口径，别手拼空格串）→ 启 `npm run tauri dev` 带一次性 identifier 与 `--remote-debugging-port=9222` → CDP 发 `invoke("search_all", {query:"验收"})`。
+（这一节标题原本写「5 条断言」而下面编号到 8 —— 坑 63 在本文件自己身上第四次应验。实际形状是 **6 条断言 + 2 格实测**：第 7、8 条不给通过/失败判据，只给数字与写死的裁定口径，所以不能混进「必须回绿」的清单里。）
+
+用 `verify-tauri-ipc-via-seeded-sandbox-db` 那一套：**沙盒的库不在 `%TEMP%`，而在 `%APPDATA%\dev.zero.pfm.m4test\`** —— 代码里数据目录只来自 `app.path().app_data_dir()`（`lib.rs:578`），而它由 identifier 决定，所以「一次性 identifier `dev.zero.pfm.m4test`」本身就是隔离手段，**不需要也没有**一个「指到 %TEMP% 的数据目录」开关（真要去指就得改 `tauri.conf.json`，那是红线）。`%TEMP%` 放的是**被索引的文件夹具**。步骤：%TEMP% 下建一次性夹具目录并造 3 个项目各自的正文文件（只读，跑完删）→ 启 `npm run tauri dev` 带一次性 identifier 与 `--remote-debugging-port=9222` → 让应用自建 `%APPDATA%\dev.zero.pfm.m4test\ledger.db`，再由种子脚本往里灌 3 个项目、每个项目 1 条正文命中的 `index_docs` + FTS 行（正文取自 `tokenize::index_text` 的口径，别手拼空格串；灌库用 python `sqlite3` 或 node 26 自带的 `node:sqlite` 都行，**别为此加依赖**）→ CDP 发 `invoke("search_all", {query:"验收"})`。
 
 必须回绿的断言（只回布尔与条数）：
 1. `search_all` 回的对象有 `projectsHidden`/`indexedProjects`/`relaxed` 三个键（线格式在真机侧闭环，补 Task 4 那条 serde 断言只能守 Rust 单测的缺口）。
@@ -2428,8 +2430,8 @@ cd "$APPDATA" && ls -la dev.zero.pfm 2>/dev/null && stat -c '%n %s %Y' dev.zero.
 - [ ] **Step 4: 清场 + 文档收口**
 
 ```bash
-# 1) 关掉 dev 进程；2) 删一次性沙盒（只删 %TEMP% 下本轮建的两个目录与 override 文件）
-# 3) 复查真实目录逐文件与 Step 1 的基线一致
+# 1) 关掉 dev 进程；2) 删一次性沙盒：`%APPDATA%\dev.zero.pfm.m4test\`（沙盒库，Step 2 说的就是它）
+#    + %TEMP% 下本轮建的夹具目录与 override 文件；3) 复查真实目录逐文件与 Step 1 的基线一致
 cd "$APPDATA" && stat -c '%n %s %Y' dev.zero.pfm/* 2>/dev/null
 git status --porcelain   # 必须只剩 M4 的代码与文档，没有沙盒残留、没有新增依赖
 ```
@@ -2456,9 +2458,10 @@ git commit -m "docs: M4 收口：真机断言、上限实测裁定与未能自�
 - `node --test "tests/**/*.test.ts"` → `pass 8 / fail 0 / exit=0`
 - `npm test`、`npm run build` 两条 `exit=0`
 - `cargo clippy --lib -- -D warnings` 与 `cargo clippy --lib --all-targets -- -D warnings` 四条全部 `exit=0`
-- `grep -rn "chars().count() > 128" src/` → `exit=1`；`grep -rn "index_job::panic_to_err" src/` → `exit=1`；`grep -rn "\.cut(" src/tokenize.rs` → 恰好 1 行；`grep -rn "File::open" src/doc_preview.rs` → `exit=1`
-- `generate_handler!` 条数 = **41**（39 + `search_all` + `doc_preview`）
-- 9 个提交，每个只含该任务 Files 里点名的文件；`git status --porcelain` 干净
+- 结构门禁**一律以各任务 Step 里写的那几条为准，不在这里重抄一份**（重抄必然漂 —— 本轮实测：这一度写着单前缀 `index_job::panic_to_err`，而 Task 6 Step 3 早已扩成两形态，还少了三条）。当场逐条跑的清单是**八条**，出处分别标在括号里：
+  `grep -rn "chars().count() > 128" src/` → exit=1（T1）；`grep -rn "crate::panic_to_err\|index_job::panic_to_err" . --include=*.rs --include=*.toml` → exit=1（T6 Step 3 第五条，**两种前缀都要扫**）；`grep -rn "\.cut(" src/tokenize.rs` → 恰好 1 行（T1）；`grep -rn "File::open" src/doc_preview.rs` → exit=1（T5）；`grep -rn "\.cut(\|cut_for_search" src/doc_preview.rs` → exit=1（T5）；`grep -rn "allow(dead_code)" src/search.rs src/doc_preview.rs` → exit=1（T6 Step 3，**只扫这两个文件**，全仓还剩 `db.rs:30` 那处永久豁免）；`grep -n "tauri::command(async)" src/lib.rs` → 恰好 1 行且 exit=0（T6 钉裁定范围）；再加 T8 的删除门 `grep -rn "searchLocal" src/` → exit=1。
+- `generate_handler!` 条数 = **41**（39 + `search_all` + `doc_preview`；`sed -n '589,629p' src-tauri/src/lib.rs | grep -cP '^\s*[a-z_]+(,|$)'` 现数，别背）
+- **每任务 1–2 个提交**（走过 fix round 的 T3/T4/T5/T6/T7/T8 各两个），每个只含该任务 Files 里点名的文件；`git status --porcelain` 干净
 - `%APPDATA%\dev.zero.pfm\` 逐文件与真机基线快照一致；`%TEMP%` 无本轮残留
 
 ---
