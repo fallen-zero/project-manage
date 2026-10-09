@@ -49,7 +49,7 @@ export function SearchPage() {
         </p>
       ) : searched && bundle && emptyStateKind(bundle) === "no-hit" ? (
         <p className="text-sm text-muted-foreground">
-          没有命中「{text.trim()}」。只登记过路径的项目不会凭空出现在正文里。
+          没有命中「{bundle.query}」。只登记过路径的项目不会凭空出现在正文里。
         </p>
       ) : bundle ? (
         <SearchBundleView bundle={bundle} />

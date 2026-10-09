@@ -5,7 +5,6 @@ import { isNewest } from "@/lib/search-order";
 import type { SearchBundle } from "@/types/search";
 
 interface LocalSearchState {
-  query: string;
   bundle: SearchBundle | null;
   searched: boolean;
   busy: boolean;
@@ -18,7 +17,6 @@ interface LocalSearchState {
 let seq = 0;
 
 export const useLocalSearchStore = create<LocalSearchState>((set) => ({
-  query: "",
   bundle: null,
   searched: false,
   busy: false,
@@ -26,7 +24,7 @@ export const useLocalSearchStore = create<LocalSearchState>((set) => ({
 
   run: async (query) => {
     const mine = ++seq;
-    set({ query, busy: true, error: null });
+    set({ busy: true, error: null });
     if (!query.trim()) {
       set({ bundle: null, searched: false, busy: false });
       return;
@@ -43,6 +41,6 @@ export const useLocalSearchStore = create<LocalSearchState>((set) => ({
 
   clear: () => {
     seq++;
-    set({ query: "", bundle: null, searched: false, busy: false, error: null });
+    set({ bundle: null, searched: false, busy: false, error: null });
   },
 }));

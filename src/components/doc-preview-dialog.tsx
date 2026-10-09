@@ -33,6 +33,21 @@ export function DocPreviewDialog({ docId, projectId, query, onOpenChange }: Prop
   // `data === null` 分支说出去。留着就是 noUnusedLocals 的 TS6133，按「谁没被用就删谁」删掉。
   const [data, setData] = useState<DocPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** footer 那两个动作的失败回执，与 `error`（预览本体失败）分开：预览失败会整段不渲染正文，
+   *  而「复制路径失败」必须留着正文让用户再试一次。 */
+  const [notice, setNotice] = useState<string | null>(null);
+
+  /** 复用 `project-detail.tsx::guard` 的形态：失败要说出来。`copyText` 在窗口失焦时抛（`api.ts`
+   *  那句注释自己点名的），`revealFolder` 在文件已被移走时抛（后端专造了 `preview_file_missing`），
+   *  两者都不是不可能的边角，静默吞掉就是让用户以为成功。 */
+  const guard = async (fn: () => Promise<void>) => {
+    try {
+      await fn();
+      setNotice(null);
+    } catch (e) {
+      setNotice(`操作失败：${toAppError(e).message}`);
+    }
+  };
 
   useEffect(() => {
     if (!docId) {
@@ -41,6 +56,8 @@ export function DocPreviewDialog({ docId, projectId, query, onOpenChange }: Prop
       return;
     }
     let alive = true;
+    // 换一份预览前先清空上一份：否则新文件的正文没回来时，界面上是拿旧文档的正文配新标题。
+    setData(null);
     setError(null);
     api
       .docPreview(docId, query)
@@ -72,15 +89,16 @@ export function DocPreviewDialog({ docId, projectId, query, onOpenChange }: Prop
                 : "整篇已在上面。"}
           </p>
         )}
+        {notice && <p className="text-xs text-destructive">{notice}</p>}
         <DialogFooter className="flex-wrap gap-x-4">
           {/* 刻意不给「用外部程序打开」：openPath 把文件交给外部应用，而那边随时可能保存回写，
               这条工具的立身边界是只读源文件。所以只有选中、复制路径、跳项目三个动作。 */}
           {data && (
             <>
-              <button className="text-xs underline" onClick={() => void api.revealFolder(data.path)}>
+              <button className="text-xs underline" onClick={() => void guard(() => api.revealFolder(data.path))}>
                 在资源管理器中选中
               </button>
-              <button className="text-xs underline" onClick={() => void api.copyText(data.path)}>
+              <button className="text-xs underline" onClick={() => void guard(() => api.copyText(data.path))}>
                 复制完整路径
               </button>
               {projectId && (
