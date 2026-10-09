@@ -1,11 +1,12 @@
 import { create } from "zustand";
 import * as api from "@/lib/api";
 import { toAppError, type AppErrorShape } from "@/lib/ipc";
-import type { FieldHit } from "@/types/search";
+import { isNewest } from "@/lib/search-order";
+import type { SearchBundle } from "@/types/search";
 
 interface LocalSearchState {
   query: string;
-  hits: FieldHit[];
+  bundle: SearchBundle | null;
   searched: boolean;
   busy: boolean;
   error: AppErrorShape | null;
@@ -18,7 +19,7 @@ let seq = 0;
 
 export const useLocalSearchStore = create<LocalSearchState>((set) => ({
   query: "",
-  hits: [],
+  bundle: null,
   searched: false,
   busy: false,
   error: null,
@@ -27,21 +28,21 @@ export const useLocalSearchStore = create<LocalSearchState>((set) => ({
     const mine = ++seq;
     set({ query, busy: true, error: null });
     if (!query.trim()) {
-      set({ hits: [], searched: false, busy: false });
+      set({ bundle: null, searched: false, busy: false });
       return;
     }
     try {
-      const hits = await api.searchLocal(query);
-      if (mine === seq) set({ hits, searched: true });
+      const bundle = await api.searchAll(query);
+      if (isNewest(mine, seq)) set({ bundle, searched: true });
     } catch (e) {
-      if (mine === seq) set({ error: toAppError(e), hits: [], searched: true });
+      if (isNewest(mine, seq)) set({ error: toAppError(e), bundle: null, searched: true });
     } finally {
-      if (mine === seq) set({ busy: false });
+      if (isNewest(mine, seq)) set({ busy: false });
     }
   },
 
   clear: () => {
     seq++;
-    set({ query: "", hits: [], searched: false, busy: false, error: null });
+    set({ query: "", bundle: null, searched: false, busy: false, error: null });
   },
 }));

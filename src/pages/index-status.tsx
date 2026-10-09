@@ -611,6 +611,9 @@ export function IndexStatusPage() {
             直接吃 search_docs：命中的是建索引时分好词的正文，命中词用 [ ] 包住。这一区只求能验，正式搜索面在
             M4。
           </CardDescription>
+          <p className="text-xs text-muted-foreground">
+            这里验的是索引侧召回（两段式与放宽匹配本身）；正式搜索面在首屏「搜索」，走 search_all。
+          </p>
         </CardHeader>
         <CardContent className="grid gap-2">
           <form
