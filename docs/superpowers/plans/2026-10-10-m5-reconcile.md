@@ -1157,7 +1157,9 @@ npm run build; echo exit=$?
 node --test "tests/**/*.test.ts"; echo exit=$?
 ```
 Expected: `147 passed / 0 failed`；两条 clippy `exit=0` 0 warning；`npm run build` exit 0；node `ℹ tests 8 / pass 8 / fail 0`。
-再数一次命令条数（本轮**不许**新增命令）：`sed -n '/generate_handler/,/])/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,$"` 期望 **41**。
+再数一次命令条数（本轮**不许**新增命令）：`sed -n '/generate_handler/,/])/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"` 期望 **41**。
+
+**这条正则是 Task 8 落地时订正过的第四例「门与蓝本互斥」**：原写 `grep -cE "^ +[a-z_]+,$"`（要求尾逗号），而 `generate_handler!` 的**最后一条** `doc_preview` 按 Rust 宏写法不带逗号 ⇒ 实跑恒为 40，与它自己承诺的 41 差一。控制方三种写法都当场跑过：带逗号 `40`、`^ +[a-z_]+,?$`（逗号可选）`41`、`grep -oE` 取标识符 `41` ⇒ 取最懒的那条（逗号改成可选）。**通用形态同前三例**：写门时不只跑一遍期望值，还要跑到**边界元素**上（这里是列表最后一项），"看起来显然"的正则最容易在最后一格漏。
 
 - [ ] **Step 3: 提交**
 
@@ -1323,7 +1325,7 @@ git commit -m "docs: M5 收口 —— 十条真机读数、没能自动验证清
 - `node --test "tests/**/*.test.ts"` → **`ℹ tests 8 / pass 8 / fail 0`**（本轮一条前端测试都没加，所以这条是无回归检查）。
 - `cargo clippy --lib -- -D warnings` 与 `cargo clippy --lib --all-targets -- -D warnings` → 两条 **exit=0 / 0 warning**。
 - `npm run build` → **exit=0**。
-- **线格式没被动的证据**：`SearchBundle` 的 `len() == 7` 与 `DocPreview` 的 `len() == 6` 两条既有断言照旧绿；`generate_handler!` 条数仍 **41**。
+- **线格式没被动的证据**：`SearchBundle` 的 `len() == 7` 与 `DocPreview` 的 `len() == 6` 两条既有断言照旧绿；`generate_handler!` 条数仍 **41**（数法用逗号可选那条正则，见 Task 8 Step 2 的订正说明 —— 要求尾逗号的写法会把最后一项漏掉、恒读 40）。
 - 结构门禁（期望 0 命中的那几条，正确结果是 **exit=1**，不是命令失败）：
   - `grep -c "const MISSING_FUSE_MIN_ROWS" src-tauri/src/index_job.rs` → **恰好 1**；`grep -rn "len() > 20" src-tauri/src/` → **exit=1**（当场实跑得出的读数，阈值数字只出现在定义处；常量名在测试注释与断言消息里另有两次点名，那是合规的，见 Task 3 Step 6 的订正说明）。
   - `grep -rn "20971520" src-tauri/src/doc_preview.rs src-tauri/src/lib.rs` → **exit=1**（预览侧与命令侧的上限一律来自 settings；`db.rs:311`/`:416` 与 `index_scan.rs:32` 那三处既有命中是这道上限本该在的地方，不归本门作用域 —— 见 Task 6 Step 6 的订正说明）。
