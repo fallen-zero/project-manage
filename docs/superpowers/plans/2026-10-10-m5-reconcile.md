@@ -48,7 +48,7 @@
 | 11 | `project_dirs` 有 `UNIQUE (project_id, path)` ⇒ 同路径的 entry 行能让 root 的 INSERT 当场失败（Task 5 用它做回滚探针） | `db.rs:175` | `grep -n "UNIQUE (project_id" src-tauri/src/db.rs` |
 | 12 | `row_for_preview` 与 `SELECT_SQL` 都是**正向** `= 'ok'` ⇒ 标 missing 后预览与召回自动退出，因此不为此新开测试 | `doc_preview.rs:79`、`index_store.rs:242-251` | `grep -rn "index_status = 'ok'" src-tauri/src/` |
 | 13 | `fts_orphan_rows` 是 `#[cfg(test)] pub(crate)`，同文件测试可直接用；产品路径不许拿它当检查点（每轮全表扫） | `index_store.rs:131-140` | `grep -n "fn fts_orphan_rows" src-tauri/src/index_store.rs` |
-| 14 | `render_preview_with` 被测试模块直接调用约 8 处 ⇒ 尺寸门放生产入口 `render_preview` 而不是它（否则一次签名改动波及 8 个调用点，而那条路刻意不碰磁盘） | `doc_preview.rs:103-114`、`doc_preview.rs:293-299` | `grep -c "render_preview_with(" src-tauri/src/doc_preview.rs` |
+| 14 | `render_preview_with` 被测试模块直接调用十余处 ⇒ 尺寸门放生产入口 `render_preview` 而不是它（否则一次签名改动波及十几处调用点，而那条路刻意不碰磁盘） | `doc_preview.rs:103-114`、`doc_preview.rs:293-299` | `grep -c "render_preview_with(" src-tauri/src/doc_preview.rs` |
 | 15 | 库里那行的 `path` 与本轮扫到的串**同源**（都出自 `WalkDir::new(登记的 root 串)`）⇒ 差集比对用原样字符串，不做折叠 | `index_scan.rs:66`、`project.rs:91-102` | `grep -n "entry.path().display()" src-tauri/src/index_scan.rs` |
 | 16 | `index_status` 的 CHECK 已含 `missing`；`pending` 全仓无生产写入点 | `db.rs:290-291` | `grep -n "CHECK (index_status" src-tauri/src/db.rs` |
 | 17 | `index_overview` 已 `pick("missing")`（值恒 0），前端 `ProjectState` 已有该字段 ⇒ 后端一旦写入，类型零改动 | `lib.rs:440`/`:501`、`src/types/index.ts:5-16` | `grep -n "missing" src-tauri/src/lib.rs src/types/index.ts` |
@@ -902,7 +902,7 @@ fn unavailable(why: &str) -> AppError {
     row.ok_or_else(|| unavailable("记录可能来自已注销的目录，或索引重建前的旧结果；到 /index 重跑一轮索引"))
 ```
 
-生产入口加判门（**不动 `render_preview_with`**：它被测试模块直接调用约 8 处，而那条路刻意不碰磁盘）：
+生产入口加判门（**不动 `render_preview_with`**：它被测试模块直接调用十余处，而那条路刻意不碰磁盘）：
 
 ```rust
 /// 生产入口：抽取器固定为 `extract::extract_text`。
@@ -965,9 +965,11 @@ Expected: `145 passed; 0 failed`，`doc_preview` 模块 **15** 条；既有 14 �
 cd src-tauri && cargo clippy --lib -- -D warnings; echo exit=$?
 cd src-tauri && cargo clippy --lib --all-targets -- -D warnings; echo exit=$?
 grep -rn "File::open" src-tauri/src/doc_preview.rs; echo exit=$?
-grep -rn "20971520" src-tauri/src/; echo exit=$?
+grep -rn "20971520" src-tauri/src/doc_preview.rs src-tauri/src/lib.rs; echo exit=$?
 ```
-Expected: 两条 clippy `exit=0`；后两条 **exit=1**（`metadata` 不是 `File::open`，M4 那条门照旧成立，别顺手改它；上限一律来自 settings，注释与字符串也算命中范围）。
+Expected：两条 clippy `exit=0` 且 0 warning；`File::open` 那条 **exit=1**（`std::fs::metadata` 不是 `File::open`，M4 那条既有门照旧成立、不许顺手改它）；上限那条 **exit=1**（预览侧的 hint 与注释都得从 `opts.max_file_bytes` 格式化，不许写死数字）。
+
+**本条门的作用域由 Task 6 落地订正（第三次应验「门与仓库现实互斥」，前两次是 Task 3 的常量门与 Task 5 的事务门）**：原写 `grep -rn "20971520" src-tauri/src/` 期望 exit=1，实跑 **exit=0、命中 3 行**（`db.rs:311` 的 settings 种子、`db.rs:416` 那条「spec 定的单文件 20 MB」断言、`index_scan.rs:32` 的默认值兜底）—— 那三处是这道上限**本该在的地方**，全都是 M1 既有内容、不归本任务。所以门改成只扫本任务真正可能写死数字的两个文件（预览侧 + 命令侧）。**通用形态**：写「期望零命中」的门时，作用域必须收到「本轮新写的东西所在的那几格」，全仓扫法迟早被既有合规命中打死（坑 86 的另一种变体）。实现者当时**没有**为凑门删任何注释或文案，判为处置正确。
 
 - [ ] **Step 7: 提交**
 
@@ -1303,7 +1305,7 @@ git commit -m "docs: M5 收口 —— 十条真机读数、没能自动验证清
 - **线格式没被动的证据**：`SearchBundle` 的 `len() == 7` 与 `DocPreview` 的 `len() == 6` 两条既有断言照旧绿；`generate_handler!` 条数仍 **41**。
 - 结构门禁（期望 0 命中的那几条，正确结果是 **exit=1**，不是命令失败）：
   - `grep -c "const MISSING_FUSE_MIN_ROWS" src-tauri/src/index_job.rs` → **恰好 1**；`grep -rn "len() > 20" src-tauri/src/` → **exit=1**（当场实跑得出的读数，阈值数字只出现在定义处；常量名在测试注释与断言消息里另有两次点名，那是合规的，见 Task 3 Step 6 的订正说明）。
-  - `grep -rn "20971520" src-tauri/src/` → **exit=1**（上限只来自 settings）。
+  - `grep -rn "20971520" src-tauri/src/doc_preview.rs src-tauri/src/lib.rs` → **exit=1**（预览侧与命令侧的上限一律来自 settings；`db.rs:311`/`:416` 与 `index_scan.rs:32` 那三处既有命中是这道上限本该在的地方，不归本门作用域 —— 见 Task 6 Step 6 的订正说明）。
   - `grep -rn "File::open" src-tauri/src/doc_preview.rs` → **exit=1**。
   - `grep -rn "notify" src-tauri/Cargo.toml` → **exit=1**（零新依赖的字面证据）。
   - `grep -c "tauri::command(async)" src-tauri/src/lib.rs` → **恰好 1**。
