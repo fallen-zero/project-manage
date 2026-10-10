@@ -823,7 +823,15 @@ Expected: `144 passed; 0 failed`，`project` 模块 **11** 条；既有 `root_di
 
 - [ ] **Step 5: 变异取证**：去掉 `let tx = ...` 与 `tx.commit()?`、退回两条 `conn.execute` ⇒ Expected：新用例红在 `root.as_deref()`。
 
-- [ ] **Step 6: 门禁**：两条 clippy `exit=0`；`grep -c "unchecked_transaction" src-tauri/src/project.rs` 期望 **1**。
+- [ ] **Step 6: 门禁（本条期望值由 Task 5 落地订正 —— 原写「`grep -c "unchecked_transaction"` 期望 1」与 Step 3 蓝本互斥：蓝本注释自己点名了这个词，按蓝本落地恒为 2。同形前科是 Task 3 Step 6 那条常量门与坑 49/63 —— 写给别人的门，落笔前必须当场跑一遍**）
+
+```bash
+cd src-tauri && cargo clippy --lib -- -D warnings; echo exit=$?
+cd src-tauri && cargo clippy --lib --all-targets -- -D warnings; echo exit=$?
+grep -c "conn.unchecked_transaction()" src-tauri/src/project.rs
+grep -rn "allow(dead_code)" src-tauri/src/project.rs; echo exit=$?
+```
+Expected：两条 clippy `exit=0` 且 0 warning；调用点**恰好 1**（门扫的是调用形态而不是这个词本身，注释里再点名几次都算合规 —— 实现者**不许**为了凑门删注释）；`allow(dead_code)` 那条 **exit=1**（本任务没有任何新 `pub` 项，不该出现豁免）。
 
 - [ ] **Step 7: 提交**
 
