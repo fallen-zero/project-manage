@@ -551,7 +551,7 @@ git commit -m "feat(m5): reclaim_missing 的差集主路径（两条硬闸门 + 
         }
         assert_eq!(doc_rows(&conn, "p1"), 10, "前提：十行都在库里");
 
-        let seen: Vec<&str> = paths[4..].iter().map(String::as_str).collect(); // 前 4 个还在磁盘
+        let seen: Vec<&str> = paths[..4].iter().map(String::as_str).collect(); // 前 4 个还在磁盘，后 6 个不见了
         assert_eq!(
             reclaim_missing(&conn, "p1", &outcome_with(&seen, &[], false), false).unwrap(),
             6,
@@ -602,7 +602,16 @@ Expected: `142 passed; 0 failed`，`index_job` 模块 **18** 条。
 4. 删掉整个熔断 `if` ⇒ Expected：`the_fuse_refuses_a_mass_reclaim` 红（`left: 24, right: 0`）。第 3 条不受影响 —— 「过半」与「过地板」两个条件各有一条测试守着，这是 D5 那支熔断唯一的完整守护形态。
 5. **Step 0 第 1 项自己的取证**：把 `reclaim_missing` 循环体里的 `mark_missing(conn, *rowid)?` 换成一句裸 `UPDATE index_docs SET index_status = 'missing' WHERE doc_rowid = ?1` ⇒ Expected：`reclaim_marks_rows_the_pass_did_not_see` 红在末尾那条 `fts_total == 1`（实际 2）。这条红不了就说明并进的位置不对（它在状态翻转之后跑，任何「只翻状态」的实现都躲不过）。
 
-- [ ] **Step 6: 门禁**：两条 clippy `exit=0`；`grep -rn "MISSING_FUSE_MIN_ROWS" src-tauri/src/` 期望**恰好 2 行**（定义 + 使用）。
+- [ ] **Step 6: 门禁（本条期望值由 Task 3 落地后订正 —— 原写「`grep -rn "MISSING_FUSE_MIN_ROWS"` 恰好 2 行」是一条**永远不可能成立**的门，因为 Step 1 的测试蓝本自己在注释与断言消息里各点名了该常量一次；同形前科是坑 49（示例注释含被门扫的字面量）与坑 63（计数词会说谎））**
+
+```bash
+cd src-tauri && cargo clippy --lib -- -D warnings; echo exit=$?
+cd src-tauri && cargo clippy --lib --all-targets -- -D warnings; echo exit=$?
+grep -c "const MISSING_FUSE_MIN_ROWS" src-tauri/src/index_job.rs
+grep -rn "len() > 20\b\|> 20)" src-tauri/src/; echo exit=$?
+grep -rn "MISSING_FUSE_MIN_ROWS" src-tauri/src/index_job.rs
+```
+Expected：两条 clippy `exit=0` 且 0 warning；常量定义**恰好 1** 处；裸字面量那条 **exit=1**（家规的实质是「阈值数字只出现在定义处」，不是「常量名只出现两次」）；常量名那条**实测 4 行** = 定义 `:31` + 使用 `:186` + 测试注释 `:1155` + 断言消息 `:1172`，四处都是**点名这个常量**而不是重写数字，属合规。把这条读数写进报告，别为了让门绿去删注释。
 
 - [ ] **Step 7: 提交**
 
@@ -1265,7 +1274,7 @@ git commit -m "docs: M5 收口 —— 十条真机读数、没能自动验证清
 - `npm run build` → **exit=0**。
 - **线格式没被动的证据**：`SearchBundle` 的 `len() == 7` 与 `DocPreview` 的 `len() == 6` 两条既有断言照旧绿；`generate_handler!` 条数仍 **41**。
 - 结构门禁（期望 0 命中的那几条，正确结果是 **exit=1**，不是命令失败）：
-  - `grep -rn "MISSING_FUSE_MIN_ROWS" src-tauri/src/` → **恰好 2 行**（定义 + 唯一使用处）。
+  - `grep -c "const MISSING_FUSE_MIN_ROWS" src-tauri/src/index_job.rs` → **恰好 1**；`grep -rn "len() > 20" src-tauri/src/` → **exit=1**（当场实跑得出的读数，阈值数字只出现在定义处；常量名在测试注释与断言消息里另有两次点名，那是合规的，见 Task 3 Step 6 的订正说明）。
   - `grep -rn "20971520" src-tauri/src/` → **exit=1**（上限只来自 settings）。
   - `grep -rn "File::open" src-tauri/src/doc_preview.rs` → **exit=1**。
   - `grep -rn "notify" src-tauri/Cargo.toml` → **exit=1**（零新依赖的字面证据）。
