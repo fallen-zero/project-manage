@@ -598,12 +598,20 @@ pub fn run() {
             });
             // M5 D1：启动即追平一轮。rebuild=false 走既有增量判据（size + mtime + ok 相同 ⇒ 连文件都
             // 不打开），所以常态代价是一次目录遍历 + stat，不是重抽；root 不可达的项目连 walkdir 都不发起。
-            // 与用户手动点撞车由 `start` 开头的 running.swap 挡：那一次收到既有 `index_running` 的 amber
-            // 提示（M3 真机验过它的文案「上一轮还没结束」，本轮之后它触发得更频繁，但那句话仍是实话）。
-            // 自动轮的失败不拦启动：`let _ =` 丢掉 AppResult —— 追平失败不该让应用打不开。
+            // 与用户手动点撞车的主防线其实是两个 start 按钮的 `disabled={running}`（口径来自
+            // `overview.running`）；既有那条 amber 提示（「这不是索引出错，只是上一轮还没结束」）
+            // 只在「`overview` 还没到货、页面以为空闲」那一个挂载窗口里可达 —— 真机要按这个窗口造前提才采得到（Task 10 断言 3）。
+            // 自动轮的失败不拦启动（应用打不开比没追平严重），但也不许悄悄消失：起不来时把原因写进
+            // `last_error` —— 它存在的全部理由就是「三个失败出口都要留下一句话」（`index_job.rs` 头注释），
+            // `index_overview` 已透出这一格、/index 已整段渲染它，所以零线格式改动（Task 8 评审的 I 级结论）。
             // 头几秒前端还没装 index://progress 监听，那段进度事件会丢；用户进 /index 看到的是
-            // 徽标「索引进行中」+ 既有那句「本轮已开始，正在等第一条进度事件」的空态文案，M3 已实测过这一档。
-            let _ = index_job::start(app.handle().clone(), data_dir, index, None, false);
+            // 徽标「索引进行中」+ 既有那句「本轮已开始，正在等第一条进度事件」的空态文案，M3 已实测过这一档
+            // （评审另核到时序依据：tauri 2.12.0 `app.rs:2689-2699` 是先建窗口配置、再跑 setup 钩子）。
+            if let Err(e) = index_job::start(app.handle().clone(), data_dir, Arc::clone(&index), None, false) {
+                if let Ok(mut g) = index.last_error.lock() {
+                    *g = Some(format!("{e}"));
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

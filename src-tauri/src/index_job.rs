@@ -731,6 +731,14 @@ mod tests {
     #[test]
     fn running_flag_is_released_even_when_the_job_panics() {
         let shared = Arc::new(IndexShared::new());
+        // 顺带钉住启动自动轮（`lib.rs` 的 setup）依赖的那条前提：新构造的 `IndexShared` 必须是
+        // 未占用态。这一格此前全仓无断言 —— 把 `AtomicBool::new(false)` 改成 `true` 时 147 条
+        // 全绿，而运行时后果是「自动轮永不起来 + 徽章永久停在索引进行中」（Task 8 评审的 Minor）。
+        // 并进本用例，条数不变（本仓先例：M4 终审批次两处「并进既有测试体」）。
+        assert!(
+            !shared.running.load(Ordering::SeqCst),
+            "新构造的 IndexShared 必须未占用，否则 `start` 开头的 running.swap 会把自动轮挡死"
+        );
         shared.running.store(true, Ordering::SeqCst);
         let s = Arc::clone(&shared);
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
