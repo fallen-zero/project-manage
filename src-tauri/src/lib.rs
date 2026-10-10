@@ -565,11 +565,14 @@ fn doc_preview(
     doc_id: String,
     query: String,
 ) -> AppResult<doc_preview::DocPreview> {
-    let row = {
+    let (row, max_file_bytes) = {
         let conn = db(&state)?;
-        doc_preview::row_for_preview(&conn, &doc_id)?
+        (
+            doc_preview::row_for_preview(&conn, &doc_id)?,
+            index_scan::ScanOptions::load(&conn)?.max_file_bytes,
+        )
     };
-    doc_preview::render_preview(&doc_id, &row, &query)
+    doc_preview::render_preview(&doc_id, &row, &query, max_file_bytes)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

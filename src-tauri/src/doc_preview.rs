@@ -58,12 +58,11 @@ pub struct DocPreview {
     pub truncated: bool,
 }
 
-fn unavailable() -> AppError {
-    AppError::new(
-        "preview_unavailable",
-        "这条索引记录不能预览",
-        Some("记录可能来自已注销的目录，或索引重建前的旧结果；到 /index 重跑一轮索引"),
-    )
+/// 三种成因共用 `preview_unavailable`（行不 ok / 当前尺寸超上限 / 已有一份在抽取），
+/// 因为 M4 §七 把「前端只认 preview_* 两个码」定成了契约；成因一律写进 hint 由界面念出来。
+/// 扩码表是终审议题（spec 风险 5），不许在本任务顺手加。
+fn unavailable(why: &str) -> AppError {
+    AppError::new("preview_unavailable", "这条索引记录不能预览", Some(why))
 }
 
 /// 只在持锁时调用；返回后**释放锁**再抽盘。握着 `state.conn` 去读盘会把整个应用卡在一次慢 IO 上
@@ -81,7 +80,7 @@ pub fn row_for_preview(conn: &Connection, doc_id: &str) -> AppResult<PreviewRow>
             |r| Ok(PreviewRow { path: r.get(0)?, project_name: r.get(1)? }),
         )
         .optional()?;
-    row.ok_or_else(unavailable)
+    row.ok_or_else(|| unavailable("记录可能来自已注销的目录，或索引重建前的旧结果；到 /index 重跑一轮索引"))
 }
 
 /// 抽取层的 io 码（`AppError::io` 的 `fs_failed`）在预览这里翻译成 `preview_file_missing`：
@@ -92,7 +91,7 @@ fn map_io_error(e: AppError) -> AppError {
         AppError::new(
             "preview_file_missing",
             "文件已不可达",
-            Some("文件可能已改名或被移走；真正的失效标记要到 M5 的核对轮才会写回记录"),
+            Some("文件可能已改名或被移走；下一轮索引会把它标成失效，/index 的状态筛选能列出全部失效行"),
         )
     } else {
         e
@@ -100,7 +99,21 @@ fn map_io_error(e: AppError) -> AppError {
 }
 
 /// 生产入口：抽取器固定为 `extract::extract_text`。
-pub fn render_preview(doc_id: &str, row: &PreviewRow, query: &str) -> AppResult<DocPreview> {
+/// `max_file_bytes` 是扫描器那道同一上限：`index_docs.size` 只是登记时的读数，
+/// 文件在索引之后长大就不再有上限（终审 I-4），所以这里按**当前磁盘尺寸**再过一次。
+/// stat 失败一律放行 —— 读不到元数据不代表超限，让抽取器自己出 `fs_failed`
+/// （既有 `io_errors_are_translated…` 用假路径走的就是这一格，别把它改成拒绝）。
+pub fn render_preview(
+    doc_id: &str,
+    row: &PreviewRow,
+    query: &str,
+    max_file_bytes: u64,
+) -> AppResult<DocPreview> {
+    if let Ok(meta) = std::fs::metadata(&row.path) {
+        if meta.len() > max_file_bytes {
+            return Err(unavailable("文件在索引之后长大了，已超过单文件上限；到 /index 重跑一轮把它降级成 skipped"));
+        }
+    }
     render_preview_with(doc_id, row, query, extract_text)
 }
 
@@ -289,9 +302,9 @@ mod tests {
             .unwrap()
     }
 
-    /// 与 Task 6 命令体同一条链：锁内查库、锁外抽盘。
+    /// 与 Task 6 命令体同一条链：锁内查库、锁外抽盘。`u64::MAX` = 尺寸门对本模块既有用例透明。
     fn preview(conn: &Connection, doc_id: &str, q: &str) -> AppResult<DocPreview> {
-        render_preview(doc_id, &row_for_preview(conn, doc_id)?, q)
+        render_preview(doc_id, &row_for_preview(conn, doc_id)?, q, u64::MAX)
     }
 
     #[test]
@@ -451,5 +464,26 @@ mod tests {
         let boom: fn(&Path) -> AppResult<String> = |_| panic!("模拟解析器在畸形文件上炸");
         let e = render_preview_with("d1", &row_for("C:/x/a.docx"), "验收", boom).unwrap_err();
         assert_eq!(e.code, "extract_failed");
+    }
+
+    /// 终审 I-4：`index_docs.size` 是**登记时**的读数，文件在索引之后膨胀就不受任何上限约束
+    /// （扫描器那道门只在扫描循环里判），而 `extract_text` 自己的 doc 注释写着「不做大小校验」。
+    /// 修法：生产入口按**当前磁盘尺寸**再过一次同一道上限。
+    /// 阳性对照必须有：上限放宽一格就该正常抽出，否则上面那条 expect_err 是恒红的。
+    #[test]
+    fn a_file_that_grew_past_the_limit_after_indexing_is_not_previewed() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("膨胀.txt");
+        std::fs::write(&p, "甲方要求验收指标正文".as_bytes()).unwrap(); // 十个汉字 = 30 字节，刻意大于下面那个 10 的上限
+        let c = conn();
+        let id = seed_row(&c, &p.display().to_string(), DocOutcome::Ok("甲方要求验收指标".into()));
+        let row = row_for_preview(&c, &id).unwrap();
+        assert_eq!(row.path, p.display().to_string(), "前提：那一行的 path 就是磁盘上这个真文件");
+
+        let e = render_preview(&id, &row, "验收", 10).expect_err("当前磁盘尺寸 30 > 上限 10 ⇒ 该拒");
+        assert_eq!(e.code, "preview_unavailable", "不扩码表：三成因共用一条码，靠 hint 分（spec D10）");
+
+        let ok = render_preview(&id, &row, "验收", 100_000).unwrap();
+        assert_eq!(ok.ranges.len(), 1, "阳性对照：上限放宽就该正常抽出");
     }
 }
