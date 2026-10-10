@@ -442,12 +442,33 @@ git commit -m "feat(m5): reclaim_missing 的差集主路径（两条硬闸门 + 
 ### Task 3: 熔断与两条闸门的独立守护
 
 **Files:**
-- Modify: `src-tauri/src/index_job.rs`（`reclaim_missing` 内加熔断；常量加在 `PROGRESS_EVERY` 附近）
-- Test: 同文件 `mod tests`
+- Modify: `src-tauri/src/index_job.rs`（`reclaim_missing` 内加熔断；常量加在 `PROGRESS_EVERY` 附近；**Step 0 的三处收尾两格也在这个文件**）
+- Modify: `src-tauri/src/index_store.rs`（Step 0 第 3 项：一行注释）
+- Test: `index_job.rs` 的 `mod tests`（4 条新用例 + Step 0 往既有用例里并进一条断言，**条数不因 Step 0 变化**）
 
 **Interfaces:**
 - Consumes: T2 的 `reclaim_missing` / `outcome_with` / `missing_rows` / `scanned` / `doc_rows`
 - Produces: `const MISSING_FUSE_MIN_ROWS: usize = 20;`（模块私有，不外泄）
+
+- [ ] **Step 0: Task 2 评审留下的三处收尾（1 Important + 2 Minor，全是注释级 / 断言级零行为回归 ⇒ 折进本任务，不开返工轮 —— 坑 56）**
+
+1. **并进一条断言，把「`reclaim_missing` 真的走了 `mark_missing`」钉住**（Task 2 评审 I-1，控制方实读 `index_job.rs:1020-1047` 复现成立）：`reclaim_marks_rows_the_pass_did_not_see` 的头注释声称最后两条检索断言守的是「删的是虚表侧那一半」，实际两条都守不住 —— `doc_hits` 由 `SELECT_SQL` 的正向 `= 'ok'`（`index_store.rs:280`）决定，status 一翻转必空，与虚表删没删无关；`fts_orphan_rows` 的判据是 `rowid NOT IN (SELECT doc_rowid FROM index_docs)`（`index_store.rs:167`），D3 保留主表行 ⇒ 它在这里**恒 0**。后果：把 `mark_missing` 换成一句裸 `UPDATE index_docs SET index_status='missing'` 也能全绿，而那是 D3 明确否掉的「只压症状」形态。修法是在该测试末尾并进一条断言（**测试条数不变，`index_job` 仍从 14 起算**）：
+
+```rust
+        // 这条才是「点删真的发生了」的判据：虚表侧只剩「留下.txt」那一行。
+        // 上面两条检索断言守的是另一件事（doc_hits 由 SELECT_SQL 的正向 `= 'ok'` 决定，
+        // status 一翻转必空；fts_orphan_rows 因 D3 保留主表行而恒 0）—— 措辞按 Task 2 评审订正。
+        let fts_total: i64 = conn
+            .query_row("SELECT count(*) FROM index_docs_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fts_total, 1, "变异：把 reclaim_missing 里的 mark_missing 换成裸 UPDATE 只改状态 ⇒ 这里是 2，这条红");
+```
+
+   同时把头注释里「最后两条检索断『删的是虚表侧那一半』…只数行数的话 `ok` 行还留在 FTS 里、照样搜得到」那两行改成：「检索两条断的是这一行退出召回；虚表点删由末尾那条 `count(*) FROM index_docs_fts` 承重（`fts_orphan_rows` 在保留主表行的形态下恒 0，不承重，见 Task 2 评审 I-1）」。
+
+2. **给「两侧同源」补上唯一的破坏序列出处**（Minor-1，`index_job.rs:136` 那句现在写得像无条件事实）：句后加一句 dated 附注 —— 稳态构造不出不同源（`targets()` 原样取 `project_dirs.path` → `WalkDir::new(root)` → `entry.path().display()`，库里侧 `write_doc` 落的就是同一个 `file.path`），唯一可破坏的序列是**作业运行中改指 / 注销根目录**（`project.rs:343-347` 与 `index_job.rs:110-119` 的旧快照写回窗口）：旧根的行被写回来、而 sweep 不收（该项目此时有新 root 行，`NOT EXISTS` 不成立）⇒ 下一轮旧串成片标 missing。要点明**那不是误删活 root 下的行**，它把 M3 I3 那种「永久可搜的陈旧行」收敛掉了；Task 5 的事务关的是两条语句之间的窗口，关不到这个。
+
+3. **`updated_at` 那一格记成有名事实，不补断言**（Minor-2，落在 `index_store.rs:717-718` 的注释）：D4 说「只动 `index_status` 与 `updated_at`」，但五列快照刻意不含 `updated_at`（SQLite 的 `datetime('now')` 是秒级粒度，同秒内前后相等 ⇒ 断它会 flaky），而 `index_docs.updated_at` 全仓零消费者 —— 删掉 SET 里那句 `updated_at = datetime('now')`，138 条全绿。在本模块测试的 `snapshot` 上方写一行点名：「`updated_at` 不入快照（同秒必等，断它会 flaky）且全仓零消费者 ⇒ 这一格无守护，是裁过的有名缺口，别当漏写」。**只写注释，不动断言、不动实现。**
 
 - [ ] **Step 1: 写四条测试**
 
@@ -579,13 +600,14 @@ Expected: `142 passed; 0 failed`，`index_job` 模块 **18** 条。
 2. 删掉 `if outcome.capped` ⇒ Expected：`a_capped_scan_marks_nothing` 红（`left: 1, right: 0`）。
 3. 把 `MISSING_FUSE_MIN_ROWS` 改成 `0` ⇒ Expected：`the_fuse_floor_lets_a_small_majority_reclaim_through` 红（`left: 0, right: 6` —— 六个候选被地板归零挡掉了）。
 4. 删掉整个熔断 `if` ⇒ Expected：`the_fuse_refuses_a_mass_reclaim` 红（`left: 24, right: 0`）。第 3 条不受影响 —— 「过半」与「过地板」两个条件各有一条测试守着，这是 D5 那支熔断唯一的完整守护形态。
+5. **Step 0 第 1 项自己的取证**：把 `reclaim_missing` 循环体里的 `mark_missing(conn, *rowid)?` 换成一句裸 `UPDATE index_docs SET index_status = 'missing' WHERE doc_rowid = ?1` ⇒ Expected：`reclaim_marks_rows_the_pass_did_not_see` 红在末尾那条 `fts_total == 1`（实际 2）。这条红不了就说明并进的位置不对（它在状态翻转之后跑，任何「只翻状态」的实现都躲不过）。
 
 - [ ] **Step 6: 门禁**：两条 clippy `exit=0`；`grep -rn "MISSING_FUSE_MIN_ROWS" src-tauri/src/` 期望**恰好 2 行**（定义 + 使用）。
 
 - [ ] **Step 7: 提交**
 
 ```bash
-git add src-tauri/src/index_job.rs
+git add src-tauri/src/index_job.rs src-tauri/src/index_store.rs
 git commit -m "feat(m5): 差集回收的熔断（过半且过地板行则本轮不比对）"
 ```
 
@@ -666,6 +688,8 @@ Expected: 新用例 FAIL，红点在 `assert_eq!(missing_rows(&conn, "p1"), 1, .
 
 Run: `cd src-tauri && cargo test --lib 2>&1 | tail -5; echo exit=${PIPESTATUS[0]}`
 Expected: `143 passed; 0 failed`，`index_job` 模块 **19** 条。**既有用例必须一条都不红**，尤其是 `run_pass_indexes_a_generated_tree_and_separates_outcomes`、`missing_root_is_flagged_without_killing_the_run`、`a_pass_reclaims_rows_left_by_an_unrooted_project`（它们库里都有真实 tempdir 行，接线若误标会当场红）。
+
+Task 2 评审的两条结论对本任务有效，写在这里免得下一个人重新发现：① 「库里 path 与本轮 path 逐字同源」这件事**不是**无守护 —— 既有 `second_pass_skips_unchanged_files`（`index_job.rs:600-614`，末句 `unchanged == 1`）已经用真两轮 `run_pass` 加上 `current_rowid` 的 `path = ?2` 谓词钉住了写读两端逐字相等，所以本任务不是唯一证据、别把它当唯一证据来设计；② 但本任务里「**同一 `doc_rowid` 回 ok**」那一条是唯一的 —— 两侧不同源时第二轮是**插一条新行**而不是更新旧行，只有这一条能区分。它**不许被弱化**成「missing 计数归零」那种两读的断言。
 
 - [ ] **Step 5: 变异取证**
 
