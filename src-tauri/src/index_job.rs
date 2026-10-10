@@ -5,6 +5,7 @@
 //!   （要 `AppHandle`），正确性由 Task 12 的真机验证承担 —— 别在这里写只能证明 mock 的测试；
 //!   但 `RunningGuard` 的复位语义是可测的，`running_flag_is_released_even_when_the_job_panics` 钉它。
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,8 +17,8 @@ use tauri::{AppHandle, Emitter};
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::extract::{extract_text, panic_to_err};
-use crate::index_scan::{scan_root, ScanOptions};
-use crate::index_store::{clear_project, current_rowid, write_doc, DocOutcome};
+use crate::index_scan::{scan_root, ScanOptions, ScanOutcome};
+use crate::index_store::{clear_project, current_rowid, doc_rows_for_project, mark_missing, write_doc, DocOutcome};
 
 pub const PROGRESS_EVENT: &str = "index://progress";
 /// 每 20 个文件回一次进度：5 万文件全量跑，逐文件 emit 会把事件队列压垮，
@@ -129,6 +130,50 @@ pub fn sweep_unrooted_projects(conn: &Connection) -> AppResult<usize> {
         clear_project(conn, id)?;
     }
     Ok(ids.len())
+}
+
+/// 差集回收：本轮**完整**扫过这个项目之后，把「库里有行、本轮扫不到」的登记标成失效。
+/// 集合两侧同源（库里那行的 path 就是上一轮 `WalkDir::new(登记的 root 串)` 拼出来的），
+/// 所以一律用原样字符串比对：不做大小写折叠、不做 canonicalize（spec D7 —— 折叠会让换写法
+/// 变成「旧行永久谎标 missing」，因为 `UNIQUE (project_id, path)` 是 BINARY 比较）。
+/// 返回标掉的行数；调用方刻意丢弃，形状与轮末那句 `let _ = sweep_unrooted_projects(conn)?;` 一致。
+/// 临时放行：生产调用点在 Task 4 的 `run_pass`，本任务落地时 lib 目标内还没有人调它，
+/// 而 `cargo clippy --lib` 不带 `--tests` 会把每个无调用点的 `pub` 项判成 `dead_code`。
+/// Task 4 Step 3 删掉这一行连同上面两句注释，Step 6 的门改成 exit=1 收口。
+#[allow(dead_code)]
+pub fn reclaim_missing(
+    conn: &Connection,
+    project_id: &str,
+    outcome: &ScanOutcome,
+    root_missing: bool,
+) -> AppResult<usize> {
+    // 闸门一：盘没挂载 ≠ 文件全被删。root_missing 时 run_pass 手里是 Default::default() 的空集合，
+    // 少了这一支就会把整个项目的行成片标失效 —— 而本工具的常态用法里有移动盘与未挂载盘。
+    // 「本轮零扫到」不另立闸门：它与这一支是同一个条件（spec 第四节记着这次合并）。
+    if root_missing {
+        return Ok(0);
+    }
+    // 闸门二：capped 的集合是 break 出来的，只含配额内前 N 个；配额外的老行不是被删了，是没轮到被看见。
+    if outcome.capped {
+        return Ok(0);
+    }
+    // 两桶都要：超限文件照样有行（too_large），漏了这一桶就是把每个超限文件误标失效。
+    let seen: HashSet<&str> = outcome
+        .files
+        .iter()
+        .chain(outcome.over_size.iter())
+        .map(|f| f.path.as_str())
+        .collect();
+    let tracked = doc_rows_for_project(conn, project_id)?;
+    let candidates: Vec<i64> = tracked
+        .iter()
+        .filter(|(_, path)| !seen.contains(path.as_str()))
+        .map(|(rowid, _)| *rowid)
+        .collect();
+    for rowid in &candidates {
+        mark_missing(conn, *rowid)?;
+    }
+    Ok(candidates.len())
 }
 
 /// 时间戳走 SQLite 的 `datetime('now')`：`chrono` 虽在 spec 第七节的清单里，但 Cargo.toml
@@ -482,6 +527,27 @@ mod tests {
 
     fn no_cancel() -> AtomicBool {
         AtomicBool::new(false)
+    }
+
+    /// 不经磁盘、直接给 `reclaim_missing` 造本轮集合。`capped` 一并可设，
+    /// 这样「配额触顶」那条闸门能被单独触发（T3）。两桶分开传，就是为了能单独验 over_size。
+    fn outcome_with(files: &[&str], over_size: &[&str], capped: bool) -> crate::index_scan::ScanOutcome {
+        crate::index_scan::ScanOutcome {
+            files: files.iter().map(|p| scanned(p)).collect(),
+            over_size: over_size.iter().map(|p| scanned(p)).collect(),
+            walk_errors: vec![],
+            capped,
+        }
+    }
+
+    /// 库里该项目已标 missing 的行数。T3/T4 靠它断「一格都没动」。
+    fn missing_rows(conn: &Connection, project_id: &str) -> i64 {
+        conn.query_row(
+            "SELECT count(*) FROM index_docs WHERE project_id = ?1 AND index_status = 'missing'",
+            [project_id],
+            |r| r.get(0),
+        )
+        .unwrap()
     }
 
     /// 库里的行数。重建用例要拿它证明「磁盘上没了的旧行跟着掉」，
@@ -949,5 +1015,54 @@ mod tests {
         assert!(crate::index_store::doc_hits(&conn, "付款条件", 20).unwrap().is_empty(),
             "软删项目的内容靠 deleted_at 过滤挡住，不是靠删行 —— 行在库里而搜不到才是对的");
         assert_eq!(crate::index_store::doc_hits(&conn, "验收", 20).unwrap().len(), 1, "活项目照常可搜");
+    }
+
+    /// 本轮扫到 2 条、库里有 3 条 ⇒ 只有「没了.txt」进差集。
+    /// 断言分工：`== 1` 断计数；按 rowid 断 status 断「动的是哪一行」；最后两条检索断
+    /// 「删的是虚表侧那一半」—— 只数行数的话，`ok` 行还留在 FTS 里、照样搜得到，
+    /// 而用户在首屏看到的失效（M3 当年 I3 的原话）就是这件事。
+    #[test]
+    fn reclaim_marks_rows_the_pass_did_not_see() {
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", Path::new("C:/根"));
+        write_doc(&conn, "p1", &scanned("C:/根/留下.txt"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        let gone = write_doc(&conn, "p1", &scanned("C:/根/没了.txt"), DocOutcome::Ok("报价单里写着验收流程".into())).unwrap();
+        write_doc(&conn, "p1", &scanned("C:/根/超限.txt"), DocOutcome::Skipped("too_large")).unwrap();
+
+        assert_eq!(doc_rows(&conn, "p1"), 3, "前提：三行都真在库里");
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收流程", 20).unwrap().len(), 1,
+            "前提：那行正文此刻真搜得到，否则末尾「搜不到」什么都没证明");
+
+        let o = outcome_with(&["C:/根/留下.txt", "C:/根/超限.txt"], &[], false);
+        assert_eq!(reclaim_missing(&conn, "p1", &o, false).unwrap(), 1);
+
+        let status: String = conn
+            .query_row("SELECT index_status FROM index_docs WHERE doc_rowid = ?1", [gone], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "missing");
+        assert_eq!(missing_rows(&conn, "p1"), 1, "只该动差集里那一行");
+        assert!(crate::index_store::doc_hits(&conn, "验收流程", 20).unwrap().is_empty(),
+            "还搜得到就说明虚表侧没删干净");
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收指标", 20).unwrap().len(), 1, "留下那行不许被牵连");
+        assert_eq!(crate::index_store::fts_orphan_rows(&conn), 0);
+    }
+
+    /// 超限文件本轮落在 `over_size` 桶里（它有一行 too_large）。集合漏掉这一桶，
+    /// 就等于把每一个超限文件标成失效 —— 本轮最容易写错的一格，所以单独一条测试守。
+    #[test]
+    fn an_over_size_row_still_on_disk_is_not_marked_missing() {
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", Path::new("C:/根"));
+        write_doc(&conn, "p1", &scanned("C:/根/留下.txt"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        let big = write_doc(&conn, "p1", &scanned("C:/根/大图.txt"), DocOutcome::Skipped("too_large")).unwrap();
+
+        let o = outcome_with(&["C:/根/留下.txt"], &["C:/根/大图.txt"], false);
+        assert_eq!(reclaim_missing(&conn, "p1", &o, false).unwrap(), 0, "两桶都算扫到了 ⇒ 差集为空");
+
+        let status: String = conn
+            .query_row("SELECT index_status FROM index_docs WHERE doc_rowid = ?1", [big], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "skipped", "变异：构集合时只取 outcome.files ⇒ 这行被标 missing，这条红");
+        assert_eq!(missing_rows(&conn, "p1"), 0);
     }
 }
