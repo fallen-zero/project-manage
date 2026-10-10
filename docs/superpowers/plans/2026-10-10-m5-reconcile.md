@@ -235,11 +235,41 @@ git commit -m "feat(m5): index_docs 的失效读写两格（标 missing + 点删
 
 **Files:**
 - Modify: `src-tauri/src/index_job.rs`（新函数放在 `sweep_unrooted_projects` 之后；测试与两个夹具助手加进 `mod tests`）
-- Test: 同文件 `mod tests`
+- Modify: `src-tauri/src/index_store.rs`（**Task 1 的三处收尾，见 Step 0**：删掉两行 `#[allow(dead_code)]`、并进一条断言、改三处不实注释）
+- Test: `index_job.rs` 的 `mod tests`（新用例）+ `index_store.rs` 的 `mod tests`（并进既有用例，**条数不变**）
 
 **Interfaces:**
 - Consumes: T1 的 `doc_rows_for_project` / `mark_missing`；既有 `crate::index_scan::ScanOutcome`（字段 `files` / `over_size` / `walk_errors` / `capped`）、测试助手 `scanned(path)` / `doc_rows(conn, pid)` / `seeded_project`
 - Produces: `pub fn reclaim_missing(conn: &Connection, project_id: &str, outcome: &ScanOutcome, root_missing: bool) -> AppResult<usize>`（本任务**不带熔断**，T3 再加）、测试助手 `outcome_with(...)` / `missing_rows(...)`
+
+- [ ] **Step 0: Task 1 的三处收尾（由 Task 1 评审判定；注释级 + 断言级零行为回归，不单开返工轮 —— 坑 56）**
+
+1. **并进一条断言，把 D4 的五根禁列一次守住。** 评审实测过：往 `mark_missing` 的 SET 里加 `indexed_at = NULL` 或 `error_msg = 'gone'`，Task 1 那两条新测试**全绿** —— 五列只有 `skip_reason` 有牙齿。修法不是新开一条测试（那会重开 136→137 的整条条数链），而是把 `index_store.rs` 第一条测试里的 `(status, reason)` 那次查询换成「写前 / 写后整行快照对比」：
+
+```rust
+        // D4 的五根禁列一次守住：只断 `skip_reason` 时，往 SET 里加 indexed_at = NULL 或
+        // error_msg = 'gone' 都抓不到（Task 1 评审实测）。改成元组对比后五列各自承重。
+        fn snapshot(c: &Connection, doc_rowid: i64) -> (Option<String>, Option<String>, i64, i64, Option<String>) {
+            c.query_row(
+                "SELECT skip_reason, error_msg, size, mtime, indexed_at FROM index_docs WHERE doc_rowid = ?1",
+                params![doc_rowid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap()
+        }
+        let before = snapshot(&c, rowid);
+        mark_missing(&c, rowid).unwrap();
+        assert_eq!(snapshot(&c, rowid), before,
+            "mark_missing 只许动 index_status 与 updated_at（spec D4）；变异：SET 里加 indexed_at = NULL ⇒ 这条红");
+```
+
+`snapshot` 写成测试模块里的**自由函数**（收 `&Connection` + `doc_rowid`），别写成闭包（借 `c` 之后同体还要用 `c` 会撞 borrow），也别为它开 `pub`。原来的 `assert_eq!(status, "missing", ...)` 那一条**保留不动** —— 它是新语义本身的断言，禁列快照替代不了；被替换掉的只有 `assert_eq!(reason, None, ...)` 那一条（`skip_reason` 已在元组第一位）。**条数一格都不变**：`index_store` 仍 17、全量仍 136（本仓先例：M4 终审批次那两处「并进既有测试体」，形状同为 N→N）。
+
+2. **三处注释不实，只改文字、不动断言**：
+   - `mark_missing` 里「本模块头注释已写明：按 `doc_id` 列删虚表是全表扫」—— 控制方已实读 `index_store.rs:1-9`，模块头**没有**这句话，唯一出处是 `db.rs:278`。改指 `db.rs:278`。
+   - 第一条测试头注释里「双侧删行也照样能过前两条」不成立：行真被删时取那行的 `query_row(...).unwrap()` 先 panic 于 `QueryEmpty`，测试照红、只是红点前移。改成「双侧删行也照样红，只是先红在取行那一步」。
+   - 第二条测试里「把 `<> 'missing'` 删掉 ⇒ 这条红」：实测先红在上一行的 `rows.len()`。改成「先红在 `rows.len()`」。
+3. 删掉 Task 1 开在两个函数上方的 `#[allow(dead_code)]` **连同各自的注释行**（下一节的 Step 3 说明为什么此刻必须删）。
 
 - [ ] **Step 1: 先加两个测试助手，再写两条失败测试**
 
@@ -386,6 +416,7 @@ Expected: `138 passed; 0 failed`，`index_job` 模块 **14** 条。
 1. `let seen` 只取 `outcome.files`（去掉 `.chain(outcome.over_size.iter())`）⇒ Expected：第二条红在 `== 0`（实际 1）。
 2. `filter` 谓词取反（`seen.contains`）⇒ Expected：第一条红在 `== 1`（实际 2）。
 3. 注释掉 `for` 循环体 ⇒ Expected：第一条红在 `status == "missing"`（掉进 `Ok(1)` 但库里没动）。
+4. **Step 0 那条补强自己的取证**：往 `mark_missing` 的 UPDATE 的 SET 里加 `indexed_at = NULL` ⇒ Expected：`mark_missing_flips_the_status_and_drops_only_the_fts_row` 红在写后快照对比那条（`indexed_at: Some(..) -> None`）。这条变异在 Task 1 落地时是全绿通过的，正是评审报 Important-1 的依据；补强之后必须能红，红不了就说明快照写错了（比如漏了某一列或比的是同一份 before）。
 
 - [ ] **Step 6: 门禁（三条，第 2、3 条是这次新增的回收门与自我豁免门）**
 
@@ -402,7 +433,7 @@ Expected：两条 clippy `exit=0` 且 0 warning；`index_store.rs` 那条 **exit
 - [ ] **Step 7: 提交**
 
 ```bash
-git add src-tauri/src/index_job.rs
+git add src-tauri/src/index_job.rs src-tauri/src/index_store.rs
 git commit -m "feat(m5): reclaim_missing 的差集主路径（两条硬闸门 + 两桶集合）"
 ```
 
