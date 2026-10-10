@@ -198,6 +198,9 @@ pub fn mark_missing(conn: &Connection, doc_rowid: i64) -> AppResult<()> {
 }
 ```
 
+> **这两行 `#[allow(dead_code)]` 是计划文本自身的缺陷造成的，2026-10-10 由 Task 1 实现者撞出来后在此定稿**（账本记为 Ruling）：`doc_rows_for_project` 与 `mark_missing` 的**生产**调用点在 Task 2/3 的 `reclaim_missing`，而 `cargo clippy --lib` 不带 `--tests` ⇒ `cfg(test)` 关闭时两个 `pub` 函数在 lib 目标里零调用点，每条会被判 `dead_code`，与本任务 Step 6 要求的「两条 clippy 全绿」互斥。这是 HANDOFF 坑 59 的第二层（「模块声明归下一个任务」的同族）。
+> 定稿写法：紧贴两个函数各加一行 `#[allow(dead_code)]`，注释点名「生产调用点在 Task 2/3 的 `reclaim_missing`」，形状照仓内既有先例 `db.rs:30`（`open_in_memory` 同款处境）。**回收是硬要求**：Task 2 Step 3 必须删掉这两行，Task 2 Step 6 有一条 grep 门收口 —— 只写在注释里的「Task 2 记得删」等于没人负责（坑 48）。除这两行之外本任务不许有任何净新增。
+
 - [ ] **Step 4: 跑绿**
 
 Run: `cd src-tauri && cargo test --lib 2>&1 | tail -5; echo exit=${PIPESTATUS[0]}`
@@ -325,7 +328,7 @@ Expected: 编译失败 `cannot find function reclaim_missing in this scope`。
 
 - [ ] **Step 3: 最小实现**
 
-先把 `doc_rows_for_project, mark_missing` 加进 `index_job.rs` 顶部**已有的**那条 `use crate::index_store::{...}`（别新开一行 use），再补 `use std::collections::HashSet;`（若已有则不重复）。函数放在 `sweep_unrooted_projects` 之后：
+先把 `doc_rows_for_project, mark_missing` 加进 `index_job.rs` 顶部**已有的**那条 `use crate::index_store::{...}`（别新开一行 use），再补 `use std::collections::HashSet;`（若已有则不重复）。**同时删掉 Task 1 开在 `index_store.rs` 的那两行 `#[allow(dead_code)]` 连同它们各自的注释行** —— 调用点从这一任务起真的存在了，豁免留在树上就是一句过期假话（Step 6 的门会抓）。函数放在 `sweep_unrooted_projects` 之后：
 
 ```rust
 /// 差集回收：本轮**完整**扫过这个项目之后，把「库里有行、本轮扫不到」的登记标成失效。
@@ -333,6 +336,10 @@ Expected: 编译失败 `cannot find function reclaim_missing in this scope`。
 /// 所以一律用原样字符串比对：不做大小写折叠、不做 canonicalize（spec D7 —— 折叠会让换写法
 /// 变成「旧行永久谎标 missing」，因为 `UNIQUE (project_id, path)` 是 BINARY 比较）。
 /// 返回标掉的行数；调用方刻意丢弃，形状与轮末那句 `let _ = sweep_unrooted_projects(conn)?;` 一致。
+/// 临时放行：生产调用点在 Task 4 的 `run_pass`，本任务落地时 lib 目标内还没有人调它，
+/// 而 `cargo clippy --lib` 不带 `--tests` 会把每个无调用点的 `pub` 项判成 `dead_code`。
+/// Task 4 Step 3 删掉这一行连同上面两句注释，Step 6 的门改成 exit=1 收口。
+#[allow(dead_code)]
 pub fn reclaim_missing(
     conn: &Connection,
     project_id: &str,
@@ -380,7 +387,17 @@ Expected: `138 passed; 0 failed`，`index_job` 模块 **14** 条。
 2. `filter` 谓词取反（`seen.contains`）⇒ Expected：第一条红在 `== 1`（实际 2）。
 3. 注释掉 `for` 循环体 ⇒ Expected：第一条红在 `status == "missing"`（掉进 `Ok(1)` 但库里没动）。
 
-- [ ] **Step 6: 门禁**：两条 clippy `exit=0` 0 warning（同 T1 Step 6 的命令）。
+- [ ] **Step 6: 门禁（三条，第 2、3 条是这次新增的回收门与自我豁免门）**
+
+```bash
+cd src-tauri && cargo clippy --lib -- -D warnings; echo exit=$?
+cd src-tauri && cargo clippy --lib --all-targets -- -D warnings; echo exit=$?
+grep -rn "allow(dead_code)" src-tauri/src/index_store.rs; echo exit=$?
+grep -n "allow(dead_code)" src-tauri/src/index_job.rs; echo exit=$?
+```
+Expected：两条 clippy `exit=0` 且 0 warning；`index_store.rs` 那条 **exit=1**（Task 1 那两行豁免的回收证据 —— 注意本仓有两棵 `src/`，这条门必须写全 `src-tauri/src/`，按字面跑 `src/` 抓的是前端树，永远产不出它承诺的残留，坑 86）；`index_job.rs` 那条**恰好 1 行**。
+
+**为什么本任务要再开一行豁免**（与 Task 1 同一条坑 59 的第二层，不是新增范围）：`reclaim_missing` 的生产调用点在 Task 4 的 `run_pass`，本任务落地时它在 lib 目标内零调用点，`cargo clippy --lib` 不带 `--tests` 会判 `dead_code`。定稿写法：紧贴 `reclaim_missing` 一行 `#[allow(dead_code)]`，注释点名「生产调用点在 Task 4 的 `run_pass`，本任务先落函数」。Task 4 Step 3 删掉它、Step 6 的门改成 `exit=1` 收口。
 
 - [ ] **Step 7: 提交**
 
@@ -599,7 +616,9 @@ git commit -m "feat(m5): 差集回收的熔断（过半且过地板行则本轮�
 Run: `cd src-tauri && cargo test --lib 2>&1 | tail -30; echo exit=${PIPESTATUS[0]}`
 Expected: 新用例 FAIL，红点在 `assert_eq!(missing_rows(&conn, "p1"), 1, ...)`（`left: 0, right: 1`）—— 回收函数有了，但没人调它。
 
-- [ ] **Step 3: 接线**
+- [ ] **Step 3: 接线（并回收 Task 2 的临时豁免）**
+
+先删掉 Task 2 开在 `reclaim_missing` 上方那行 `#[allow(dead_code)]` 连同它的两句注释 —— 生产调用点从本任务起真的存在了，豁免留着就是一句过期假话（Step 6 的门会抓）。再加这一句：
 
 ```rust
         // 差集回收（M5）：本轮完整扫过这个项目之后，库里那些「本轮没扫到」的行标成失效。
@@ -623,7 +642,15 @@ Expected: `143 passed; 0 failed`，`index_job` 模块 **19** 条。**既有用�
 2. 把 `root_missing` 实参硬编码成 `false` ⇒ Expected：`missing_root_is_flagged_without_killing_the_run`（既有）或本任务用例红。**若两条都不红**，说明这个实参在本轮无守护 —— 如实登记为有名缺口，别伪造结论（本仓「等价变异全绿 = 零守护」的规矩）。
 3. 把它挪到 `on_progress(...)` 之后 ⇒ Expected：全量仍 143 绿 ⇒ 记为「顺序等价变异」，登记即可，不新增断言。
 
-- [ ] **Step 6: 门禁**：两条 clippy `exit=0`；全量 143。
+- [ ] **Step 6: 门禁（含 Task 2 那块豁免的回收证据）**
+
+```bash
+cd src-tauri && cargo clippy --lib -- -D warnings; echo exit=$?
+cd src-tauri && cargo clippy --lib --all-targets -- -D warnings; echo exit=$?
+grep -rn "allow(dead_code)" src-tauri/src/index_job.rs; echo exit=$?
+grep -rn "allow(dead_code)" src-tauri/src/index_store.rs; echo exit=$?
+```
+Expected：两条 clippy `exit=0` 且 0 warning；`index_job.rs` 那条 **exit=1**（Task 2 那块豁免已回收，全仓 `dead_code` 豁免至此只剩 `db.rs:30` 那处 M1 遗留的永久豁免，不归本轮、不许顺手删）；`index_store.rs` 那条仍 **exit=1**（Task 2 收掉的两行不会被本任务又写回来）。全量 **143 passed**。
 
 - [ ] **Step 7: 提交**
 
