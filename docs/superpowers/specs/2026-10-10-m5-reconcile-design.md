@@ -180,7 +180,7 @@ Rust 单测一律 `db::open_in_memory()` + `tempfile::tempdir()` 夹具，绝不
 2. **首轮自动索引是分钟级，而 `/index` 不是首屏**：用户可能几小时没察觉索引在跑；那段时间正文段是逐轮补齐的（不是谎，是不全）。
 3. **无权限子树的单点误标不自愈**，熔断只挡成片（第四节已点名）。
 4. **WAL 写密集期间的首屏检索延迟**：M4 量到的 612–737 ms 是静场读数；本轮启动即有写在跑。第八节第 10 条出数字，越线才立 finding。
-5. **三成因共用 `preview_unavailable`** = 同一句红字三个意思（行不 `ok` / 尺寸超限 / 单飞占用），只靠 `hint` 分。终审若判不可接受，正解是加一个 `preview_*` 码 ⇒ 那要**先改 M4 §七 的码表契约**再实现，不许实现者临场加。
+5. **三成因共用 `preview_unavailable`** = 同一句红字三个意思（行不 `ok` / 尺寸超限 / 单飞占用），只靠 `hint` 分。终审若判不可接受，正解是加一个 `preview_*` 码 ⇒ 那要**先改 M4 §七 的码表契约**再实现，不许实现者临场加。**2026-10-10 Task 7 评审把这条的代价量大了**：预览对话框（`src/components/doc-preview-dialog.tsx`）的 catch 只做 `setError(toAppError(e).message)`，渲染处也只印这个串 —— `hint` 在 `ipc.ts` 的 `AppErrorShape` 里、在回线上，但**从来不显示**，所以三条成因在屏幕上现在是**逐字同一句**。D10 那句「靠 hint 分」在这一格根本不落地。处置：Task 9 新增 **Step 3b**，按同仓 `ledger-panel.tsx:177` 的先例把 hint 拼进那一句红字（一行、不新增状态、不碰线格式）；改完之后本条的代价才等于「文案变长」，Task 10 的真机断言 8 也才能按 hint 首句判闸门真拒。
 6. **熔断跳过时界面与不跳过时一模一样**，用户看不出被挡（D8 的直接代价）。缓解只有一句静态界面文案，不是数据。
 7. **`missing` 行只增不减**：永久扫不到的那些会累积，因为本轮保留元数据行兑现可见性、又不给删除入口。M5.5 若做「失效清单一键清除」要新 IPC 命令。
 8. **`unchecked_transaction` 走 `BEGIN DEFERRED`**（vendored `rusqlite-0.40.2/src/transaction.rs` 的 `new_unchecked` match 臂）。SQLite 在 DEFERRED 事务里把读升级为写失败时，据说是**立即**回 `SQLITE_BUSY` 而不走 busy handler —— **此条未验证**，核对路径是 SQLite 官方事务/锁定文档，以及计划里加一条「自动轮写密集时做一次改指」的并发探针。备选缓解两个：改用 `Immediate`（`set_transaction_behavior` 要 `&mut Connection`，签名得动）或失败重试一次。落点 8 的实现要按这次核对结论定。

@@ -1125,13 +1125,13 @@ git commit -m "feat(m5): 预览加单飞闸门与 Drop 复位（终审 I-5）"
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let conn = db::open(&data_dir)?;
-            let index = std::sync::Arc::new(index_job::IndexShared::new());
+            let index = Arc::new(index_job::IndexShared::new());
             app.manage(AppState {
                 conn: Mutex::new(conn),
                 data_dir: data_dir.clone(),
                 mk: Mutex::new(None),
-                index: std::sync::Arc::clone(&index),
-                preview: std::sync::Arc::new(doc_preview::PreviewShared::new()),
+                index: Arc::clone(&index),
+                preview: Arc::new(doc_preview::PreviewShared::new()),
             });
             // M5 D1：启动即追平一轮。rebuild=false 走既有增量判据（size + mtime + ok 相同 ⇒ 连文件都
             // 不打开），所以常态代价是一次目录遍历 + stat，不是重抽；root 不可达的项目连 walkdir 都不发起。
@@ -1145,7 +1145,7 @@ git commit -m "feat(m5): 预览加单飞闸门与 Drop 复位（终审 I-5）"
         })
 ```
 
-`data_dir` 那行从 `data_dir,` 改成 `data_dir: data_dir.clone(),`（自动轮要拿走原值），别改成传引用。
+`data_dir` 那行从 `data_dir,` 改成 `data_dir: data_dir.clone(),`（自动轮要拿走原值），别改成传引用。**`Arc` 一律写裸名**：`lib.rs` 顶部已有 `use std::sync::{Arc, Mutex, MutexGuard};`，Task 7 落地时那两处 `std::sync::Arc` 已由控制方统一成裸名（同文件相邻两格两种写法是坑 60 那一族的「同一含义两种写法」），本任务新增的三处照裸名写，别把全限定形式带回来。
 
 - [ ] **Step 2: 全量门禁**
 
@@ -1172,11 +1172,12 @@ git commit -m "feat(m5): 应用启动自动追平一轮增量（复用 index_job
 
 **Files:**
 - Modify: `src/pages/index-status.tsx`（`STATUS_FILTERS`、项目行计数那三格、文件行 Badge）
+- Modify: `src/components/doc-preview-dialog.tsx`（Step 3b：让预览的红色回执把 `hint` 也带上 —— Task 7 评审查到 D10 的前提在这一格落空）
 - Test: 无（JSX 不在 `node --test` 那张网里，M4 §八 已定；本轮不新增前端测试文件、不新增依赖）
 
 **Interfaces:**
-- Consumes: `index_overview` 已有的 `missing` 计数（T4 之后真的有数了）、`index_docs(projectId, status, limit, offset)` 走参数（`?2 IS NULL` 放开条件）
-- Produces: 界面能列出失效行。`src/types/index.ts` **不改**（`pending`/`missing` 字段已在）
+- Consumes: `index_overview` 已有的 `missing` 计数（T4 之后真的有数了）、`index_docs(projectId, status, limit, offset)` 走参数（`?2 IS NULL` 放开条件）；`src/lib/ipc.ts` 的 `AppErrorShape { code, message, hint }`（`hint` 一直在回线上，只是这一格从不渲染）
+- Produces: 界面能列出失效行；预览失败时三条成因在屏幕上分得开。`src/types/index.ts` **不改**（`pending`/`missing` 字段已在）
 
 - [ ] **Step 1: 筛选下拉加一项**
 
@@ -1221,6 +1222,26 @@ const STATUS_FILTERS: { value: string; label: string }[] = [
 
 **与 spec 第五节的偏差要点名**：规格里那句「文件行给 `missing` 一个配色分支」按实读判为零价值，落地改成 `title` 一句说明。这句话必须写进报告的「与简报/spec 的偏差」段交评审裁定，不许默默改（HANDOFF 坑 79 同形：改规格文本要走控制方，不是实现者临场发挥）。样式一律 Tailwind 工具类，本轮不新增 `.scss`，也不为 `missing` 新增 Badge variant。
 
+- [ ] **Step 3b: 预览红字把 `hint` 带上（Task 7 评审查到 D10 的前提在这一格落空）**
+
+规格第六节与 D10 的裁定是「不扩错误码，三条成因靠 `hint` 分」，但 `src/components/doc-preview-dialog.tsx` 的 catch 只做了一件事 —— `setError(toAppError(e).message)`，而渲染处也只印这个串。`hint` 在 `src/lib/ipc.ts` 的 `AppErrorShape` 里、在回线上、**从不显示** ⇒ 「行不 `ok`」「文件索引后长大超过上限」「已有一份预览正在抽取」这三条在屏幕上现在是**逐字同一句红字**，D10 那条裁定实际不落地（同仓 `src/components/ledger-panel.tsx:177` 是会渲染 hint 的，有先例可抄）。
+
+改法就一行拼装，**不新增状态格、不动 `error` 的类型、不碰线格式**：
+
+```tsx
+      .catch((e) => {
+        if (!alive) return;
+        const ae = toAppError(e);
+        // 三条 preview_unavailable 成因只能靠 hint 分（spec D10）：只印 message 的话它们在屏幕上
+        // 逐字相同（Task 7 评审查到的正是这一格）。同仓先例：ledger-panel.tsx:177。
+        setError(ae.hint ? `${ae.message}（${ae.hint}）` : ae.message);
+      });
+```
+
+保持既有语义不动：`alive` 那个 effect 清理守卫不许丢（它是 M4 记过的「预览切档竞态」唯一的运行时守护），原来 `alive && setError(...)` 的短路含义要等价保留。若你更愿意挂成 `title` 悬浮而不是拼进串，二选一落地并在报告里写明选了哪种，**别同时做两份**。
+
+连带影响要记进报告：Task 10 的真机断言 8 从此可以按「hint 首句」判闸门是否真拒（原来只能断 `code`，三条成因在界面上不可分）。
+
 - [ ] **Step 4: 门禁**
 
 ```bash
@@ -1233,8 +1254,8 @@ Expected: build `exit=0`；node 仍 `ℹ tests 8 / pass 8 / fail 0`；密文列�
 - [ ] **Step 5: 提交**
 
 ```bash
-git add src/pages/index-status.tsx
-git commit -m "feat(m5): 索引页显示失效行（筛选、计数、配色三格）"
+git add src/pages/index-status.tsx src/components/doc-preview-dialog.tsx
+git commit -m "feat(m5): 索引页显示失效行；预览红字带上 hint（三成因在界面上分得开）"
 ```
 
 ---
