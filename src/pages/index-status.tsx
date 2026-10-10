@@ -45,6 +45,7 @@ const STATUS_FILTERS: { value: string; label: string }[] = [
   { value: "ok", label: "ok（已入索引）" },
   { value: "skipped", label: "skipped（跳过）" },
   { value: "failed", label: "failed（失败）" },
+  { value: "missing", label: "missing（磁盘上已不存在）" },
 ];
 
 function fmtBytes(n: number): string {
@@ -416,8 +417,8 @@ export function IndexStatusPage() {
         <CardHeader>
           <CardTitle>按项目的索引状态</CardTitle>
           <CardDescription>
-            点一行看它的文件清单。计数只念 ok / skipped / failed 三档：另外两档在本阶段压根没有写入方，
-            摆两个 0 上去会被读成「都处理完了」，所以不给它们占栏位。
+            点一行看它的文件清单。计数念 ok / skipped / failed / missing 四档：pending 在本阶段没有写入方，
+            摆一个 0 上去会被读成「都处理完了」，所以不给它占栏位。
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-1.5">
@@ -460,6 +461,7 @@ export function IndexStatusPage() {
                     <span>ok {p.ok}</span>
                     <span>skipped {p.skipped}</span>
                     <span className={p.failed > 0 ? "text-destructive" : ""}>failed {p.failed}</span>
+                    <span className={p.missing > 0 ? "text-destructive" : ""}>missing {p.missing}</span>
                   </span>
                 </span>
               </Button>
@@ -515,6 +517,11 @@ export function IndexStatusPage() {
                         <Badge
                           variant={
                             r.status === "ok" ? "secondary" : r.status === "failed" ? "destructive" : "outline"
+                          }
+                          title={
+                            r.status === "missing"
+                              ? "该文件在磁盘上已不存在，正文已退出检索；文件放回后重跑一轮索引会自动回填这一行"
+                              : undefined
                           }
                         >
                           {r.status}

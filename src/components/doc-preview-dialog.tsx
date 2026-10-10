@@ -67,7 +67,13 @@ export function DocPreviewDialog({ docId, projectId, query, onOpenChange }: Prop
       .docPreview(docId, query)
       .then((d) => alive && setData(d))
       // 预览失败只让对话框变红，绝不让整段结果消失（spec §七）。
-      .catch((e) => alive && setError(toAppError(e).message));
+      .catch((e) => {
+        if (!alive) return;
+        const ae = toAppError(e);
+        // 三条 preview_unavailable 成因只能靠 hint 分（spec D10）：只印 message 的话它们在屏幕上
+        // 逐字相同（Task 7 评审查到的正是这一格）。同仓先例：ledger-panel.tsx:177。
+        setError(ae.hint ? `${ae.message}（${ae.hint}）` : ae.message);
+      });
     return () => {
       alive = false;
     };
