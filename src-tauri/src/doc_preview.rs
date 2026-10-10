@@ -256,6 +256,49 @@ fn stitch(chars: &[char], windows: &[(usize, usize)], hits: &[(usize, usize)]) -
     (out, ranges)
 }
 
+/// 预览的单飞闸门（终审 I-5）。住在 `doc_preview` 而不是塞进 `IndexShared`：那四格
+/// （cancel/running/summary/last_error）语义全是索引作业的，混一格预览状态会让下一个读者
+/// 重新发现一遍归属（spec D9）。
+#[derive(Default)]
+pub struct PreviewShared {
+    busy: std::sync::atomic::AtomicBool,
+}
+
+/// 进预览的票。Drop 复位，所以 panic 展开也照样放行 —— 形状照 `index_job::RunningGuard`。
+pub struct PreviewGuard {
+    shared: std::sync::Arc<PreviewShared>,
+}
+
+impl Drop for PreviewGuard {
+    fn drop(&mut self) {
+        self.shared.busy.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl PreviewShared {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `swap` 而不是「先 read 再 store」：命令体跑在多线程 worker 上，
+    /// 两步写会让两条都以为自己独占。
+    pub fn try_enter(shared: &std::sync::Arc<Self>) -> Option<PreviewGuard> {
+        if shared.busy.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        Some(PreviewGuard { shared: std::sync::Arc::clone(shared) })
+    }
+}
+
+/// 三成因里的第三种（D10：不扩码表，靠 hint 分）。
+pub fn busy() -> AppError {
+    AppError::new(
+        "preview_unavailable",
+        "这条索引记录不能预览",
+        Some("已有一份预览正在抽取原文，等它结束再试；大文件的抽取可能要几十秒"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,5 +528,35 @@ mod tests {
 
         let ok = render_preview(&id, &row, "验收", 100_000).unwrap();
         assert_eq!(ok.ranges.len(), 1, "阳性对照：上限放宽就该正常抽出");
+    }
+
+    /// 终审 I-5：命令体直接跑在 tokio **多线程** worker 上（`kind = "sync_threadpool"` 只是
+    /// tracing 标签，见 HANDOFF 坑 87），所以连点 N 份慢文档就是 N 个 worker 被占死，
+    /// 之后**所有** async 命令与插件异步任务一起排队。真机读数：单次慢预览 266,093 ms。
+    /// 单飞闸门：占用中第二条直接拒。第三条断言（释放后能再进）不可省 ——
+    /// 没有它，「永不放行」的实现也能过前两条。
+    #[test]
+    fn only_one_preview_is_in_flight_at_a_time() {
+        let shared = std::sync::Arc::new(PreviewShared::new());
+        let first = PreviewShared::try_enter(&shared);
+        assert!(first.is_some(), "空闲时第一条该进");
+        assert!(PreviewShared::try_enter(&shared).is_none(), "占用中第二条该被拒");
+        drop(first);
+        assert!(PreviewShared::try_enter(&shared).is_some(), "释放后该能再进");
+    }
+
+    /// 借 `index_job::running_flag_is_released_even_when_the_job_panics` 的形状。
+    /// 少了 Drop 复位（比如改成命令末尾手写 `store(false)`），一次 panic 就**永久**锁死预览，
+    /// 而界面只会一直念「已有一份预览正在抽取」，没有任何报错指向真正的原因。
+    #[test]
+    fn the_preview_gate_is_released_when_the_body_panics() {
+        let shared = std::sync::Arc::new(PreviewShared::new());
+        let outer = std::sync::Arc::clone(&shared);
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = PreviewShared::try_enter(&outer).expect("第一条该进");
+            panic!("预览体内炸");
+        }));
+        assert!(ran.is_err(), "前提：闭包确实 panic 了，否则下面那条断言什么都没证明");
+        assert!(PreviewShared::try_enter(&shared).is_some(), "panic 展开也必须把闸门放掉");
     }
 }
