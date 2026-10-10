@@ -814,6 +814,8 @@ Expected: 新用例 FAIL，红在 `root.as_deref() == Some("E:/旧根")`（实�
 
 `old` 那次查询、`if old.is_some_and(|old_path| old_path != path)` 里的 `clear_project`、末尾 `find_dir` **一字不动**（裸字符串比较判改指是 D7 的结论，本轮不改）。
 
+**顺带把规格风险 8 的那条未验证项结掉**（不靠 fetch，靠形状）：规格写的是「DEFERRED 事务里把读升级为写失败时 SQLite 会立即回 `SQLITE_BUSY` 而不走 busy handler」，那条语义只在**事务内先读过、再写**时才成立。本任务的 `tx` 体是 `BEGIN DEFERRED` → **第一件事就是 DELETE**（写），事务内在它之前没有任何 SELECT：`old` 那次查询在 `let tx = ...` **之前**、属事务外的自动提交读。所以这一格不构成风险 8 描述的那个形态，无须改 `Immediate`（那要 `set_transaction_behavior(&mut)`、签名得动）。**但这是一条形状不变量**：谁以后为了「顺手」把 `old` 那次 SELECT 移进事务里，风险 8 立刻成立。请把这件事写进代码注释（一句：「`old` 的读必须留在事务外 —— 挪进来会让本事务变成先读后写的 DEFERRED 形态，触发 SQLite 的立即 `SQLITE_BUSY` 而不走 `busy_timeout`」），并在报告 §「与规格风险对照」那一格写明你的核对方式是形状核对而非文档核，规格风险 8 由此降级为「形状守卫 + 未做并发实测」的有名项。
+
 - [ ] **Step 4: 跑绿**
 
 Run: `cd src-tauri && cargo test --lib 2>&1 | tail -5; echo exit=${PIPESTATUS[0]}`
