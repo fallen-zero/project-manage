@@ -54,7 +54,7 @@
 | 17 | `index_overview` 已 `pick("missing")`（值恒 0），前端 `ProjectState` 已有该字段 ⇒ 后端一旦写入，类型零改动 | `lib.rs:440`/`:501`、`src/types/index.ts:5-16` | `grep -n "missing" src-tauri/src/lib.rs src/types/index.ts` |
 | 18 | worker 自开连接 ⇒ 自动轮不占 `AppState.conn` 那把锁、不阻塞 IPC | `index_job.rs:365-367`、`:402-409` | `grep -n "db::open" src-tauri/src/index_job.rs` |
 | 19 | `PROGRESS_EVERY` 所在的那个常量区就是 `MISSING_FUSE_MIN_ROWS` 该住的家 | `index_job.rs:22-25` | `sed -n '20,26p' src-tauri/src/index_job.rs` |
-| 20 | 测试夹具里用假路径字符串（`scanned("C:/已注销/遗留说明.txt")`）是本仓 blessed 的做法，红线只约束「夹具文件落盘的位置」 | `index_job.rs:853-854` 的注释 | `sed -n '853,863p' src-tauri/src/index_job.rs` |
+| 20 | 测试夹具里用假路径字符串（`scanned("C:/已注销/遗留说明.txt")`）是本仓 blessed 的做法，红线只约束「夹具文件落盘的位置」 | `index_job.rs` 测试模块里 `scanned` 助手的头注释（**指针写符号**：Task 4 落地时这一处的原行号 `:853-854` 已漂到别的函数上，是坑 65/67/73 在本轮的又一次应验） | `grep -n "fn scanned" -A 3 src-tauri/src/index_job.rs` |
 
 **分模块条数（改动前后）**
 
@@ -653,12 +653,17 @@ git commit -m "feat(m5): 差集回收的熔断（过半且过地板行则本轮�
         // `root_missing` 那个实参传没传对：硬编码成 `false` 会让它的两行被成片标 missing。
         // 只钉 unit 级不够 —— Task 3 那四条 unit 用例是直接调 `reclaim_missing` 的，
         // 改调用点的实参它们一条都抓不到（「中间层没有测试等于没守」是 M3 的 I2 教训）。
-        // 两行是假路径字符串键（本仓 blessed 的做法，见 `index_job.rs:853-854` 的注释），
+        // 两行是假路径字符串键（本仓 blessed 的做法，出处是本测试模块里 `scanned` 助手的头注释
+        // —— 指针一律写符号，行号会漂：Task 4 落地时原写的 `index_job.rs:853-854` 已经漂到别处），
         // 磁盘上不需要真的存在。软删与无 root 行的形态不归这里（归 sweep 那两条既有用例）。
         conn.execute("INSERT INTO projects (id, name, status) VALUES ('p2', '盘没挂载的项目', '立项')", []).unwrap();
         conn.execute("INSERT INTO project_dirs (id, project_id, kind, path) VALUES ('p2-d', 'p2', 'root', 'Z:/没挂载/移动盘')", []).unwrap();
-        write_doc(&conn, "p2", &scanned("Z:/没挂载/移动盘/合同.txt"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
-        write_doc(&conn, "p2", &scanned("Z:/没挂载/移动盘/清单.txt"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        write_doc(&conn, "p2", &scanned("Z:/没挂载/移动盘/合同.txt"), DocOutcome::Ok("盘没挂载的项目正文甲".into())).unwrap();
+        write_doc(&conn, "p2", &scanned("Z:/没挂载/移动盘/清单.txt"), DocOutcome::Ok("盘没挂载的项目正文乙".into())).unwrap();
+        // ↑ p2 的正文刻意用**不与 p1 重叠**的词（`bef01f5` 原稿复用了「甲方要求验收指标」，被
+        // Task 4 实现者实跑撞出：`doc_hits` 与 `SELECT_SQL` 都**不带项目过滤**，于是本用例末尾
+        // 「留下那行不受牵连」那条断言的真读数是 3 而不是 1）。p2 只参与行数与 missing 计数断言，
+        // 不参与任何检索断言 —— 这是它作为「未挂载夹具」唯一需要承担的角色。
 
         run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
         assert_eq!(doc_rows(&conn, "p1"), 2, "前提：首轮两行都进了库");
@@ -692,7 +697,7 @@ Expected: 新用例 FAIL，红点在 `assert_eq!(missing_rows(&conn, "p1"), 1, .
 
 - [ ] **Step 3: 接线（并回收 Task 2 的临时豁免）**
 
-先删掉 Task 2 开在 `reclaim_missing` 上方那行 `#[allow(dead_code)]` 连同它的两句注释 —— 生产调用点从本任务起真的存在了，豁免留着就是一句过期假话（Step 6 的门会抓）。再加这一句：
+先删掉 Task 2 开在 `reclaim_missing` 上方那行 `#[allow(dead_code)]` 连同它上方那段临时注释（落地形态是**三句**，简报原写「两句」是计数词说谎，按同形先例坑 63 订正；整段一起删、不留半句） —— 生产调用点从本任务起真的存在了，豁免留着就是一句过期假话（Step 6 的门会抓）。再加这一句：
 
 ```rust
         // 差集回收（M5）：本轮完整扫过这个项目之后，库里那些「本轮没扫到」的行标成失效。
