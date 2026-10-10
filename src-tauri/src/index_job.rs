@@ -148,10 +148,6 @@ pub fn sweep_unrooted_projects(conn: &Connection) -> AppResult<usize> {
 /// （该项目此时有新 root 行，`NOT EXISTS` 不成立）⇒ 下一轮旧串成片标 missing。那不是误删活 root 下的行，
 /// 它把 M3 I3 那种「永久可搜的陈旧行」收敛掉了；Task 5 的事务关的是两条语句之间的窗口，关不到这个。
 /// 返回标掉的行数；调用方刻意丢弃，形状与轮末那句 `let _ = sweep_unrooted_projects(conn)?;` 一致。
-/// 临时放行：生产调用点在 Task 4 的 `run_pass`，本任务落地时 lib 目标内还没有人调它，
-/// 而 `cargo clippy --lib` 不带 `--tests` 会把每个无调用点的 `pub` 项判成 `dead_code`。
-/// Task 4 Step 3 删掉这一行连同上面两句注释，Step 6 的门改成 exit=1 收口。
-#[allow(dead_code)]
 pub fn reclaim_missing(
     conn: &Connection,
     project_id: &str,
@@ -307,6 +303,14 @@ pub fn run_pass(
                 on_progress(progress_for(&target, &acc, "running", &file.path));
             }
         }
+        // 差集回收（M5）：本轮完整扫过这个项目之后，库里那些「本轮没扫到」的行标成失效。
+        // 两条硬闸门与熔断全在 reclaim_missing 里面，这里只负责把 root_missing 与本轮集合交出去。
+        // 计数刻意丢弃，形状与轮末那句 `let _ = sweep_unrooted_projects(conn)?;` 一致：接住它就得给
+        // RunSummary 加字段，而 missing 的行数本来就能从 status_counts 的 GROUP BY 免费拿到
+        // （`index_overview` 的 pick("missing") 已在等）。代价照实记在 spec 风险 6：
+        // 被熔断跳过时界面与不跳过时长得一样，没人能看出这一轮被挡下了。
+        // 上面两条 cancel 早退路径（循环开头那条、循环内那条）都不经过这里 —— 一轮被取消时不做额外写库。
+        let _ = reclaim_missing(conn, &target.project_id, &outcome, root_missing)?;
         on_progress(progress_for(&target, &acc, "running", ""));
         results.push(acc);
     }
@@ -1174,5 +1178,55 @@ mod tests {
         assert_eq!(missing_rows(&conn, "p1"), 6);
         assert_eq!(doc_rows(&conn, "p1"), 10, "回收只改状态，一行都不许删（D3）");
         assert_eq!(crate::index_store::doc_hits(&conn, "验收指标", 20).unwrap().len(), 4, "被标的 6 行退出召回，留下的 4 行照旧");
+    }
+
+    /// 端到端（真 tempdir + 真 walkdir）：删一个已索引文件 ⇒ 下一轮它自动变失效、退出召回；
+    /// 放回 ⇒ **同一行**被重抽回 ok（spec D6：回填不新开设机制，靠的是 current_rowid
+    /// 要求 index_status='ok' 这条既有谓词）。本轮唯一一条走完
+    /// scan_root → 差集 → mark_missing → 召回 → 回填 全链的用例，所以断言覆盖全链。
+    /// 删的文件是 tempdir 里自造的夹具，不是任何用户资料（红线一）。
+    #[test]
+    fn a_file_deleted_since_the_last_pass_is_marked_missing_and_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("留下.txt"), "甲方要求验收指标".as_bytes()).unwrap();
+        let gone = dir.path().join("没了.txt");
+        std::fs::write(&gone, "报价单里写着验收流程".as_bytes()).unwrap();
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", dir.path());
+        // 第二个项目刻意做成「有 root 行、但 root 指向不可能存在的目录」，专门钉住接线里
+        // `root_missing` 那个实参传没传对：硬编码成 `false` 会让它的两行被成片标 missing。
+        // 只钉 unit 级不够 —— Task 3 那四条 unit 用例是直接调 `reclaim_missing` 的，
+        // 改调用点的实参它们一条都抓不到（「中间层没有测试等于没守」是 M3 的 I2 教训）。
+        // 两行是假路径字符串键（本仓 blessed 的做法，见本文件 `scanned` 助手头上的注释），
+        // 磁盘上不需要真的存在。软删与无 root 行的形态不归这里（归 sweep 那两条既有用例）。
+        // 正文刻意避开「验收」二字：`doc_hits` 不带项目过滤，p2 的两行若与 p1 那行同词，
+        // 「留下那行不受牵连」那条断言的分母就变成 3（计划 bef01f5 补夹具时的撞词，实测读数）。
+        conn.execute("INSERT INTO projects (id, name, status) VALUES ('p2', '盘没挂载的项目', '立项')", []).unwrap();
+        conn.execute("INSERT INTO project_dirs (id, project_id, kind, path) VALUES ('p2-d', 'p2', 'root', 'Z:/没挂载/移动盘')", []).unwrap();
+        write_doc(&conn, "p2", &scanned("Z:/没挂载/移动盘/合同.txt"), DocOutcome::Ok("移动盘上的遗留合同".into())).unwrap();
+        write_doc(&conn, "p2", &scanned("Z:/没挂载/移动盘/清单.txt"), DocOutcome::Ok("移动盘上的遗留清单".into())).unwrap();
+
+        run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(doc_rows(&conn, "p1"), 2, "前提：首轮两行都进了库");
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收流程", 20).unwrap().len(), 1,
+            "前提：那行正文此刻真搜得到");
+
+        std::fs::remove_file(&gone).unwrap();
+        run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+
+        assert_eq!(missing_rows(&conn, "p1"), 1, "第二轮回扫不到就该标失效");
+        assert_eq!(doc_rows(&conn, "p1"), 2, "只标不删（D3）");
+        assert_eq!(missing_rows(&conn, "p2"), 0, "盘没挂载那个项目一格都不许动 —— 这条钉的是接线处传的 `root_missing` 实参");
+        assert_eq!(doc_rows(&conn, "p2"), 2, "p2 的两行都该原样留着（`targets()` 会列出它，但 root 不可达）");
+        assert!(crate::index_store::doc_hits(&conn, "验收流程", 20).unwrap().is_empty(),
+            "还搜得到就说明虚表侧没删干净");
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收指标", 20).unwrap().len(), 1, "留下那行不受牵连");
+        assert_eq!(crate::index_store::fts_orphan_rows(&conn), 0);
+
+        std::fs::write(&gone, "报价单里写着验收流程".as_bytes()).unwrap();
+        run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(missing_rows(&conn, "p1"), 0, "文件回来后同一行该被重抽回 ok");
+        assert_eq!(doc_rows(&conn, "p1"), 2, "是更新同一行，不是新增一行");
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收流程", 20).unwrap().len(), 1, "回填后又能搜到");
     }
 }
