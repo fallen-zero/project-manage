@@ -658,12 +658,13 @@ git commit -m "feat(m5): 差集回收的熔断（过半且过地板行则本轮�
         // 磁盘上不需要真的存在。软删与无 root 行的形态不归这里（归 sweep 那两条既有用例）。
         conn.execute("INSERT INTO projects (id, name, status) VALUES ('p2', '盘没挂载的项目', '立项')", []).unwrap();
         conn.execute("INSERT INTO project_dirs (id, project_id, kind, path) VALUES ('p2-d', 'p2', 'root', 'Z:/没挂载/移动盘')", []).unwrap();
-        write_doc(&conn, "p2", &scanned("Z:/没挂载/移动盘/合同.txt"), DocOutcome::Ok("盘没挂载的项目正文甲".into())).unwrap();
-        write_doc(&conn, "p2", &scanned("Z:/没挂载/移动盘/清单.txt"), DocOutcome::Ok("盘没挂载的项目正文乙".into())).unwrap();
+        write_doc(&conn, "p2", &scanned("Z:/没挂载/移动盘/合同.txt"), DocOutcome::Ok("移动盘上的遗留合同".into())).unwrap();
+        write_doc(&conn, "p2", &scanned("Z:/没挂载/移动盘/清单.txt"), DocOutcome::Ok("移动盘上的遗留清单".into())).unwrap();
         // ↑ p2 的正文刻意用**不与 p1 重叠**的词（`bef01f5` 原稿复用了「甲方要求验收指标」，被
         // Task 4 实现者实跑撞出：`doc_hits` 与 `SELECT_SQL` 都**不带项目过滤**，于是本用例末尾
-        // 「留下那行不受牵连」那条断言的真读数是 3 而不是 1）。p2 只参与行数与 missing 计数断言，
-        // 不参与任何检索断言 —— 这是它作为「未挂载夹具」唯一需要承担的角色。
+        // 「留下那行不受牵连」那条断言的真读数是 3 而不是 1）。约束只有一条：正文不与本用例的
+        // 检索用词（验收流程 / 验收指标）重叠即可，具体串怎么起不重要。p2 只参与行数与 missing
+        // 计数断言，不参与任何检索断言 —— 这是它作为「未挂载夹具」唯一需要承担的角色。
 
         run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
         assert_eq!(doc_rows(&conn, "p1"), 2, "前提：首轮两行都进了库");
