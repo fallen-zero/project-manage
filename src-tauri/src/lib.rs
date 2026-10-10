@@ -31,8 +31,8 @@ struct AppState {
     mk: Mutex<Option<MasterKey>>,
     /// 索引作业跨线程共享：running/cancel 是原子量，summary 是上一轮的结论。
     index: Arc<index_job::IndexShared>,
-    /// 预览的单飞闸门（终审 I-5）：占用中第二条预览直接拒，不占 tokio worker（spec D9）。
-    preview: std::sync::Arc<doc_preview::PreviewShared>,
+    /// 预览的抽盘单飞闸门（终审 I-5）：占用中第二条预览直接拒，不再占 tokio worker（spec D9）。
+    preview: Arc<doc_preview::PreviewShared>,
 }
 
 fn db(state: &AppState) -> AppResult<MutexGuard<'_, rusqlite::Connection>> {
@@ -593,7 +593,7 @@ pub fn run() {
                 data_dir,
                 mk: Mutex::new(None),
                 index: Arc::new(index_job::IndexShared::new()),
-                preview: std::sync::Arc::new(doc_preview::PreviewShared::new()),
+                preview: Arc::new(doc_preview::PreviewShared::new()),
             });
             Ok(())
         })

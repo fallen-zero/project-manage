@@ -256,9 +256,12 @@ fn stitch(chars: &[char], windows: &[(usize, usize)], hits: &[(usize, usize)]) -
     (out, ranges)
 }
 
-/// 预览的单飞闸门（终审 I-5）。住在 `doc_preview` 而不是塞进 `IndexShared`：那四格
-/// （cancel/running/summary/last_error）语义全是索引作业的，混一格预览状态会让下一个读者
-/// 重新发现一遍归属（spec D9）。
+/// 预览的**抽盘**单飞闸门（终审 I-5）—— 精确说封的是「同线程上的一次抽取」，不是整条 RPC：
+/// 命令体返回、票 Drop 之后，serde 与 `return_result` 的 webview 派发仍在票外跑（Task 7 评审
+/// 读到 `ipc/command.rs` 与 `ipc/mod.rs` 的先后顺序）。正文已窗口化，那个尾部成本可忽略，
+/// 但「单飞」两个字别读成「一次只有一条预览 RPC 在飞」。住在 `doc_preview` 而不是塞进
+/// `IndexShared`：那四格（cancel/running/summary/last_error）语义全是索引作业的，混一格
+/// 预览状态会让下一个读者重新发现一遍归属（spec D9）。
 #[derive(Default)]
 pub struct PreviewShared {
     busy: std::sync::atomic::AtomicBool,
@@ -295,7 +298,7 @@ pub fn busy() -> AppError {
     AppError::new(
         "preview_unavailable",
         "这条索引记录不能预览",
-        Some("已有一份预览正在抽取原文，等它结束再试；大文件的抽取可能要几十秒"),
+        Some("已有一份预览正在抽取原文，等它结束再试；大文件的抽取可能要几分钟"),
     )
 }
 
