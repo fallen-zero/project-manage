@@ -122,6 +122,43 @@ pub fn clear_project(conn: &Connection, project_id: &str) -> AppResult<u64> {
     Ok(n)
 }
 
+/// 差集回收要的读入口：一个项目当前**尚未失效**的行。
+/// 排除 `missing` 有两个理由：重复 UPDATE 是空转；而熔断的分母得是「还可能失效的行」，
+/// 把历史 missing 行算进去会让第二轮比第一轮更容易触发熔断（那是假保险）。
+/// 形状照 `db::open_in_memory`（db.rs:30）：生产调用点在 Task 2/3 的 `reclaim_missing`，
+/// 本任务先落函数，lib 目标内暂无调用点，故按仓内既有先例允许 dead_code。
+#[allow(dead_code)]
+pub fn doc_rows_for_project(conn: &Connection, project_id: &str) -> AppResult<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT doc_rowid, path FROM index_docs
+          WHERE project_id = ?1 AND index_status <> 'missing'",
+    )?;
+    let rows = stmt
+        .query_map(params![project_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 「登记还在、文件没了」的唯一写入口（spec D3）。两句话一个事务，形状照 `write_doc`。
+/// `skip_reason` / `error_msg` / `size` / `mtime` / `indexed_at` 一律不出现在 SET 子句里：
+/// 那是这一行最近一次被抽时的读数，而回填自愈靠的正是 size/mtime 与新值不匹配（D4/D6）。
+/// 召回与预览都不需要新代码：`SELECT_SQL` 与 `row_for_preview` 写的都是正向 `= 'ok'`。
+/// 同 `doc_rows_for_project`：生产调用点在 Task 2/3，先落函数故按 db.rs:30 先例放行。
+#[allow(dead_code)]
+pub fn mark_missing(conn: &Connection, doc_rowid: i64) -> AppResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE index_docs SET index_status = 'missing', updated_at = datetime('now')
+          WHERE doc_rowid = ?1",
+        params![doc_rowid],
+    )?;
+    // 按 rowid 点删（本模块头注释已写明：按 doc_id 列删虚表是全表扫）。FTS5 无外键、不参与级联，
+    // 所以删一侧就必须显式删另一侧。
+    tx.execute("DELETE FROM index_docs_fts WHERE rowid = ?1", params![doc_rowid])?;
+    tx.commit()?;
+    Ok(())
+}
+
 /// 跨表不变量的**全表**形态（终审 m2 里本轮要做的那条）：`index_docs_fts` 是 FTS5 虚表、没有外键，
 /// 整个设计就靠 rowid 对齐，而虚表行不参与 `ON DELETE CASCADE`。既有测试只数过局部
 /// （本模块 `rewriting_…` / `non_ok_outcomes_…` / `clear_project_…` 那几处 count），
@@ -680,5 +717,58 @@ mod tests {
         assert_eq!(doc_hits(&c, "验收", 1).unwrap().len(), 1, "limit 要真的限制条数");
         assert_eq!(doc_hits(&c, "验收", -1).unwrap().len(), 2, "负数 limit 原样交给 SQL（SQLite：不限行）");
         assert!(doc_hits(&c, "验收", 0).unwrap().is_empty(), "0 就是 0 行，不许悄悄变成默认值");
+    }
+
+    /// 磁盘上没了的一行：主表标 missing、虚表点删，元数据行留着。
+    /// 三条断言各有归属：status 是本轮唯一的新语义；`skip_reason` 留 NULL 是 D4（它的取值域
+    /// 只有 skipped 那三个）；行数 = 1 是 D3「保留元数据行」的唯一证据 —— 双侧删行也照样能过
+    /// 前两条。虚表侧的孤儿与总行数各一条：少了总行数那条，「死正文继续躺在虚表里污染 bm25
+    /// 文档频率统计」这个 M3 终审 I3 否掉过的形态就会重新变成正确行为。
+    #[test]
+    fn mark_missing_flips_the_status_and_drops_only_the_fts_row() {
+        let c = conn();
+        seed_project(&c, "p1");
+        let rowid = write_doc(&c, "p1", &file("C:/x/合同验收.docx"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        assert_eq!(fts_orphan_rows(&c), 0, "前提：写完两侧是对齐的");
+
+        mark_missing(&c, rowid).unwrap();
+
+        let (status, reason): (String, Option<String>) = c
+            .query_row(
+                "SELECT index_status, skip_reason FROM index_docs WHERE doc_rowid = ?1",
+                params![rowid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "missing", "失效行必须改状态，否则它继续进召回");
+        assert_eq!(reason, None, "missing 自己就是原因，skip_reason 不许被写新值（D4）");
+        let kept: i64 = c
+            .query_row("SELECT count(*) FROM index_docs WHERE doc_rowid = ?1", params![rowid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1, "元数据行要留着：界面得能回答「曾被索引、现在磁盘上没了」");
+        assert_eq!(fts_orphan_rows(&c), 0, "点删不许留下对不上主表的虚表行");
+        let fts_total: i64 = c
+            .query_row("SELECT count(*) FROM index_docs_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fts_total, 0, "死正文继续躺在虚表里就是继续污染 bm25 的文档频率统计");
+    }
+
+    /// 已标 missing 的行不再进候选集（幂等 + 熔断分母干净）。两个方向都断：不许含已失效那行，
+    /// 也不许丢 skipped 那行 —— 把谓词写成 `= 'ok'` 会把 skipped/failed 漏掉，
+    /// 「超限文件后来被删了」这类失效就永远没人标。
+    #[test]
+    fn doc_rows_for_project_skips_rows_already_marked_missing() {
+        let c = conn();
+        seed_project(&c, "p1");
+        let a = write_doc(&c, "p1", &file("C:/x/甲.docx"), DocOutcome::Ok("甲 付款条件".into())).unwrap();
+        let b = write_doc(&c, "p1", &file("C:/x/乙.docx"), DocOutcome::Ok("乙 付款条件".into())).unwrap();
+        write_doc(&c, "p1", &file("C:/y/丙.docx"), DocOutcome::Skipped("too_large")).unwrap();
+        mark_missing(&c, a).unwrap();
+
+        let rows = doc_rows_for_project(&c, "p1").unwrap();
+        assert_eq!(rows.len(), 2, "三行里只有已 missing 的那行该被排除：{rows:?}");
+        assert!(rows.iter().any(|(id, _)| *id == b), "没失效的行不许被漏掉");
+        assert!(!rows.iter().any(|(id, _)| *id == a), "变异：把 <> 'missing' 删掉 ⇒ 这条红");
+        assert_eq!(doc_rows_for_project(&c, "p-不存在").unwrap().len(), 0, "别的项目的行不许串进来");
     }
 }
