@@ -588,13 +588,22 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let conn = db::open(&data_dir)?;
+            let index = Arc::new(index_job::IndexShared::new());
             app.manage(AppState {
                 conn: Mutex::new(conn),
-                data_dir,
+                data_dir: data_dir.clone(),
                 mk: Mutex::new(None),
-                index: Arc::new(index_job::IndexShared::new()),
+                index: Arc::clone(&index),
                 preview: Arc::new(doc_preview::PreviewShared::new()),
             });
+            // M5 D1：启动即追平一轮。rebuild=false 走既有增量判据（size + mtime + ok 相同 ⇒ 连文件都
+            // 不打开），所以常态代价是一次目录遍历 + stat，不是重抽；root 不可达的项目连 walkdir 都不发起。
+            // 与用户手动点撞车由 `start` 开头的 running.swap 挡：那一次收到既有 `index_running` 的 amber
+            // 提示（M3 真机验过它的文案「上一轮还没结束」，本轮之后它触发得更频繁，但那句话仍是实话）。
+            // 自动轮的失败不拦启动：`let _ =` 丢掉 AppResult —— 追平失败不该让应用打不开。
+            // 头几秒前端还没装 index://progress 监听，那段进度事件会丢；用户进 /index 看到的是
+            // 徽标「索引进行中」+ 既有那句「本轮已开始，正在等第一条进度事件」的空态文案，M3 已实测过这一档。
+            let _ = index_job::start(app.handle().clone(), data_dir, index, None, false);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
