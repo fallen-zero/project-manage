@@ -649,6 +649,16 @@ git commit -m "feat(m5): 差集回收的熔断（过半且过地板行则本轮�
         std::fs::write(&gone, "报价单里写着验收流程".as_bytes()).unwrap();
         let conn = db::open_in_memory().unwrap();
         seeded_project(&conn, "p1", dir.path());
+        // 第二个项目刻意做成「有 root 行、但 root 指向不可能存在的目录」，专门钉住接线里
+        // `root_missing` 那个实参传没传对：硬编码成 `false` 会让它的两行被成片标 missing。
+        // 只钉 unit 级不够 —— Task 3 那四条 unit 用例是直接调 `reclaim_missing` 的，
+        // 改调用点的实参它们一条都抓不到（「中间层没有测试等于没守」是 M3 的 I2 教训）。
+        // 两行是假路径字符串键（本仓 blessed 的做法，见 `index_job.rs:853-854` 的注释），
+        // 磁盘上不需要真的存在。软删与无 root 行的形态不归这里（归 sweep 那两条既有用例）。
+        conn.execute("INSERT INTO projects (id, name, status) VALUES ('p2', '盘没挂载的项目', '立项')", []).unwrap();
+        conn.execute("INSERT INTO project_dirs (id, project_id, kind, path) VALUES ('p2-d', 'p2', 'root', 'Z:/没挂载/移动盘')", []).unwrap();
+        write_doc(&conn, "p2", &scanned("Z:/没挂载/移动盘/合同.txt"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        write_doc(&conn, "p2", &scanned("Z:/没挂载/移动盘/清单.txt"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
 
         run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
         assert_eq!(doc_rows(&conn, "p1"), 2, "前提：首轮两行都进了库");
@@ -660,6 +670,8 @@ git commit -m "feat(m5): 差集回收的熔断（过半且过地板行则本轮�
 
         assert_eq!(missing_rows(&conn, "p1"), 1, "第二轮回扫不到就该标失效");
         assert_eq!(doc_rows(&conn, "p1"), 2, "只标不删（D3）");
+        assert_eq!(missing_rows(&conn, "p2"), 0, "盘没挂载那个项目一格都不许动 —— 这条钉的是接线处传的 `root_missing` 实参");
+        assert_eq!(doc_rows(&conn, "p2"), 2, "p2 的两行都该原样留着（`targets()` 会列出它，但 root 不可达）");
         assert!(index_store::doc_hits(&conn, "验收流程", 20).unwrap().is_empty(),
             "还搜得到就说明虚表侧没删干净");
         assert_eq!(index_store::doc_hits(&conn, "验收指标", 20).unwrap().len(), 1, "留下那行不受牵连");
@@ -703,7 +715,7 @@ Task 2 评审的两条结论对本任务有效，写在这里免得下一个人�
 - [ ] **Step 5: 变异取证**
 
 1. 删掉接线那一句 ⇒ Expected：本任务用例红在 `missing_rows == 1`。
-2. 把 `root_missing` 实参硬编码成 `false` ⇒ Expected：`missing_root_is_flagged_without_killing_the_run`（既有）或本任务用例红。**若两条都不红**，说明这个实参在本轮无守护 —— 如实登记为有名缺口，别伪造结论（本仓「等价变异全绿 = 零守护」的规矩）。
+2. 把接线那句的 `root_missing` 实参硬编码成 `false` ⇒ Expected：本任务用例红在 `missing_rows(&conn, "p2") == 0`（p2 的两行被成片标掉，读数 `left: 2, right: 0`）。**控制方预先算过写在这里，免得实现者白跑**：Task 3 那四条 unit 用例抓不到这个变异（它们直接调 `reclaim_missing`，不经过调用点），而 p1 的 root 可达、真实值本来就是 `false` ⇒ 没有 p2 这一格，这条变异会「全量照绿 = 零守护」。所以处置是**补 p2 夹具**，不是登记有名缺口（坑 53 的规矩：全绿就得补测试，别宣布变异不成立）。
 3. 把它挪到 `on_progress(...)` 之后 ⇒ Expected：全量仍 143 绿 ⇒ 记为「顺序等价变异」，登记即可，不新增断言。
 
 - [ ] **Step 6: 门禁（含 Task 2 那块豁免的回收证据）**
