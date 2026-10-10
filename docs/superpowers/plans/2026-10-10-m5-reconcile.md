@@ -1157,9 +1157,9 @@ npm run build; echo exit=$?
 node --test "tests/**/*.test.ts"; echo exit=$?
 ```
 Expected: `147 passed / 0 failed`；两条 clippy `exit=0` 0 warning；`npm run build` exit 0；node `ℹ tests 8 / pass 8 / fail 0`。
-再数一次命令条数（本轮**不许**新增命令）：`sed -n '/generate_handler/,/])/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"` 期望 **41**。
+再数一次命令条数（本轮**不许**新增命令）：`sed -n '/generate_handler/,/])/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z0-9_]+,?$"` 期望 **41**。
 
-**这条正则是 Task 8 落地时订正过的第四例「门与蓝本互斥」**：原写 `grep -cE "^ +[a-z_]+,$"`（要求尾逗号），而 `generate_handler!` 的**最后一条** `doc_preview` 按 Rust 宏写法不带逗号 ⇒ 实跑恒为 40，与它自己承诺的 41 差一。控制方三种写法都当场跑过：带逗号 `40`、`^ +[a-z_]+,?$`（逗号可选）`41`、`grep -oE` 取标识符 `41` ⇒ 取最懒的那条（逗号改成可选）。**通用形态同前三例**：写门时不只跑一遍期望值，还要跑到**边界元素**上（这里是列表最后一项），"看起来显然"的正则最容易在最后一格漏。
+**这条正则是 Task 8 落地时订正过的第四例「门与蓝本互斥」**：原写 `grep -cE "^ +[a-z_]+,$"`（要求尾逗号），而 `generate_handler!` 的**最后一条** `doc_preview` 按 Rust 宏写法不带逗号 ⇒ 实跑恒为 40，与它自己承诺的 41 差一。控制方三种写法都当场跑过：带逗号 `40`、`^ +[a-z_]+,?$`（逗号可选）`41`、`grep -oE` 取标识符 `41` ⇒ 取最懒的那条（逗号改成可选）。**通用形态同前三例**：写门时不只跑一遍期望值，还要跑到**边界元素**上（这里是列表最后一项），"看起来显然"的正则最容易在最后一格漏。**同轮评审又补一刀**：`[a-z_]` 不含数字 ⇒ 将来出现一条带数字的命令名（如 `xxx_v2`）会被静默少数 1 而无人报警，字符类已扩成 `[a-z0-9_]`（控制方实跑仍 **41**）。
 
 - [ ] **Step 3: 提交**
 
@@ -1282,12 +1282,12 @@ WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 \
 ```
 动手前对真实目录 `%APPDATA%\dev.zero.pfm\` 三文件取 size + mtime + SHA-256 基线，收尾再取一次逐字对照。**别同时跑 `cargo test` / `clippy`**（抢 `target/` 会让 rustc 报内部编译错误，看着像内存问题）。CDP 探针**每步单独一次 evaluate**、只回布尔/条数/错误码名、超时给足，失败先怀疑探针而不是被测（M4 坑 80）；给 sync 命令计时必须在空队列上取（坑 81）。
 
-- [ ] **Step 2: 十条可判据断言**（读数各落一份 JSON 到 `.superpowers/sdd/2026-10-10-m5-reconcile/`）
+- [ ] **Step 2: 十二条可判据断言**（读数各落一份 JSON 到 `.superpowers/sdd/2026-10-10-m5-reconcile/`）
 
 夹具一律走应用自己的 IPC（`project_create` → `project_set_root` → `index_start`），**不手拼分词、不裸写 SQL**，文件全落 `%TEMP%`。
 
 1. 启动自动轮跑了：新沙盒冷启动后 `index_overview().running === true`，或 `overview.projects[0].total` 从 0 变非 0。
-2. 自动轮不拖慢 IPC：轮进行中并发一次 `db_status`，只回毫秒数。
+2. 自动轮不拖慢 IPC：轮进行中并发一次 `db_status`，只回毫秒数。**并发侧还要各量一次「读命令」与「写命令」**（写侧例如 `project_update`）—— Task 8 评审算出最坏形态不是「读延迟量级」而是：主线程命令**持着 `Mutex<Connection>` 等 SQLite 让写锁**，理论上限是 `busy_timeout` 的 5 s。两条毫秒数都要落盘，超线才立 finding。
 3. **主承诺**：删一个已索引文件 → 重启 → 该行 `index_status === "missing"`、`search_all` 正文段不命中它、`doc_preview` 回 `preview_unavailable`。
 4. 改名 → 重启 → 旧行 missing + 新行 `ok` 各一（照实读数，不当缺陷）。
 5. 不可达 root 零误标：某项目 root 指到 `Z:\未挂载\的移动盘` → 重启 → 该项目 `missing` 计数 0 且 `ok` 计数不变。
@@ -1296,6 +1296,8 @@ WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 \
 8. I-5：连点两份慢文档 → 第二条**立即** `preview_unavailable`，且 hint 是「已有一份预览正在抽取」那一句。
 9. I-4：把已索引 `.txt` 追加到超过上限 → 当场预览即拒（不等下一轮扫描降级）。
 10. 顺手量自动轮进行中的一次 `search_all` 毫秒数（对照 M4 的 675–737 ms 静场读数，越线才立 finding）。
+11. 撞车提示（Task 8 评审点名的可达窗口）：amber 那句「这不是索引出错，只是上一轮还没结束」**只在「`overview` 还没到货、页面以为空闲」那一个挂载窗口里可达** —— 主防线是两个 start 按钮的 `disabled={running}`。所以这一格要按窗口造前提（在自动轮进行中首次导航到 `/index`），采不到就照实记「采不到 + 当时的 `overview.running` 读数」，别改成「按钮灰了就等于提示过了」。
+12. 起轮失败的可观测性（Task 8 评审 I 级的落地形态）：本轮改成「`start` 返回 Err 时写进 `last_error`」。本机造不出 `thread::spawn` 失败（那是 commit charge 耗尽时才出现的，M3/M4 记过 `os error 1455`），所以这一格**只验渲染链不验触发**——把库删到不可打开？不行（那是红线）。正解：只静态核 `index_overview` 透出的 `lastError` 字段在 /index 有整段渲染（`index-status.tsx:361-365`），并在报告里写「触发路径无实测证据，属有名缺口」。
 
 取证顺序纪律：**先做完所有只读断言，再做会改库状态的步骤**（M4 坑 82）。失效行的可见性要真点一次 `/index` 的 `missing` 筛选，那一格只能由人眼或 CDP 读 DOM 确认。
 
@@ -1305,7 +1307,7 @@ WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 \
 
 - [ ] **Step 4: 文档收口（写读数，不写「应该能用了」）**
 
-`docs/开发进度.md`：里程碑表 M5 行改 ✅ 完成 + 门禁读数；新增「M5 验收证据」整节（门禁实跑 / 十条断言读数 / **没能自动验证清单**：setup 那一行的启动触发无单测、几十 GB 真实语料的整轮耗时、无权限子树误标是否真会发生、`missing` 行长期累积的库体积、前端三格 JSX 渲染、三成因共用一码在界面上分不分得开、`swap` 那个等价变异本机无守护、自动轮进行中首屏检索延迟只量了一次 / **M5 留下的已知缺口**逐条带归属）；M4 那一节不动。
+`docs/开发进度.md`：里程碑表 M5 行改 ✅ 完成 + 门禁读数；新增「M5 验收证据」整节（门禁实跑 / 十二条断言读数 / **没能自动验证清单**：setup 那一行的启动触发无单测、几十 GB 真实语料的整轮耗时、无权限子树误标是否真会发生、`missing` 行长期累积的库体积、前端三格 JSX 渲染、三成因共用一码在界面上分不分得开、`swap` 那个等价变异本机无守护、自动轮进行中首屏检索延迟只量了一次 / **M5 留下的已知缺口**逐条带归属）；M4 那一节不动。
 `docs/技术方案.md`：§6.1 变更检测那一行按交付改写（启动自动轮 + 差集回收已做，`notify` 延 M5.5 并写理由）；§八 M5 行内容描述改准；§九 监听开关那条加 dated 附注。**历史规格不 retro-edit**：M3 计划里「`delete_doc` 归 M5 补」「FTS 孤儿行由 M5 启动对账统一回收」两句不动，归属变化与「本轮只兑现一半」的缩量声明只写进 M5 spec 第九节与开发进度。
 `docs/HANDOFF.md`：第 12 版（快照时间 / 分支与 HEAD / 门禁基线 / 一句话状态 / 缺口表 / 新坑），M4 那一版的指针表不被覆盖 —— 本文件是「下一个里程碑的恢复地图」，M4 的账要留在原处可查。
 
@@ -1313,7 +1315,7 @@ WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 \
 
 ```bash
 git add docs/开发进度.md docs/技术方案.md docs/HANDOFF.md
-git commit -m "docs: M5 收口 —— 十条真机读数、没能自动验证清单与既有文档回写"
+git commit -m "docs: M5 收口 —— 十二条真机读数、没能自动验证清单与既有文档回写"
 ```
 不 push、不 merge（每次都需需求方当次指示）。
 
