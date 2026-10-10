@@ -25,6 +25,11 @@ pub const PROGRESS_EVENT: &str = "index://progress";
 /// 而界面上「10 秒动一次」已经够用。项目边界与结尾一定额外发一次。
 pub const PROGRESS_EVERY: i64 = 20;
 
+/// 熔断地板：一次要标掉的行数**同时**过成「过半」和「过地板（> 20 行）」，才判为
+/// 「疑似盘只挂了一半」而不是「用户真删了」。地板存在的意义是小项目不被它挡住 ——
+/// 一个几十上百个文件的项目整目录被删是日常操作，那种回收是真的。阈值只写这一处。
+const MISSING_FUSE_MIN_ROWS: usize = 20;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanTarget {
@@ -136,6 +141,12 @@ pub fn sweep_unrooted_projects(conn: &Connection) -> AppResult<usize> {
 /// 集合两侧同源（库里那行的 path 就是上一轮 `WalkDir::new(登记的 root 串)` 拼出来的），
 /// 所以一律用原样字符串比对：不做大小写折叠、不做 canonicalize（spec D7 —— 折叠会让换写法
 /// 变成「旧行永久谎标 missing」，因为 `UNIQUE (project_id, path)` 是 BINARY 比较）。
+/// 2026-10-10（Task 2 评审 Minor-1）「两侧同源」是稳态事实、不是无条件事实：稳态构造不出不同源
+/// （`targets()` 原样取 `project_dirs.path` → `WalkDir::new(root)` → `entry.path().display()`，
+/// 库里侧 `write_doc` 落的就是同一个 `file.path`）。唯一可破坏的序列是**作业运行中改指 / 注销根目录**
+/// （`project.rs:343-347` 与 `index_job.rs:110-119` 的旧快照写回窗口）：旧根的行被写回来、而 sweep 不收
+/// （该项目此时有新 root 行，`NOT EXISTS` 不成立）⇒ 下一轮旧串成片标 missing。那不是误删活 root 下的行，
+/// 它把 M3 I3 那种「永久可搜的陈旧行」收敛掉了；Task 5 的事务关的是两条语句之间的窗口，关不到这个。
 /// 返回标掉的行数；调用方刻意丢弃，形状与轮末那句 `let _ = sweep_unrooted_projects(conn)?;` 一致。
 /// 临时放行：生产调用点在 Task 4 的 `run_pass`，本任务落地时 lib 目标内还没有人调它，
 /// 而 `cargo clippy --lib` 不带 `--tests` 会把每个无调用点的 `pub` 项判成 `dead_code`。
@@ -170,6 +181,11 @@ pub fn reclaim_missing(
         .filter(|(_, path)| !seen.contains(path.as_str()))
         .map(|(rowid, _)| *rowid)
         .collect();
+    // 熔断：一次要标掉过半、且超过地板行数，更像是盘只挂了一半 / walkdir 早期崩，不是真删。
+    // 整数比较不用除法：`tracked.len() / 2` 有截断歧义，`candidates * 2 > tracked.len()` 没有。
+    if candidates.len() * 2 > tracked.len() && candidates.len() > MISSING_FUSE_MIN_ROWS {
+        return Ok(0);
+    }
     for rowid in &candidates {
         mark_missing(conn, *rowid)?;
     }
@@ -1018,9 +1034,9 @@ mod tests {
     }
 
     /// 本轮扫到 2 条、库里有 3 条 ⇒ 只有「没了.txt」进差集。
-    /// 断言分工：`== 1` 断计数；按 rowid 断 status 断「动的是哪一行」；最后两条检索断
-    /// 「删的是虚表侧那一半」—— 只数行数的话，`ok` 行还留在 FTS 里、照样搜得到，
-    /// 而用户在首屏看到的失效（M3 当年 I3 的原话）就是这件事。
+    /// 断言分工：`== 1` 断计数；按 rowid 断 status 断「动的是哪一行」；
+    /// 检索两条断的是这一行退出召回；虚表点删由末尾那条 `count(*) FROM index_docs_fts` 承重
+    /// （`fts_orphan_rows` 在保留主表行的形态下恒 0，不承重，见 Task 2 评审 I-1）。
     #[test]
     fn reclaim_marks_rows_the_pass_did_not_see() {
         let conn = db::open_in_memory().unwrap();
@@ -1045,6 +1061,13 @@ mod tests {
             "还搜得到就说明虚表侧没删干净");
         assert_eq!(crate::index_store::doc_hits(&conn, "验收指标", 20).unwrap().len(), 1, "留下那行不许被牵连");
         assert_eq!(crate::index_store::fts_orphan_rows(&conn), 0);
+        // 这条才是「点删真的发生了」的判据：虚表侧只剩「留下.txt」那一行。
+        // 上面两条检索断言守的是另一件事（doc_hits 由 SELECT_SQL 的正向 `= 'ok'` 决定，
+        // status 一翻转必空；fts_orphan_rows 因 D3 保留主表行而恒 0）—— 措辞按 Task 2 评审订正。
+        let fts_total: i64 = conn
+            .query_row("SELECT count(*) FROM index_docs_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fts_total, 1, "变异：把 reclaim_missing 里的 mark_missing 换成裸 UPDATE 只改状态 ⇒ 这里是 2，这条红");
     }
 
     /// 超限文件本轮落在 `over_size` 桶里（它有一行 too_large）。集合漏掉这一桶，
@@ -1064,5 +1087,92 @@ mod tests {
             .unwrap();
         assert_eq!(status, "skipped", "变异：构集合时只取 outcome.files ⇒ 这行被标 missing，这条红");
         assert_eq!(missing_rows(&conn, "p1"), 0);
+    }
+
+    /// 盘没挂载时一格都不许动。库里刻意只留 **3** 行：3 个候选过不了熔断的地板行数量，
+    /// 所以少了 root_missing 这一支就会被真的标掉 ⇒ 这条测试对那一支是专属守护。
+    #[test]
+    fn an_unmounted_root_marks_nothing() {
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", Path::new("Z:/没挂载/移动盘"));
+        for name in ["甲.txt", "乙.txt", "丙.txt"] {
+            write_doc(
+                &conn,
+                "p1",
+                &scanned(&format!("Z:/没挂载/移动盘/{name}")),
+                DocOutcome::Ok("甲方要求验收指标".into()),
+            )
+            .unwrap();
+        }
+        assert_eq!(doc_rows(&conn, "p1"), 3, "前提：三行在库里");
+
+        let o = outcome_with(&[], &[], false); // 生产里 root_missing 一定配空 outcome
+        assert_eq!(reclaim_missing(&conn, "p1", &o, true).unwrap(), 0, "变异：删掉 root_missing 那一支 ⇒ 3 被标掉");
+        assert_eq!(missing_rows(&conn, "p1"), 0, "未挂载不等于被删除");
+    }
+
+    /// 配额触顶那轮不许比对。库 3 行 / 扫到 2 行 ⇒ 候选 1，熔断（`1 * 2 > 3` 为假）挡不住它，
+    /// 只有 capped 这一支挡得住 ⇒ 专属守护。
+    #[test]
+    fn a_capped_scan_marks_nothing() {
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", Path::new("C:/根"));
+        write_doc(&conn, "p1", &scanned("C:/根/留下.txt"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        write_doc(&conn, "p1", &scanned("C:/根/也留下.txt"), DocOutcome::Ok("甲方也要求验收指标".into())).unwrap();
+        let extra = write_doc(&conn, "p1", &scanned("C:/根/配额外的旧行.txt"), DocOutcome::Ok("配额之外的 付款条件".into())).unwrap();
+
+        let o = outcome_with(&["C:/根/留下.txt", "C:/根/也留下.txt"], &[], true);
+        assert_eq!(reclaim_missing(&conn, "p1", &o, false).unwrap(), 0, "变异：删掉 capped 那一支 ⇒ 1 被标掉");
+        let status: String = conn
+            .query_row("SELECT index_status FROM index_docs WHERE doc_rowid = ?1", [extra], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "ok", "触顶那轮不许把配额外的老行判成被删除");
+        assert_eq!(missing_rows(&conn, "p1"), 0);
+    }
+
+    /// 熔断：25 行里 24 行不见 ⇒ 判为「疑似盘只挂了一半」，本轮不动。
+    /// 正文一律同一句，是为了让最后那条召回断言数得出确切值（数字混进查询词会让分词口径变成赌局）。
+    #[test]
+    fn the_fuse_refuses_a_mass_reclaim() {
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", Path::new("C:/根"));
+        for i in 0..25 {
+            write_doc(
+                &conn,
+                "p1",
+                &scanned(&format!("C:/根/f{i:02}.txt")),
+                DocOutcome::Ok("甲方要求验收指标".into()),
+            )
+            .unwrap();
+        }
+        let o = outcome_with(&["C:/根/f00.txt"], &[], false);
+        assert_eq!(reclaim_missing(&conn, "p1", &o, false).unwrap(), 0, "24/25 过半且过地板 ⇒ 熔断");
+        assert_eq!(missing_rows(&conn, "p1"), 0);
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收指标", 50).unwrap().len(), 25, "熔断生效 ⇒ 二十四行正文都还搜得到（limit 取 50：doc_hits 原样穿透，20 会把结果截到 20）");
+    }
+
+    /// 熔断的阳性对照 + 地板的专属守护：同样过半、但只有 10 行、缺 6 个 ⇒ 必须标掉。
+    /// 这条不可省：只有上一条「25 缺 24」时，把 `MISSING_FUSE_MIN_ROWS` 改成 0、
+    /// 或整支熔断写成恒跳过，测试照样全绿（`24 * 2 > 25` 与地板无关，前一条测不到地板那一半）。
+    /// 6 个候选过得了「过半」（`6 * 2 > 10`）但过不了「> 20」⇒ 只有地板值那一半能被打红。
+    #[test]
+    fn the_fuse_floor_lets_a_small_majority_reclaim_through() {
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", Path::new("C:/根"));
+        let paths: Vec<String> = (0..10).map(|i| format!("C:/根/f{i:02}.txt")).collect();
+        for p in &paths {
+            write_doc(&conn, "p1", &scanned(p), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        }
+        assert_eq!(doc_rows(&conn, "p1"), 10, "前提：十行都在库里");
+
+        let seen: Vec<&str> = paths[..4].iter().map(String::as_str).collect(); // 前 4 个还在磁盘，后 6 个不见了
+        assert_eq!(
+            reclaim_missing(&conn, "p1", &outcome_with(&seen, &[], false), false).unwrap(),
+            6,
+            "6/10 过半但不超地板 ⇒ 正常回收；变异：把 MISSING_FUSE_MIN_ROWS 改成 0 ⇒ 这里变 0"
+        );
+        assert_eq!(missing_rows(&conn, "p1"), 6);
+        assert_eq!(doc_rows(&conn, "p1"), 10, "回收只改状态，一行都不许删（D3）");
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收指标", 20).unwrap().len(), 4, "被标的 6 行退出召回，留下的 4 行照旧");
     }
 }

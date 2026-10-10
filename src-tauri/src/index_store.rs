@@ -716,6 +716,8 @@ mod tests {
 
     /// D4 的五根禁列一次守住：只断 `skip_reason` 时，往 SET 里加 indexed_at = NULL 或
     /// error_msg = 'gone' 都抓不到（Task 1 评审实测）。改成元组对比后五列各自承重。
+    /// `updated_at` 不入快照（同秒必等，断它会 flaky）且全仓零消费者 ⇒ 这一格无守护，
+    /// 是裁过的有名缺口，别当漏写（Task 2 评审 Minor-2）。
     fn snapshot(c: &Connection, doc_rowid: i64) -> (Option<String>, Option<String>, i64, i64, Option<String>) {
         c.query_row(
             "SELECT skip_reason, error_msg, size, mtime, indexed_at FROM index_docs WHERE doc_rowid = ?1",
