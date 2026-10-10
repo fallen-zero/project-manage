@@ -308,7 +308,8 @@ pub fn run_pass(
         // 计数刻意丢弃，形状与轮末那句 `let _ = sweep_unrooted_projects(conn)?;` 一致：接住它就得给
         // RunSummary 加字段，而 missing 的行数本来就能从 status_counts 的 GROUP BY 免费拿到
         // （`index_overview` 的 pick("missing") 已在等）。代价照实记在 spec 风险 6：
-        // 被熔断跳过时界面与不跳过时长得一样，没人能看出这一轮被挡下了。
+        // 被挡下的那一轮「动了还是没动」在界面上看不出来 —— 累计失效数自 Task 9 起已上屏
+        // （`index-status.tsx` 的 missing 计数），缺的只是这一轮的增量。spec 风险 6 记的就是这格。
         // 上面两条 cancel 早退路径（循环开头那条、循环内那条）都不经过这里 —— 一轮被取消时不做额外写库。
         let _ = reclaim_missing(conn, &target.project_id, &outcome, root_missing)?;
         on_progress(progress_for(&target, &acc, "running", ""));

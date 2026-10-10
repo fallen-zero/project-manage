@@ -16,7 +16,7 @@
 4. 预览的两格 M4 债务：抽取前**当场 stat 一次**判尺寸门（I-4）+ 一份 `AtomicBool` 单飞闸门（I-5）。
 5. `project::set_root_dir` 那两条 `DELETE` + `INSERT` 包进一个事务（M3 残留 11 那个窄竞态）。
 
-前端只动 `src/pages/index-status.tsx` 三格：状态筛选下拉加 `missing`、项目行念出 `missing` 计数、失效行挂一句悬浮说明（第五节末尾有 2026-10-10 的改判记录）。
+前端只动**两个文件四格**（2026-10-10 随 Task 9 评审回写：原只写「`index-status.tsx` 三格」，漏改了风险 5 追加 Step 3b 之后的交付面）：`src/pages/index-status.tsx` 三格 —— 状态筛选下拉加 `missing`、项目行念出 `missing` 计数、失效行挂一句悬浮说明（第五节末尾有改判记录）；`src/components/doc-preview-dialog.tsx` 一格 —— 预览红字把 `hint` 拼进去，否则风险 5 与 D10 那句「靠 hint 分成因」在界面上落空。
 
 **边界**：不引入 `notify`（技术方案那句「notify 监听 + 启动 reconcile」本轮只做后半，前半整批推到 M5.5，理由见第九节第 1 行）；不写第二套扫描通路（复用 `scan_root` 与 `run_pass`）；不给自动轮做独立观感；不做自动轮的开关。
 
@@ -105,7 +105,7 @@ pub fn reclaim_missing(
 | 7 | 新增 `PreviewShared { busy: AtomicBool }` + RAII 守卫 | 单飞闸门：占用中第二条预览立刻 `preview_unavailable` + hint | `RunningGuard` 的 Drop 复位 —— 本仓已有一条测试专门钉「作业 panic 展开也复位」，照它的形态再来一条 |
 | 8 | `project::set_root_dir` | 那两条 `DELETE` + `INSERT` 包进 `unchecked_transaction`，`clear_project` 留在事务外 | `write_doc` / `clear_project` 的事务形态。**签名不变**：`rusqlite::Connection::unchecked_transaction(&self)` 收 `&Connection`，vendored 源码 `transaction.rs` 的 `new_unchecked` 里 `drop_behavior: DropBehavior::Rollback`，`Drop for Transaction` 走 `finish_()` ⇒ `rollback_()` ⇒ `execute_batch("ROLLBACK")`。所以「事务里第二条失败 ⇒ 第一条被回滚」是有源码出处的，不是推断 |
 
-前端三格都在 `src/pages/index-status.tsx`：状态筛选下拉（现只有 all/ok/skipped/failed）加 `missing`；项目行的计数（现只念 ok/skipped/failed 三档）念出 `missing`；文件行那一格 **2026-10-10 写计划时改判** —— Badge 的文案本来就是 `r.status`，`missing` 与 `skipped` 靠文字已分开，而把 `missing` 塞进 `destructive` 会跟 `failed` 混成「出错了」（失效是磁盘上的事实，不是错误），再造一个分支就是把 `outline` 换成另一个中性色；所以第三格落地为**挂一句悬浮 `title`**（为什么它不在结果里 + 放回后重跑一轮会自动回填），不动 `variant`、不动设计系统。`src/types/index.ts` 的 `ProjectState` 已带 `pending`/`missing` 字段，零改动。
+前端四格分两个文件（`index-status.tsx` 三格 + `doc-preview-dialog.tsx` 一格 hint —— 2026-10-10 随 Task 9 回写，原写「都在 index-status.tsx 三格」漏改了风险 5 追加 Step 3b 之后的面）：状态筛选下拉（现只有 all/ok/skipped/failed）加 `missing`；项目行的计数（现只念 ok/skipped/failed 三档）念出 `missing`；文件行那一格 **2026-10-10 写计划时改判** —— Badge 的文案本来就是 `r.status`，`missing` 与 `skipped` 靠文字已分开，而把 `missing` 塞进 `destructive` 会跟 `failed` 混成「出错了」（失效是磁盘上的事实，不是错误），再造一个分支就是把 `outline` 换成另一个中性色；所以第三格落地为**挂一句悬浮 `title`**（为什么它不在结果里 + 放回后重跑一轮会自动回填），不动 `variant`、不动设计系统。`src/types/index.ts` 的 `ProjectState` 已带 `pending`/`missing` 字段，零改动。
 
 ## 六、错误处理
 
@@ -134,7 +134,7 @@ Rust 单测一律 `db::open_in_memory()` + `tempfile::tempdir()` 夹具，绝不
 9. **不写的两条，理由要落档**（HANDOFF 坑 17：「不该有测试」也要显式记）：① 「missing 行不可预览」—— `row_for_preview` 的谓词是**正向** `d.index_status = 'ok'`，既有 `a_skipped_row_is_preview_unavailable` 守的就是它，再加一条 missing 版本不多抓一类变异；② 「missing 退出召回」—— 同一条正向谓词在 `SELECT_SQL` 里，加上 M3 既有的 `non_ok_outcomes_record_status_but_write_no_fts_rows`。
 10. **启动触发那一格无单测**（要真实 `App` 实例）⇒ 与 M3 缺口 2「`index_start` 的线程壳与 `app.emit` 连通性没有 Rust 单测，只有真机证据」同口径，进第八节的「没能自动验证」。
 11. **条数不在本文写死**（HANDOFF 坑 9：期望条数只能实跑数出来，不能累加）。总数由实施计划逐任务数，派发前过 `verify-plan-test-count-expectations` 当场数一遍再同步整条聚合链。
-12. 前端三格是 JSX 与常量，`node --test` 那张网不覆盖（M4 §八 已定），**不新增测试文件、不新增依赖**，进「没能自动验证」。
+12. 前端四格（两文件）是 JSX 与常量，`node --test` 那张网不覆盖（M4 §八 已定），**不新增测试文件、不新增依赖**，进「没能自动验证」。
 
 ## 八、真机验收
 
@@ -153,7 +153,7 @@ Rust 单测一律 `db::open_in_memory()` + `tempfile::tempdir()` 夹具，绝不
 9. I-4：把已索引的 `.txt` 追加到超过上限 → 当场预览即拒（不等下一轮扫描降级）。
 10. 顺手量自动轮进行中的一次 `search_all` 毫秒数（WAL 写密集下的读延迟，风险 4 的证据），并核对清场。
 
-**没能自动验证（逐条点名，不许省略）**：setup 那一行的启动触发（无单测）；自动轮在几十 GB 真实语料上的整轮耗时与磁盘 IO 峰值（沙盒数字不等于真实目录）；无权限子树导致的单点误标是否真会发生（本机造不出稳定的权限样本）；`missing` 行长期累积后的库体积；前端三格的 JSX 渲染；D10 三成因共用一条码在真实界面上读起来分不分得开。
+**没能自动验证（逐条点名，不许省略）**：setup 那一行的启动触发（无单测）；自动轮在几十 GB 真实语料上的整轮耗时与磁盘 IO 峰值（沙盒数字不等于真实目录）；无权限子树导致的单点误标是否真会发生（本机造不出稳定的权限样本）；`missing` 行长期累积后的库体积；前端四格（两文件）的 JSX 渲染；D10 三成因共用一条码在真实界面上读起来分不分得开；**Task 9 评审补的第六格** —— `missing` 筛选下 `index_docs` 清单仍封顶 `DOCS_LIMIT=200` 且 offset 恒 0，而项目行那个 `missing` 计数来自 `status_counts` 的 `GROUP BY`、不受这个上限约束，两个数会不会被读成矛盾（`index-status.tsx:135` 与 `:551`）。
 
 ## 九、不在本轮（含两处要改既有归属的理由）
 
@@ -181,7 +181,7 @@ Rust 单测一律 `db::open_in_memory()` + `tempfile::tempdir()` 夹具，绝不
 3. **无权限子树的单点误标不自愈**，熔断只挡成片（第四节已点名）。
 4. **WAL 写密集期间的首屏检索延迟**：M4 量到的 612–737 ms 是静场读数；本轮启动即有写在跑。第八节第 10 条出数字，越线才立 finding。**2026-10-10 Task 8 评审把这条的形态算重了一档**：自动轮让「worker 持着 SQLite 写锁」从「用户主动点索引」变成**每次启动都发生**，而主线程的 IPC 命令是**持着 `Mutex<Connection>` 等 SQLite 让锁**的 —— 所以最坏情况不是「读延迟量级」而是排队到 `busy_timeout` 的 **5 秒**。附带一条对风险 8 的正面结论：`write_doc` 的 DEFERRED 事务第一句就是写（无读→写升级）⇒ 风险 8 那个形态在索引侧不成立，并发探针要测的是**写侧让锁**而不是改指侧。故第八节的对账加一条：自动轮进行中除 `db_status` 外还要并发一次**写**命令（例如 `project_update`）并落毫秒数。
 5. **三成因共用 `preview_unavailable`** = 同一句红字三个意思（行不 `ok` / 尺寸超限 / 单飞占用），只靠 `hint` 分。终审若判不可接受，正解是加一个 `preview_*` 码 ⇒ 那要**先改 M4 §七 的码表契约**再实现，不许实现者临场加。**2026-10-10 Task 7 评审把这条的代价量大了**：预览对话框（`src/components/doc-preview-dialog.tsx`）的 catch 只做 `setError(toAppError(e).message)`，渲染处也只印这个串 —— `hint` 在 `ipc.ts` 的 `AppErrorShape` 里、在回线上，但**从来不显示**，所以三条成因在屏幕上现在是**逐字同一句**。D10 那句「靠 hint 分」在这一格根本不落地。处置：Task 9 新增 **Step 3b**，按同仓 `ledger-panel.tsx:177` 的先例把 hint 拼进那一句红字（一行、不新增状态、不碰线格式）；改完之后本条的代价才等于「文案变长」，Task 10 的真机断言 8 也才能按 hint 首句判闸门真拒。
-6. **熔断跳过时界面与不跳过时一模一样**，用户看不出被挡（D8 的直接代价）。缓解只有一句静态界面文案，不是数据。
+6. **熔断/闸门跳过时，「这一轮的增量」在界面上看不出来**（D8 的直接代价）。**2026-10-10 Task 9 评审把这条从「一模一样」收紧了一格**：`index-status.tsx:464` 把累计 `missing` 计数装上屏（`>0` 还变红）之后，「被挡的那一轮」与「正常回收的那一轮」在计数增量上是有区别的 —— 还看不出的只是**这一轮动没动**，不是「失效总数」。缓解仍是一句静态界面文案，不是数据；写准成「增量不可见」而不是「完全长得一样」，否则这句注释本身就成了新谎（坑 85 同形）。
 7. **`missing` 行只增不减**：永久扫不到的那些会累积，因为本轮保留元数据行兑现可见性、又不给删除入口。M5.5 若做「失效清单一键清除」要新 IPC 命令。
 8. **`unchecked_transaction` 走 `BEGIN DEFERRED`**（vendored `rusqlite-0.40.2/src/transaction.rs` 的 `new_unchecked` match 臂）。SQLite 在 DEFERRED 事务里把读升级为写失败时，据说是**立即**回 `SQLITE_BUSY` 而不走 busy handler —— **此条未验证**，核对路径是 SQLite 官方事务/锁定文档，以及计划里加一条「自动轮写密集时做一次改指」的并发探针。备选缓解两个：改用 `Immediate`（`set_transaction_behavior` 要 `&mut Connection`，签名得动）或失败重试一次。落点 8 的实现要按这次核对结论定。
 
