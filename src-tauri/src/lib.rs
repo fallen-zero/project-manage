@@ -34,12 +34,6 @@ struct AppState {
     index: Arc<index_job::IndexShared>,
     /// 预览的抽盘单飞闸门（终审 I-5）：占用中第二条预览直接拒，不再占 tokio worker（spec D9）。
     preview: Arc<doc_preview::PreviewShared>,
-    /// 文件监听 → 追平的脏位点（M5.5 D4）。watcher/ticker 两个常驻线程各持自己的 Arc clone 干活，
-    /// 这里随 AppState 存活只为「整个进程共享同一个位点」这一事实，本批无 IPC 读它（Task 9+ 才会在界面用）。
-    /// 这不是 Task 7 那块 watch.rs 顶部整模块豁免（那条已回收）：watch.rs 里 mark_dirty/due_for_pass/
-    /// spawn_* 全有真实调用方；只是这一个 AppState 字段在本批确实暂未读，豁免精确到这一个字段。
-    #[allow(dead_code)]
-    watch: Arc<watch::WatchShared>,
 }
 
 fn db(state: &AppState) -> AppResult<MutexGuard<'_, rusqlite::Connection>> {
@@ -612,7 +606,6 @@ pub fn run() {
                 mk: Mutex::new(None),
                 index: Arc::clone(&index),
                 preview: Arc::new(doc_preview::PreviewShared::new()),
-                watch: Arc::clone(&watch),
             });
             // M5.5 D4：把文件监听接进运行态 —— watcher 只置脏，ticker 每 5 s 在空闲时起一轮追平。
             // 都必须在 `manage` 之后（ticker 要 app.handle() 且要 index/watch 已就绪），在启动轮之前
