@@ -502,4 +502,21 @@ mod tests {
             .unwrap();
         assert_eq!(mode.to_lowercase(), "memory");
     }
+
+    #[test]
+    fn the_three_20mb_defaults_are_one_number() {
+        // M5 终审发现的「四个家」：种子值 / get 默认串 / parse 回退值 三处各写一遍 20 MB，
+        // 没有一致性断言 ⇒ 改一处就悄悄漂。本任务把后两处收敛到 index_scan 的一个 pub const，
+        // 本断言钉「种子 == 那个 const」。
+        let conn = open_in_memory().unwrap();
+        let seeded: String = conn
+            .query_row("SELECT value FROM settings WHERE key = 'index_max_file_bytes'", [], |r| r.get(0))
+            .unwrap();
+        let seeded: u64 = seeded.parse().unwrap();
+        assert_eq!(
+            seeded,
+            crate::index_scan::DEFAULT_MAX_FILE_BYTES,
+            "settings 种子值与 ScanOptions 的默认上限必须是同一个数"
+        );
+    }
 }

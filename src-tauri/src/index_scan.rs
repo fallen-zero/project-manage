@@ -8,6 +8,10 @@ use rusqlite::Connection;
 use crate::error::AppResult;
 use crate::extract::kind_of;
 
+/// 单文件上限的**单一真源**（M5.5 清账#1）。`ScanOptions::load` 的两处默认（行缺失回退、
+/// 解析失败回退）都引它，`db.rs` 的种子值必须等于它 —— 由 `db::tests::the_three_20mb_defaults_are_one_number` 钉。
+pub const DEFAULT_MAX_FILE_BYTES: u64 = 20_971_520;
+
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
     pub exclude_dirs: Vec<String>,
@@ -29,7 +33,8 @@ impl ScanOptions {
         // 数字解析失败仍退默认值：M3 没有写这三行的入口（Task 11 只读展示），
         // 要把它做成 Err 得连设置写入口与校验一起动，不在本任务范围。
         let list = get("index_exclude_dirs", "node_modules,dist,build,target,__pycache__,.git")?;
-        let bytes = get("index_max_file_bytes", "20971520")?;
+        let default_bytes = DEFAULT_MAX_FILE_BYTES.to_string();
+        let bytes = get("index_max_file_bytes", &default_bytes)?;
         let cap = get("index_max_files_per_project", "50000")?;
         Ok(ScanOptions {
             exclude_dirs: list
@@ -37,7 +42,7 @@ impl ScanOptions {
                 .map(|s| s.trim().to_owned())
                 .filter(|s| !s.is_empty())
                 .collect(),
-            max_file_bytes: bytes.parse().unwrap_or(20_971_520),
+            max_file_bytes: bytes.parse().unwrap_or(DEFAULT_MAX_FILE_BYTES),
             max_files_per_project: cap.parse().unwrap_or(50_000),
         })
     }
