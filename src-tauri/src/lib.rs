@@ -6,6 +6,7 @@ mod index_job;
 mod index_scan;
 mod index_store;
 mod ledger;
+mod ocr;
 mod project;
 mod search;
 mod tokenize;
