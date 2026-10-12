@@ -227,13 +227,31 @@ fn take_windows(hits: &[(usize, usize)], text_len: usize) -> (Vec<(usize, usize)
     (windows, dropped)
 }
 
+/// 只给测试用：`prefix_utf16_matches_naive_counting` 拿它当**朴素逐段计数**的参照，对拍前缀差。
+/// `stitch` 自 Task 10 起不再调它（改用 `utf16_prefix` 的 O(1) 前缀差），所以照 `index_store.rs:171`
+/// 同一写法标 `#[cfg(test)]`，不另外开豁免格 —— 全仓的编译期豁免按结构门只剩 `db.rs:30` 那一处。
+#[cfg(test)]
 fn utf16_len(chars: &[char]) -> usize {
     chars.iter().map(|c| c.len_utf16()).sum()
 }
 
+/// 前缀码元长度：prefix[i] = chars[..i] 的 UTF-16 码元数。把 stitch 里「每命中一次 utf16_len」
+/// 的 O(命中数×窗长) 摊成 O(n)（M5 真机：8MB×19.5万命中曾致单次预览挂起 >9 分钟）。
+fn utf16_prefix(chars: &[char]) -> Vec<usize> {
+    let mut p = Vec::with_capacity(chars.len() + 1);
+    p.push(0usize);
+    for c in chars {
+        let last = *p.last().unwrap();
+        p.push(last + c.len_utf16());
+    }
+    p
+}
+
 /// 按窗口切原文、中间插 `PREVIEW_GAP`，同时把命中从「原文 char 坐标」换算到
 /// 「拼出来的 text 的码元坐标」。换算只做一次，就在写入每一扇窗的时候。
+/// 区间码元数走 `utf16_prefix` 的前缀差（O(1)），不再逐命中重数整段窗（Task 10，spec D 风险 5）。
 fn stitch(chars: &[char], windows: &[(usize, usize)], hits: &[(usize, usize)]) -> (String, Vec<(usize, usize)>) {
+    let prefix = utf16_prefix(chars);
     let mut out = String::new();
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     let mut base = 0usize; // 已写入 out 的码元数
@@ -247,11 +265,11 @@ fn stitch(chars: &[char], windows: &[(usize, usize)], hits: &[(usize, usize)]) -
         out.extend(chars[ws..we].iter());
         for &(hs, he) in hits {
             if hs >= ws && he <= we {
-                let start = base + utf16_len(&chars[ws..hs]);
-                ranges.push((start, start + utf16_len(&chars[hs..he])));
+                let start = base + prefix[hs] - prefix[ws];
+                ranges.push((start, start + prefix[he] - prefix[hs]));
             }
         }
-        base += utf16_len(&chars[ws..we]);
+        base += prefix[we] - prefix[ws];
     }
     (out, ranges)
 }
@@ -298,7 +316,7 @@ pub fn busy() -> AppError {
     AppError::new(
         "preview_unavailable",
         "这条索引记录不能预览",
-        Some("已有一份预览正在抽取原文，等它结束再试；大文件的抽取可能要几分钟"),
+        Some("已有一份预览正在抽取原文，等它结束再试；特别大的文件可能要几分钟以上"),
     )
 }
 
@@ -561,5 +579,18 @@ mod tests {
         }));
         assert!(ran.is_err(), "前提：闭包确实 panic 了，否则下面那条断言什么都没证明");
         assert!(PreviewShared::try_enter(&shared).is_some(), "panic 展开也必须把闸门放掉");
+    }
+
+    #[test]
+    fn prefix_utf16_matches_naive_counting() {
+        // 混合 BMP 与代理对（emoji）的串，验「前缀差」等价于逐段 utf16_len。
+        let s = "验收α🎯合同β🚀付款条件";
+        let chars: Vec<char> = s.chars().collect();
+        let prefix = utf16_prefix(&chars);
+        for i in 0..chars.len() {
+            for j in i..=chars.len() {
+                assert_eq!(prefix[j] - prefix[i], utf16_len(&chars[i..j]), "区间 [{i},{j})");
+            }
+        }
     }
 }
