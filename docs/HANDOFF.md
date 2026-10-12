@@ -8,7 +8,7 @@
 >
 > **红线全程守住**：真实库 `%APPDATA%\dev.zero.pfm\` 三文件 size+sha256 从起 dev 前到收尾逐字等 M5 归档基线；沙盒 `dev.zero.pfm.m6test` 因编译未过从未建起、`tauri.conf.json` 一字未动；四次尝试各留一只本项目 vite 孤儿，**按 PID 精确回收、绝未 `taskkill //IM`**。
 >
-> **下一个动作**：① M6 **整分支终审**（用 `superpowers:requesting-code-review`，最 capable 模型，BASE 取 `master`、HEAD 现取）→ ② 合 `master`（**需需求方当次批准**，功能分支常驻推送授权不覆盖合并）。终审时特别复核：`ocr.rs` 的 WinRT 错误吞没/panic 边界与 `extract.rs` 的 `catch_unwind` 两道叠加是否仍各自承重、`image_text` 的 `\\?\` 前缀剥离与 canonicalize、headless 测的断言能否真变红。**仍要人做的一格**：远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`（本机无 gh，只能在 GitHub Settings → Branches 手改）。
+> **下一个动作**：① **M6 整分支终审已做完**（`With fixes`、0 Critical / 2 Important / 6 Minor，报告在 `.superpowers/sdd/2026-10-12-m6-ocr/`）——五条跨模块不变量全 HELD（含「默认 true 不泄漏」这条命门在 `scan_root` 唯一生产调用点层面独立复核），两条具名库内部行为风险（`join()` 阻塞语义、null→`Err`）到 `windows-future`/`windows-core` 按行号坐实，headless e2e 可证伪性判成立；两条 Important（OCR 错误 hint 去掉不存在的「设置里关闭」指引、e2e 补「垃圾字节 .png 落 failed」断言）与 Minor-1（T2 deferred-① 兑账）随收口提交 `556f4f0` 落地，spec §五.2/§十.3 按 `join()` 无超时机制 retro-edit；其余 5 条 Minor 有名登记（逐条见 `docs/开发进度.md`「## M6 整分支终审」）可带着合。② **合 `master`（需需求方当次批准**，功能分支常驻推送授权不覆盖合并）。合前建议再跑一遍终态门（终审代码面已 `cargo test --lib` 167 / 两 clippy exit0 / node 8-8 / build exit0）。
 >
 > **M6 提交（`git log --oneline master..HEAD` 现取，共 10）**：4 个 `docs`（`d2854de` spec 定稿 → `766deb5` 计划 → `c9a9928` 计划修订 → `b0c1f14` T4 注释收口）+ 6 个代码面（`555b8ae`→`e756ae1`→`e535fbf`→`3014d90`→`da860ed`→`a3d34a0` = T1–T6）。账本 `.superpowers/sdd/2026-10-12-m6-ocr/progress.md`（每格 Ruling + 评审结论 + 两条 T4 concern 的代码级裁定都在里面）。
 

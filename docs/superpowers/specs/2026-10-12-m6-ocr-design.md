@@ -63,7 +63,7 @@
 ## 五、落点（五格）
 
 1. `Cargo.toml`：`windows = { version = "<plan 期 cargo 实取>", features = ["Media_Ocr","Graphics_Imaging","Graphics_Imaging_Codecs","Storage","Storage_Streams","Foundation","Foundation_Collections","Globalization","Win32_System_WinRT"] }`（feature 名以 `windows` 实包为准，计划阶段核对）。技术方案 line 186 预置 `0.62.2`；若版本流动以实锁为准。
-2. `src-tauri/src/ocr.rs`（新）：`ocr_available()->bool`、`image_text(&Path)->AppResult<String>`、`clean_cjk_spaces(&str)->String`。`image_text` 内 `SoftwareBitmap::CreateFromFileAsync` → `OcrEngine::TryCreateFromUserProfileLanguages()`（或从 `AvailableRecognizerLanguages` 首个）→ `RecognizeAsync` → 逐 `lines` join `\n` → `clean_cjk_spaces`。WinRT 异步用 `windows` 的 `.get()` 阻塞等（OCR 在后台线程跑，阻塞该线程无妨，它本就在 `run_pass` 线程）。
+2. `src-tauri/src/ocr.rs`（新）：`ocr_available()->bool`、`image_text(&Path)->AppResult<String>`、`clean_cjk_spaces(&str)->String`。`image_text` 内 `SoftwareBitmap::CreateFromFileAsync` → `OcrEngine::TryCreateFromUserProfileLanguages()`（或从 `AvailableRecognizerLanguages` 首个）→ `RecognizeAsync` → 逐 `lines` join `\n` → `clean_cjk_spaces`。WinRT 异步用 `windows-future` 的 inherent `join()`（读 vendored `windows-future-0.3.2/src/join.rs` 后纠正：初稿写的 `.get()` 语义与 vendored 一致但 `join()` 才是这个 API 的具名调用；账本 T2 Ruling 记）阻塞等（OCR 在后台 worker 线程跑，阻塞该线程无妨，它本就在 `run_pass` 线程）。
 3. `extract.rs`：`enum DocKind` 加 `Image`；`kind_of` 把 `png|jpg|jpeg|webp|bmp` → `Some(DocKind::Image)`；`SUPPORTED`（`index_store.rs:217` 附近）加这 5 项；`extract_text` 加 `Some(DocKind::Image) => crate::ocr::image_text(path)`。**但**：`extract_text` 拿不到 `ocr_available`（它是纯函数入口）——见落点 4 的注入。
 4. **可用性注入点**（关键接线，避免 `extract_text` 反查全局）：`run_pass` 在**每轮开头**读一次 `ocr_available`（从 `AppState`/`IndexShared` 传入，或 `run_pass` 入参多一个 `ocr_available: bool`），在分派前判：`if kind==Image && !ocr_available { 不建行、continue（视同未支持）}`。`extract_text` 保持纯（只在 ocr_available 时才被喂 Image 路径）。⇒ 降级不建行落在 `run_pass` 这一层，与 `kind_of` 的静态支持解耦。
 5. `index_overview`（`lib.rs`）：`IndexOverview` 加 `ocr_available: bool`（camelCase 出），值来自 setup 建库时探测一次存 `AppState.ocr_available: bool`；`src/types/index.ts` 的 `IndexOverview` 加键；`index-status.tsx` 支持清单区据它显一句。零新命令、无新列 ⇒ 无迁移。
@@ -111,7 +111,7 @@
 
 1. **别的盒子没装中文 OCR**：本机有（已探），但分发/他人机器可能只有英文或全无 ⇒ 全量降级为「图片不建行」，功能对中文用户静默不可用。**缓解**：`/index` 的 `ocr_available` 提示必须显眼；未来若要硬保证中文 OCR，考虑捆一个纯 Rust 引擎（tesseract 需外部 exe，重），那是新里程碑不在此。
 2. **图片多目录首轮很久**：D2 选了默认全开无配额，靠增量+取消。若真机 §八.7 或真实使用测出久到不可接受，回头加每项目 OCR 上限（会牵 D3 的 skip_reason 值域，届时要连 UI 文案）。本批先取数。
-3. **WinRT 异步在 `run_pass` 线程阻塞**：`image_text` 用 `.get()` 同步等 OCR，占着该 worker 线程。OCR 单张秒级可接受；但 `RecognizeAsync` 若在某图卡死（系统 OCR 挂），这轮会卡到 `cancel` 生效。本机不可廉价构造「OCR 挂死」，记有名缺口。
+3. **WinRT 异步在 `run_pass` 线程阻塞**：`image_text` 用 `windows-future` 的 inherent `join()`（读 vendored 源码纠正初稿写的 `.get()`：`IAsyncOperation::join()` 在 status==Started 时建 manual-reset event，WinRT 线程池完成回调置事件，调用线程 `WaitForSingleObject(INFINITE)` 睡到完成——纯事件阻塞、不需要消息泵/STA）同步等 OCR，占着该 worker 线程。OCR 单张秒级可接受；但 `join()` **无超时参数**，`RecognizeAsync` 若在某图挂死（系统 OCR 挂了），该 worker 线程会无限阻塞、**当前这张返回之前 `cancel` 根本不生效**（`run_pass` 只在文件之间查 `cancel`，M3 既有节奏，见 §四.60）——不是「卡到 cancel 生效」，是「卡住且不响应 cancel」。本机不可廉价构造「OCR 挂死」，记有名缺口。若真出问题，加固路径是给 `join()` 外面套一层带超时的 Waiter 或换 `with_cancellation_token_source` 系（未在本批做）。
 4. **`windows` crate 版本/features 流动**：feature 名（`Media_Ocr` 等）随 `windows` 次版本变，计划阶段必须 `cargo` 实锁 + 编译验，别照技术方案那个 `0.62.2` 凭印象写死。
 5. **OCR 文本进 FTS 的分词质量**：清洗后长无空格中文串靠 jieba；OCR 错字（识别把「己」认成「已」）不可控，属精度上限不是缺陷，别为此在入库侧做模糊（红线：分词链不动）。
 6. **`IndexOverview` 新字段的下游**：加 `ocr_available` 要同步 `src/types/index.ts` + store + 页面，漏一处 = TS 或运行时 undefined。一条断言/一处 tsc 守住。
