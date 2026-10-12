@@ -461,6 +461,10 @@ struct IndexOverview {
     max_file_bytes: i64,
     max_files_per_project: i64,
     supported_exts: Vec<&'static str>,
+    /// 本机 Windows OCR 是否可用（`ocr::ocr_available()` 的活探测值）。
+    /// 不透出 `ScanOptions::load` 的 `opts.ocr_available`——那是 load 的惰性默认 `true`，
+    /// 在这条路径上从不喂给 `scan_root`，set-but-never-read；UI 必须看到真实探测。
+    ocr_available: bool,
 }
 
 #[tauri::command]
@@ -520,6 +524,7 @@ fn index_overview(state: State<'_, AppState>) -> AppResult<IndexOverview> {
         max_file_bytes: opts.max_file_bytes as i64,
         max_files_per_project: opts.max_files_per_project,
         supported_exts: extract::supported_exts().to_vec(),
+        ocr_available: crate::ocr::ocr_available(),
     })
 }
 

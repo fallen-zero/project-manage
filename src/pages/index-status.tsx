@@ -387,6 +387,11 @@ export function IndexStatusPage() {
           <p className="text-muted-foreground">
             清单之外的类型（图片、.doc/.ppt、压缩包）不会建行：图片等归 M6 OCR，.doc/.ppt 归 M7。
           </p>
+          {overview?.ocrAvailable ? (
+            <p className="text-xs text-muted-foreground">图片（png/jpg/jpeg/webp/bmp）已启用本机 OCR。</p>
+          ) : (
+            <p className="text-xs text-muted-foreground">图片 OCR 未启用：本机未安装可用的 Windows 文字识别语言包，图片暂不索引。</p>
+          )}
           <div className="flex flex-wrap gap-x-4 gap-y-1">
             <span>
               单文件上限：

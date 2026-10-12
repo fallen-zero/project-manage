@@ -65,6 +65,8 @@ export interface IndexOverview {
   maxFileBytes: number;
   maxFilesPerProject: number;
   supportedExts: string[];
+  /** 本机 Windows OCR 是否可用（Rust 侧 `ocr::ocr_available()` 活探测，非 ScanOptions 的惰性默认）。 */
+  ocrAvailable: boolean;
 }
 
 export interface DocRow {
