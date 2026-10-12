@@ -639,6 +639,72 @@ mod tests {
         assert_eq!(crate::index_store::doc_hits(&conn, "验收", 20).unwrap().len(), 1, "跳过后仍可搜");
     }
 
+    /// M6 T6 端到端（headless，需求方选的路）：真 Windows OCR 引擎驱动整条链 ——
+    /// 一张含已知中文的 png 经 `run_pass`→`extract_text`→`ocr::image_text`→`write_doc`(jieba) 入库
+    /// →`doc_hits` 搜得到→`doc_preview` 出清洗后正文。用编得动的 `--lib` 测试 profile 直驱真代码，
+    /// 绕开本机 `tauri dev` 的提交内存墙（os error 1455，账本 Task 6 记）。无 OCR 语言包显式 SKIP、
+    /// 不假装通过（T2 同形制）。覆盖 spec §八 断言 1（happy path 入库 ok）/2（D7 清洗后无空格原词命中）
+    /// /3（预览出清洗后正文）/6（增量不重 OCR），并当场证红线①（索引只读、源 png 一字未动）。
+    #[test]
+    fn ocr_image_flows_end_to_end_through_index_and_search() {
+        if !crate::ocr::ocr_available() {
+            eprintln!("SKIP: 本机无可用 OCR 语言包，端到端用例不假装通过（§八.5 降级由 ocr_available 探测承担）");
+            return;
+        }
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-cn-ocr.png");
+        // 红线①：被索引的源文件只读——跑前记 size+mtime，跑后逐字比（对 temp 副本同样比）。
+        let src_before = std::fs::metadata(&fixture).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("合同.png");
+        std::fs::copy(&fixture, &img).unwrap();
+        let img_before = std::fs::metadata(&img).unwrap();
+        // txt 刻意不含「合同/验收」，好让下面 doc_hits 的 png 命中不被正文段之外的东西稀释。
+        std::fs::write(dir.path().join("台账.txt"), "项目 台账 摘要".as_bytes()).unwrap();
+
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", dir.path());
+
+        // §八.1：一轮后 png 行 index_status='ok'（扫描放行→抽取成功→write_doc 落 ok，不是 failed/skipped）。
+        let summary = run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(summary.state, "done");
+        let png_status: String = conn
+            .query_row("SELECT index_status FROM index_docs WHERE path LIKE '%合同.png'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(png_status, "ok", "含字图片经真 OCR 应入库 ok");
+
+        // §八.2 / D7：无空格原词「合同验收」命中 png 正文段（raw OCR 的字间空格已被 clean_cjk_spaces 收掉，
+        // 再由 write_doc→index_text(jieba) 入 FTS）。
+        let hits = crate::index_store::doc_hits(&conn, "合同验收", 20).unwrap();
+        assert!(hits.iter().any(|h| h.path.ends_with("合同.png")),
+            "清洗后的 OCR 正文应进 FTS 并被无空格原词命中：{:?}", hits.iter().map(|h| &h.path).collect::<Vec<_>>());
+
+        // §八.3：预览窗口含清洗后正文（断长度>0 与含词，不把整段 OCR 正文打印进日志）。
+        let doc_id: String = conn
+            .query_row("SELECT id FROM index_docs WHERE path LIKE '%合同.png'", [], |r| r.get(0))
+            .unwrap();
+        let row = crate::doc_preview::row_for_preview(&conn, &doc_id).unwrap();
+        let pv =
+            crate::doc_preview::render_preview(&doc_id, &row, "合同验收", crate::index_scan::DEFAULT_MAX_FILE_BYTES)
+                .unwrap();
+        assert!(pv.text.replace(' ', "").contains("合同验收"), "预览应出清洗后 OCR 词（长度 {}）", pv.text.chars().count());
+
+        // §八.6：增量第二趟不重 OCR——size+mtime 未变 → 计 unchanged、不重记 ok。
+        let second = run_pass(&conn, &opts(), Some("p1"), false, &no_cancel(), &mut |_| {}).unwrap();
+        let r2 = &second.results[0];
+        assert_eq!(r2.ok, 0, "没重读就不该再计 ok：{r2:?}");
+        assert!(r2.unchanged >= 1, "png 应计入 unchanged（不重跑 OCR）：{r2:?}");
+
+        // 红线①：索引器绝不写回被索引文件——源 fixture 与 temp 副本的 size+mtime 跑后逐字不变。
+        let src_after = std::fs::metadata(&fixture).unwrap();
+        assert_eq!(
+            (src_after.len(), src_after.modified().ok()),
+            (src_before.len(), src_before.modified().ok()),
+            "源 png 一字未动"
+        );
+        let img_after = std::fs::metadata(&img).unwrap();
+        assert_eq!(img_after.len(), img_before.len(), "被索引副本一字未动");
+    }
+
     /// 取消：第一个进度回调就把标志立起来，pass 必须停在中间。
     #[test]
     fn cancel_stops_the_pass_early() {

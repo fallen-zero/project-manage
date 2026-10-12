@@ -385,7 +385,7 @@ export function IndexStatusPage() {
             ))}
           </div>
           <p className="text-muted-foreground">
-            清单之外的类型（图片、.doc/.ppt、压缩包）不会建行：图片等归 M6 OCR，.doc/.ppt 归 M7。
+            清单之外的类型（.doc/.ppt、压缩包）不会建行：.doc/.ppt 归 M7。图片的支持情况见下条 OCR 状态。
           </p>
           {overview?.ocrAvailable ? (
             <p className="text-xs text-muted-foreground">图片（png/jpg/jpeg/webp/bmp）已启用本机 OCR。</p>
