@@ -1,13 +1,12 @@
 //! Windows 原生图片 OCR（M6）。能力层三件事：探测可用性、识别、清洗 CJK 词间空格。
 //! 只读图片、绝不写回；识别文本交回调用方（extract_text）走既有分词入库。
-//! 识别本体（`image_text`）在 Task 2 落地，本文件当前只铺探测与清洗。
 use std::sync::OnceLock;
 
 /// 本机有没有可用的 OCR 识别器（任一语言）。进程内探一次记忆化——`AvailableRecognizerLanguages`
 /// 取值有成本，且降级判据必须全局一致（别在同一轮里忽有忽无）。探测抛错按「不可用」保守处理。
 ///
-/// Task 1 只铺能力层，调用点在 Task 2（extract.rs 的 image_text）与 Task 4/5（索引轮降级判定），
-/// 所以现在本 crate 内还没有使用者；同 `db::open_in_memory` 的处理，显式放行而不是全局关掉。
+/// Task 1 只铺能力层，调用点在 Task 4/5（索引轮降级判定），所以现在本 crate 生产路径还没有使用者；
+/// 同 `db::open_in_memory` 的处理，显式放行而不是全局关掉。回收点：T4 接 scan 后删这条 allow。
 #[allow(dead_code)]
 pub fn ocr_available() -> bool {
     static OK: OnceLock<bool> = OnceLock::new();
@@ -15,6 +14,7 @@ pub fn ocr_available() -> bool {
     *OK.get_or_init(|| windows_probe().unwrap_or_default())
 }
 
+// 回收点：唯一调用者是 ocr_available，随它一起在 T4 接 scan 后清。
 #[allow(dead_code)]
 fn windows_probe() -> windows::core::Result<bool> {
     use windows::Media::Ocr::OcrEngine;
@@ -25,6 +25,8 @@ fn windows_probe() -> windows::core::Result<bool> {
 
 /// Windows OCR 会在 CJK 字符间插空格（「合 同 验 收」）。仅当**空格两侧都是 CJK** 才删该空格，
 /// 保留英文词之间的空格（D7，借 dowse 设计）。
+/// 回收点：本函数已被 `image_text` 生产调用；`#[allow(dead_code)]` 待 T3 把 image_text 接进
+/// extract 后随 image_text 的放行一起清理（image_text 未接线上游前整条链仍会被判 dead）。
 #[allow(dead_code)]
 pub fn clean_cjk_spaces(s: &str) -> String {
     let is_cjk = |c: char| matches!(c as u32,
@@ -40,6 +42,71 @@ pub fn clean_cjk_spaces(s: &str) -> String {
         out.push(c);
     }
     out
+}
+
+/// 对一张图片跑 Windows 原生 OCR，返回清洗（`clean_cjk_spaces`）后的识别文本。
+/// 在**抽取阶段（写锁外）**被调用；只读文件，绝不写回/改动。
+///
+/// WinRT 异步桥接用 windows-future 0.3.2 的 inherent 方法 `join()`（join.rs:16-21，阻塞等到完成
+/// 取结果；非简报初稿写的 `.get()`）——本函数只在 run_pass 的后台 worker 线程上跑，阻塞它无妨。
+/// 调用链各步签名逐个读 vendored 源码核实（windows-0.62.2，行号见 task-2-report）：
+/// `StorageFile::GetFileFromPathAsync` → `OpenAsync(Read)` → `BitmapDecoder::CreateAsync`
+/// → `GetSoftwareBitmapConvertedAsync(Bgra8, Ignore)`（WinRT OCR 只吃 Bgra8/Gray8，统一转 Bgra8）
+/// → `OcrEngine::TryCreateFromUserProfileLanguages`（无识别器时返回空指针，windows-core 的
+/// from_abi 将其落成 Err 而非 panic，type.rs:43-51）→ `RecognizeAsync` → `Lines/GetAt/Text` 逐行拼接。
+/// 任一步失败 → `extract_failed`（D5：单张真失败由调用方落 failed，不吞错）。
+///
+/// 回收点：生产调用点在 T3（extract.rs 接线）；接上后删本条 allow（与 `clean_cjk_spaces` 那条一起）。
+/// 注：本任务内它有测试调用点，但测试调用不计入 `cargo clippy --lib`（非 test cfg 编译），
+/// 不加会 dead_code 红、 `-D warnings` 直接挡门 —— 见 task-2-report「被迫偏离」一节。
+#[allow(dead_code)]
+pub fn image_text(path: &std::path::Path) -> crate::error::AppResult<String> {
+    use crate::error::AppError;
+    use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapDecoder, BitmapPixelFormat};
+    use windows::Media::Ocr::OcrEngine;
+    use windows::Storage::{FileAccessMode, StorageFile};
+
+    // 统一把 WinRT 错误映射为 extract_failed；message 带路径与原始错误，hint 指降级方向。
+    let fail = |e: windows::core::Error| {
+        AppError::new(
+            "extract_failed",
+            &format!("Windows OCR 识别失败（{}）：{e}", path.display()),
+            Some("图片可能已损坏、格式不支持，或本机 OCR 识别器不可用（可在设置里关闭图片识别）"),
+        )
+    };
+
+    // WinRT 的路径解析器拒绝混合分隔符/相对段（实测 0x800700A1「无效字符」），先规范成全反斜杠绝对路径。
+    // fs::canonicalize 返回带 `\\?\` 前缀的形式，WinRT 同样不认，落 HSTRING 前剥掉该前缀。
+    let abs = std::fs::canonicalize(path).map_err(|e| AppError::io(path, &e))?;
+    let abs = abs.to_string_lossy();
+    let abs: &str = &abs;
+    let hpath = windows::core::HSTRING::from(abs.strip_prefix(r"\\?\").unwrap_or(abs));
+    let file = StorageFile::GetFileFromPathAsync(&hpath).map_err(fail)?.join().map_err(fail)?;
+    let stream = file
+        .OpenAsync(FileAccessMode::Read)
+        .map_err(fail)?
+        .join()
+        .map_err(fail)?;
+    let decoder = BitmapDecoder::CreateAsync(&stream).map_err(fail)?.join().map_err(fail)?;
+    let bitmap = decoder
+        .GetSoftwareBitmapConvertedAsync(BitmapPixelFormat::Bgra8, BitmapAlphaMode::Ignore)
+        .map_err(fail)?
+        .join()
+        .map_err(fail)?;
+    let engine = OcrEngine::TryCreateFromUserProfileLanguages().map_err(fail)?;
+    let result = engine.RecognizeAsync(&bitmap).map_err(fail)?.join().map_err(fail)?;
+
+    let lines = result.Lines().map_err(fail)?;
+    let n = lines.Size().map_err(fail)?;
+    let mut raw = String::new();
+    for i in 0..n {
+        if i > 0 {
+            raw.push('\n');
+        }
+        // HSTRING 的 Deref 目标是 [u16]（windows-strings 0.5.1 hstring.rs:65），须走 to_string_lossy 转 String。
+        raw.push_str(&lines.GetAt(i).map_err(fail)?.Text().map_err(fail)?.to_string_lossy());
+    }
+    Ok(clean_cjk_spaces(&raw))
 }
 
 #[cfg(test)]
@@ -65,5 +132,36 @@ mod tests {
     fn probe_returns_a_bool_without_panicking() {
         let _ = ocr_available(); // 记忆化、有/无语言包都必须不 panic
         assert!(matches!(ocr_available(), true | false));
+    }
+
+    /// 条件跑：本机装了 OCR 语言包（开发机 zh-Hans-CN 已确认）就真识别一枚已知中文夹具；
+    /// 没装则显式 SKIP 打印——不假装通过（§八.5 降级路径由 ocr_available 的探测承担）。
+    #[test]
+    fn image_text_reads_known_chinese_when_ocr_available() {
+        if !ocr_available() {
+            eprintln!("SKIP: 本机无 OCR 语言包，降级路径（§八.5）非未测");
+            return;
+        }
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-cn-ocr.png");
+        let t = image_text(&p).expect("fixture 应能识别");
+        // 断言只回脱敏读数（长度 + 空格可见化），不打印整段正文（红线4）。
+        assert!(t.replace(' ', "").contains("合同验收OCR"),
+            "清洗+识别应含已知词，实得长度 {}，空格可见化：{}",
+            t.chars().count(), t.replace(' ', "\u{2423}"));
+        // 清洗在 image_text 里承重（本机实测 raw 含 CJK 字间空格）：未清洗则输出是「合 同 验 收…」，
+        // 这条不带 replace 的断言会变红。变异取证见 task-2-report。
+        assert!(t.contains("合同验收"), "image_text 输出应经 clean_cjk_spaces，实得空格可见化：{}",
+            t.replace(' ', "\u{2423}"));
+    }
+
+    /// 不依赖 OCR 语言包的稳健错误路径：内容是垃圾字节的「.png」必须优雅落 Err（不 panic）。
+    /// 无 OCR 的盒子走 TryCreateFromUserProfileLanguages 失败，有 OCR 的走解码失败——两条都算 Err。
+    #[test]
+    fn image_text_rejects_non_image_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("fake.png");
+        std::fs::write(&p, b"this is definitely not a PNG payload").unwrap();
+        let r = image_text(&p);
+        assert!(r.is_err(), "非图片字节应落 Err，不得 panic");
     }
 }
