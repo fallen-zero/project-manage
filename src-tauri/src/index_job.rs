@@ -660,6 +660,9 @@ mod tests {
         let img_before = std::fs::metadata(&img).unwrap();
         // txt 刻意不含「合同/验收」，好让下面 doc_hits 的 png 命中不被正文段之外的东西稀释。
         std::fs::write(dir.path().join("台账.txt"), "项目 台账 摘要".as_bytes()).unwrap();
+        // §八.4 坏图臂：非图片字节挂 .png 扩展名——扫描门放行（ocr_available 真、进 files），
+        // 到抽取阶段 BitmapDecoder 解不开 → image_text 落 Err → run_pass 的 failed 臂建行带 error_msg。
+        std::fs::write(dir.path().join("坏图.png"), b"this is not a png at all".as_slice()).unwrap();
 
         let conn = db::open_in_memory().unwrap();
         seeded_project(&conn, "p1", dir.path());
@@ -671,6 +674,18 @@ mod tests {
             .query_row("SELECT index_status FROM index_docs WHERE path LIKE '%合同.png'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(png_status, "ok", "含字图片经真 OCR 应入库 ok");
+
+        // §八.4：非图片字节挂 .png → 抽取阶段解码 Err → run_pass 落 failed 行、带 error_msg
+        // （图片专属的 failed 臂；对照上面 png 的 ok 臂，两态在同一轮里分得开）。
+        let bad: (String, Option<String>) = conn
+            .query_row(
+                "SELECT index_status, error_msg FROM index_docs WHERE path LIKE '%坏图.png'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("坏图.png 应建行（Err 是 failed、不是不建行）");
+        assert_eq!(bad.0, "failed", "垃圾字节 .png 该落 failed 行");
+        assert!(bad.1.is_some(), "failed 行应带 error_msg");
 
         // §八.2 / D7：无空格原词「合同验收」命中 png 正文段（raw OCR 的字间空格已被 clean_cjk_spaces 收掉，
         // 再由 write_doc→index_text(jieba) 入 FTS）。

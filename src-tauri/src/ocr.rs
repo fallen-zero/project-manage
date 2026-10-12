@@ -61,7 +61,7 @@ pub fn image_text(path: &std::path::Path) -> crate::error::AppResult<String> {
         AppError::new(
             "extract_failed",
             &format!("Windows OCR 识别失败（{}）：{e}", path.display()),
-            Some("图片可能已损坏、格式不支持，或本机 OCR 识别器不可用（可在设置里关闭图片识别）"),
+            Some("图片可能已损坏、格式不支持，或本机 OCR 识别器不可用（未装语言包时，扫描阶段图片会自动不建行，见 /index 的 OCR 状态提示）"),
         )
     };
 
@@ -134,14 +134,14 @@ mod tests {
         }
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-cn-ocr.png");
         let t = image_text(&p).expect("fixture 应能识别");
-        // 断言只回脱敏读数（长度 + 空格可见化），不打印整段正文（红线4）。
+        // 断言只回脱敏读数（长度），不打印整段正文，也不回显空格可见化（T2 deferred-① 收口：
+        // 兑现账本承诺——把失败信息从整段 OCR 文本改成只回长度；断言本体不变、仍可打红）。
         assert!(t.replace(' ', "").contains("合同验收OCR"),
-            "清洗+识别应含已知词，实得长度 {}，空格可见化：{}",
-            t.chars().count(), t.replace(' ', "\u{2423}"));
+            "清洗+识别应含已知词，实得长度 {}（正文不回显，红线4）", t.chars().count());
         // 清洗在 image_text 里承重（本机实测 raw 含 CJK 字间空格）：未清洗则输出是「合 同 验 收…」，
         // 这条不带 replace 的断言会变红。变异取证见 task-2-report。
-        assert!(t.contains("合同验收"), "image_text 输出应经 clean_cjk_spaces，实得空格可见化：{}",
-            t.replace(' ', "\u{2423}"));
+        assert!(t.contains("合同验收"),
+            "image_text 输出应经 clean_cjk_spaces，实得长度 {}（正文不回显）", t.chars().count());
     }
 
     /// 不依赖 OCR 语言包的稳健错误路径：内容是垃圾字节的「.png」必须优雅落 Err（不 panic）。
