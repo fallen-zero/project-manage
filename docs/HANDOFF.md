@@ -1,473 +1,114 @@
-# 交接文档 —— M6 Windows 图片 OCR（headless 收口，2026-10-12）
+# 交接文档 —— 项目资料管理（写给一个完全没有上下文的新对话）
 
-> **本文件已被 M6 追加刷新（第 22 次）——下面这块是最新的、先读它。** 上一版（第 21 次，讲 M5/M5.5）留在 §1–§6 未改写，恢复时**只认这块 + `docs/开发进度.md` 的「## M6」节**为当前实况，别照 §3/§4 里 M5 时代的「下一个动作」派发（那句已过期）。
->
-> **当前状态**：**M6 Windows 原生图片 OCR 六格代码 + 整分支终审 + 合 `master` 全部完成、`master` = `feat/m6-ocr` = `08e71c3`（本地与 origin 逐字一致，全历史零 merge commit）**。**下一个里程碑是 M7（旧格式 .doc/.ppt，需 LibreOffice headless）**。交付：`ocr.rs`（探测/识别/CJK 清洗）+ `extract` 图片分派 + `index_scan` 无包降级门（D4）+ `index_job` worker 填真实探测值 + `IndexOverview.ocr_available`（出 `ocrAvailable`）+ `/index` 一句降级/已启用提示 + 一条 headless 端到端真 OCR 测试。门禁基线（HEAD `08e71c3` master 树上现跑）：`cargo test --lib` **167 passed / exit=0**（157→167）、两 clippy exit=0/0 warning、`node --test` **8/8**、`npm run build` exit=0/`error TS`=0、结构门 `generate_handler!` 41 / `TARGET_VERSION` 4 / `allow(dead_code)` 只剩 `db.rs:30` / `ocr_available` 生产接线两处。**首个新运行时依赖 `windows 0.62.2`**（7 feature 名按 vendored 源码核过）。**整分支终审 `With fixes`**：0C/2I/6M，两条 Important + Minor-1 随 `556f4f0` 落地、spec 两处 retro-edit（`08e70c3`），五条跨模块不变量与两条具名库内部行为风险全到 vendored 源码坐实 HELD。
->
-> **真机口径（需求方 10-12 裁定转 headless）**：`tauri dev` 的 `project_files_manage_lib` 最终 codegen 要 mmap `windows` 大 rlib，本机 16 G 撞**提交内存上限**（`FreeCommit` 一度 9 MB、bash 连 fork 都失败，`os error 1455`「页面文件太小」），四轮重试（`-j 1`/`RUST_MIN_STACK=32M,64M`/`debuginfo=0`）同一处崩；`cargo test --lib`（只出 rlib）不受影响 ⇒ 见坑 104。改用 `--lib` profile 直驱真链的端到端测 `ocr_image_flows_end_to_end_through_index_and_search`（0.4–0.5 s、无 SKIP 证 `ocr_available()` 本机为真、真跑 `image_text`）拿到 §八.1/2/3/6 + 红线① 四条读数。**deferred（没自动验，如实记）**：`/index` 那句 OCR 提示的 WebView2 实际渲染（只做到类型接线 + tsc 变异红）、~50 图首轮墙钟、整台无包机器的端到端体验（本机装了 `zh-Hans-CN`，造不出）。
->
-> **红线全程守住**：真实库 `%APPDATA%\dev.zero.pfm\` 三文件 size+sha256 从起 dev 前到收尾逐字等 M5 归档基线；沙盒 `dev.zero.pfm.m6test` 因编译未过从未建起、`tauri.conf.json` 一字未动；四次尝试各留一只本项目 vite 孤儿，**按 PID 精确回收、绝未 `taskkill //IM`**。
->
-> **下一个动作**：**M6 已合 `master`（见上「当前状态」），本里程碑无待办代码动作**。下一步二选一，都是需求方驱动：① 开 **M7（旧格式 .doc/.ppt，需 LibreOffice headless）**——`docs/技术方案.md` §八里程碑表里 M6 之后那格，走 brainstorming→spec→plan→SDD 全流程；② 若腾得出提交内存（关几个大户或临时调大 Windows 分页文件），我用 `.superpowers/sdd/2026-10-12-m6-ocr/m6-cdp.mjs`（已备好，走 `project_create`+`project_set_root`+`index_start`+`doc_hits`+`doc_preview`，**无需原生对话框点**）补跑 **GUI 三项 deferred**：WebView2 里 `/index` 那句「已启用本机 OCR」的实际渲染、~50 图首轮墙钟、无包机器整体验（末项本机不可构造）。**6 条有名登记的 M6 遗留 Minor**（逐条见 `docs/开发进度.md`「## M6 整分支终审」）可在 M7 顺带收，其中 **Minor-4**（profile-lang 无包但其它语言有包时探测/引擎口径不一致）是唯一有真实机器面风险的，M7 前值得单独修。**仍要人做的一格**：远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`（本机无 gh），只能在 GitHub Settings → Branches 手改。
->
-> **M6 提交（`git log --oneline master..HEAD` 现取，共 10）**：4 个 `docs`（`d2854de` spec 定稿 → `766deb5` 计划 → `c9a9928` 计划修订 → `b0c1f14` T4 注释收口）+ 6 个代码面（`555b8ae`→`e756ae1`→`e535fbf`→`3014d90`→`da860ed`→`a3d34a0` = T1–T6）。账本 `.superpowers/sdd/2026-10-12-m6-ocr/progress.md`（每格 Ruling + 评审结论 + 两条 T4 concern 的代码级裁定都在里面）。
+**快照时间**：2026-10-12。**HEAD**：`master` = `feat/m6-ocr` = `0aa0d30`，本地与 `origin` 逐字一致，全历史零 merge commit。
 
----
+## 0. 先读这一段
 
-## （以下为上一版 M5/M5.5 的历史快照，恢复当前实况请看上面 M6 块）
+这是一个 Tauri 桌面工具的持续开发项目，按里程碑推进。**M0–M6 都已完成并合入 `master`**，下一个里程碑是 **M7（旧格式 .doc/.ppt 走 LibreOffice headless 转换）**。
 
-**快照时间**：2026-10-10（本地）—— **M5 十个任务全部收口：九格代码任务每格一个全新实现者 + 一个只读评审、零 fix round，真机十二条有读数，文档面已回写**。**2026-10-12 追加：M5 整分支终审已做完（`With fixes`，0 Critical / 2 Important / 10 Minor，报告 `.superpowers/sdd/2026-10-10-m5-reconcile/branch-review-m5.md`），必修的六格全是文本与一句界面文案，随本次落地。** 下一个动作是「合不合 `master`」——那是需求方的决定，每次都需当次指示。本文件第 **21** 次刷新（数法 `git log --oneline -- docs/HANDOFF.md | wc -l` **本次落地前**当场量得 20，本次落地后 21；这个数只能现取，写死后必漂 —— 坑 73）。M4 那一版（第 11–19 次）讲的是首屏统一检索与合并，**没有被覆盖**，回看用 `git show <sha>:docs/HANDOFF.md`；本文件每次刷新都是「下一个里程碑的恢复地图」，上一版的账留在原处可查。
-**分支**：`feat/m5-reconcile`，领先 `master` **31** 个提交（`git rev-list --count master..HEAD` 当场量得，随下次提交漂 —— 坑 73）。**2026-10-12 终审 Minor-9 把提交构成的数法改准**（原写「9 个代码提交 + 21 个文档提交」两处都错，而 `:157` 那句「只喂 9 提交」直接是下一轮终审的 BASE 取数口径 —— 按 9 取会**漏掉三个真实改了代码面的提交** `0f4669c` / `c802ac4` / `22bccf5`）：碰代码面（`src-tauri/src` + `src`）的 = **12**（`git rev-list --count master..HEAD -- src-tauri/src src`）= 10 个 `feat`/`fix` + **2 个只改 `src-tauri/` 内注释与字符串的 `docs(m5)`**；碰 `docs/` 的 = 20，两者交集是那个混合提交 `22bccf5` ⇒ 纯文档 = **19**（10 + 2 + 19 = 31 对上）。**代码面七文件 `+595 / −23` 这个数没变**（`git diff --stat master..HEAD -- src-tauri/src src`）：`index_job.rs` +292、`doc_preview.rs` +132、`index_store.rs` +98、`project.rs` +42、`lib.rs` +35、`index-status.tsx` +11、`doc-preview-dialog.tsx` +8。「9 个代码**任务**」这个说法仍然成立，但别再和「代码面**提交**数」混用。**HEAD 依次**：`e96dcf9`（设计定稿）→ `d3672b5`（规格自查修订）→ `8aaf233`（实施计划定稿）→ 九格代码与其评审收口对（`0f065c5` `3d31bfa` `addfb26` `967f2f1` `7cc50e6` `a448a1f` `247d60f` `3ec1f82` `0f4669c` `6781a90`）→ `22bccf5`（随 Task 9 评审的交付面回写）→ `ea6c39d`（真机十二条与文档回写）。**远端**：`origin = https://github.com/fallen-zero/project-manage.git`，`feat/m5-reconcile` 本地与远端同指一个提交（10-10 已推上去）；`master` 仍指 M4 收口那个提交。10-12 需求方给了常驻指示「每完成一个小节点就提交并推送」⇒ 推送目标**只限功能分支**，`master` 的合并仍另需当次批准（红线 6 不变）。**10-12 当次批准已给：M5 已 fast-forward 合入 `master`，两条分支同指 `91ddf65`，合完在 master 的树上复跑 147 passed / node 8-8 / build exit=0，`master` 已推 origin。**
-**门禁基线**（控制方在 HEAD `22bccf5` 的树上、`tauri dev` 全回收之后现跑；读数与原始退出码见 `.superpowers/sdd/2026-10-10-m5-reconcile/t10-gates.txt`）：`cd src-tauri && cargo test --lib` → **147 passed / 0 failed / exit=0**（分模块 `search` 20 / `index_job` 19 / `index_store` 17 / `doc_preview` 17 / `extract` 15 / `ledger` 12 / `project` 11 / `index_scan` 10 / `vault` 9 / `tokenize` 9 / `db` 8，147 逐条对上）；`cargo clippy --lib -- -D warnings` 与 `--lib --all-targets` → **两条 exit=0、0 warning**；`node --test "tests/**/*.test.ts"` → **tests 8 / pass 8 / fail 0 / exit=0**（本轮零新前端测试 ⇒ 只是无回归检查，不许当「前端已验证」用）；`npm run build` → **exit=0**（产物 `index-DfjCJQ4N.js` 497.36 kB / gzip 159.82 kB）；结构门全对上：`const MISSING_FUSE_MIN_ROWS` 恰好 1、`SET index_status = 'missing'` 恰好 1 行、`tauri::command(async)` 恰好 1、`allow(dead_code)` 只剩 `db.rs:30`、`len() > 20` / `20971520`（限预览两格）/ `File::open` / `notify` / `file_gone` 五条 **exit=1**、`generate_handler!` **41** 条（正则必须让逗号可选；要求尾逗号那版恒读 40 —— 本轮又踩一遍，坑 96）。
-**一句话状态**：**M5 的功能主体（差集回收 + 每次启动自动追平一轮）在真机上十二条都有读数，真实数据目录三文件逐字未变，沙盒与 `%TEMP%` 夹具删净；2026-10-12 整分支终审已做完 —— Verdict `With fixes`、0 Critical，三条指定跨模块不变量（FTS rowid 对齐 / `missing` 单一生产写入点 / 读侧两处 `ok` 谓词）全部 HELD，「四个零」有独立复跑的字面证据，终审自己复跑了 147 / pass 8 / 两条 clippy / `tsc --noEmit` 与八条结构门全绿。** 剩下两件事：① **合入与推送**已做完（10-12 当次批准，fast-forward ⇒ `master` = `feat/m5-reconcile` = `91ddf65`，全历史仍零 merge commit，合后复跑三道门全绿并推 origin）；② **M5.5 清账批**名单已定（需求方 10-12 裁定：**13 项合并成一批**做完，不拆两轮）—— 在原有 `notify` 监听、两条实测 finding、`missing` 行的清理入口、D7 的路径归一化那一半、「单文件上限 20 MB」有四个家、M4 没收回的 7 条之外，**终审又加三格**：`write_doc` 的锁内分词外提（第一优先）、`setup` 的 `data_dir` 注入缝、`stitch` O(n) 化与预览闸门口径绑成一格 —— 逐条见 §4.2 与 `docs/开发进度.md` 的「M5 留下的已知缺口」。
+三份必读文档按重要性：
 
----
+- `docs/技术方案.md` — 项目定位、架构、需求结论与里程碑表（**产品与技术的唯一依据**；与代码不一致时以它为准并同步修订）；
+- `docs/开发进度.md` — 里程碑表 ✅/未完成 + 每个里程碑的验收证据节 + 「没能自动验证」清单 + 逐日变更日志（**当前实态看这里**）；
+- 本文（`docs/HANDOFF.md`）— 恢复地图（下一格动作、红线、坑）。
+
+本文件旧版是逐次累加的「恢复地图」（有 100+ 条带内部编号的坑与账本交叉引用），已被这份独立成篇的版本替换。**要挖旧账看 git**：`git show 0aa0d30:docs/HANDOFF.md` 是替换前的最后一版；每格任务的评审/裁定账本在 `.superpowers/sdd/<plan>/progress.md`，各计划/规格在 `docs/superpowers/{plans,specs}/`。
 
 ## 1. 我们在做什么任务
 
-做的是本地桌面工具「项目资料管理」（Tauri 2 + React + rusqlite bundled FTS5 + jieba-rs），按里程碑推进：M0 脚手架与 WAL 校验、M1 项目档案与目录映射、M2 信息台账与列加密、M3 全文索引管线、**M4 首屏搜索框统一结果**（做完 M4 就是 MVP，已达成并已合入 `master`）都 ✅ 完成。**M5 = reconcile 差集回收 + 每次启动自动追平一轮**（2026-10-10 收口，等整分支终审）。
+**产品**：项目部（一个人管几十个本地项目）用的桌面「项目资料管理」工具，做「档案 + 台账 + 全文检索」的单机一站式。**硬边界**：工具**绝不改动被索引的源文件**（只读、只抽取）。
 
-M5 本轮交付的形状（权威定义在 `docs/superpowers/specs/2026-10-10-m5-reconcile-design.md`，不要从本文件重述去实现）：
+**技术栈**（版本从命令现取，别照抄）：
 
-- **一条回收链**：`index_store::{doc_rows_for_project, mark_missing}` —— 后者是写 `index_status='missing'` 的**唯一生产写入点**（**2026-10-12 终审 Minor 收正**：原先写「全仓唯一」字面不成立 —— `db.rs` 那条 CHECK 用例 `index_status_check_accepts_the_five_documented_states` 用裸 `INSERT` 也写过一次 `'missing'`，但那是库层枚举用例、不是产品通路；本仓不变量的价值在「只有一个地方会因业务动作翻转状态」，措辞要说准）（`UPDATE` 主行 + `DELETE` 同 rowid 的 FTS 行，包在一条 `unchecked_transaction` 里），元数据行**保留**，文件放回后由既有的增量判据把同一行自愈回 `ok`。
-- **三条硬闸门**在 `index_job::reclaim_missing`：root 不可达整项目跳过、被上限截断的那一轮不回收、比例熔断 `candidates*2 > tracked.len() && candidates > MISSING_FUSE_MIN_ROWS(=20)`。设计目标是让误标**永远只是少标**。
-- **每次启动追平一轮**：`lib.rs` 的 setup 里 `index_job::start(..., rebuild = false)`，复用 M3 那套线程壳与进度事件；起轮失败写进 `last_error`（不再静默吞 `index_spawn_failed`）。**没有开关、没有设置页**，要关只能改那一行。
-- **顺带收掉 M4 的两格**：I-4（预览按**当前盘上尺寸**再过一次 `max_file_bytes`，索引后长大就当场拒）、I-5（`PreviewShared` 的 `AtomicBool` 单飞闸门 + RAII `Drop` 复位，封的是「同线程上的一次抽取」而不是整条 RPC）。
-- **前端只两文件四格**：`index-status.tsx` 的筛选选项、卡片 `missing` 计数、行徽标 `title`；`doc-preview-dialog.tsx` 把 `hint` 拼进那句红字（三成因共用 `preview_unavailable` 一码，靠 `hint` 分）。
-- **四条零**：零新依赖、零新 IPC 命令（仍 41）、零新线格式字段（`SearchBundle` 七键 / `DocPreview` 六键两条断言照旧绿）、零新迁移（`TARGET_VERSION` 仍 4）。
+- 桌面壳：Tauri 2.12（Rust 后端 + WebView2 前端）
+- 前端：React 19 + TypeScript + Vite + Tailwind 4 + TanStack Router（**hash history**）+ zustand + shadcn/ui
+- 数据库：`rusqlite 0.40.2 (bundled)` ⇒ SQLite 自带 FTS5；**一把全 crate 唯一的 `Mutex<Connection>`**（`AppState.conn`），后台索引线程自持另一条 `db::open` 连接；WAL + `busy_timeout=5000`
+- 中文分词：`jieba-rs 0.11.0`，入库与查询同词器（`cut_for_search` 与 `query_terms`），**这是这套检索的地基红线**
+- 依赖里程碑新加的：M5.5 引 `notify 8.2.0`（文件系统监听），M6 引 `windows 0.62.2`（`Media_Ocr` 等 7 个 feature）
 
-M4 那一轮的交付形状（留档，别从这段去实现 M5）：
+**执行方法**：`superpowers:subagent-driven-development`（SDD）—— 每个任务派一个全新实现者子代理 + 一个只读评审（spec 合规 + 代码质量双 verdict）+ 修复轮（≤5）；全部任务完成后做一次整分支终审；终审后走「合 master」（**合并需需求方当次批准**，常驻推送授权只覆盖功能分支）。
 
-- **两条 IPC 命令**：`search_all` 返回一个 `SearchBundle`（三段：项目档案 / 信息台账 / 文档正文），`doc_preview(doc_id, query)` 返回窗口拼接的原文 + UTF-16 码元高亮区间。
-- **段内按项目聚簇，不跨段合并**：`bm25` 与 `LIKE` 的分数不可比，spec §3.4 明令禁止假归一化。
-- **三级截断 30 簇 / 15 条 / 15 平铺，各有计数、只显示不展开**（原设计是 20/10/10，**2026-10-09 按真机 5 万行实测上调**，读数与口径见 §4.5 与 spec §四；`DOCS_FETCH_LIMIT` 仍是 200）。
-- **预览**：词只从 `tokenize::query_terms` 拿（入库/查询同词器是这套检索的地基红线），`ranges` 用码元下标让前端 `text.slice` 零换算。
-
-执行方式是 `superpowers:subagent-driven-development`：每个任务一个全新实现者子代理 + 一个任务评审（spec 合规 + 代码质量双 verdict）+ 修复轮（≤5 轮），全部任务完成后做一次整分支终审。**连续执行，不在任务之间停下来问「要不要继续」**；只有四类情况才停：不可逆/破坏性操作、安全敏感动作、超出本 worktree 的副作用（merge/push/publish）、计划坏到每条前进路径都是猜。
-
-绑定红线（每条派发词里都要带上，违反即返工）：
-
-1. **工具绝不动被索引的原始文件** —— 只登记路径、只读文件。夹具只能在 `tempfile::tempdir()` 与 `db::open_in_memory()` 里造。
-2. **真实数据目录 `%APPDATA%\dev.zero.pfm\`（库文件 `ledger.db`）是只读红线**；真机验证一律用一次性 identifier（M4 是 `dev.zero.pfm.m4test`、**M5 是 `dev.zero.pfm.m5test`**），跑完删净，绝不为验证改 `src-tauri/tauri.conf.json`。
-3. **子代理一律不许跑 `tauri dev` / `npm run dev`**；「UI 实际渲染未验证」必须如实写进报告。
-4. **密文列不参与任何检索** —— 但这条**不能写成「任何 SQL/字符串里不许出现 `*_cipher`/`*_nonce`」那种全仓 grep 门禁**：`db.rs` 的建表语句本身就定义着这些列（`pw_cipher`/`pw_nonce`/`account_cipher`…），按字面它永远 exit=0。可复核的形态只有两种：① 作用域限定在检索路径那几个文件（`search.rs` / `index_store.rs` 的 `SELECT_SQL` 与 WHERE / `doc_preview.rs` / `index_job.rs` / 前端全树）；② 正向断言「这些列不出现在任何检索 SQL 的列清单与谓词里」。**另记一条终审纠正**：`ledger_notes.body` 在本仓 schema 里是**明文列**（`TEXT NOT NULL DEFAULT ''`），加密的是 `*_cipher/*_nonce` 那一批 —— 别把台账正文当密文列去论证。
-5. **验证脚本只回断言结果**（布尔 / 条数 / `matchedBy` / 文案前缀 / 尺寸），绝不打印抽出的正文或任何解密内容。
-6. **Git：无远端，只本地提交，绝不 push、绝不 amend、不 `--no-verify`、不 `git add -A`**，按文件 name 逐个 stage。输出语言一律中文（错误码、SQL 字面量、JSON key 除外）。**10-09 更新**：需求方明确授权接远端并推送（`origin = https://github.com/fallen-zero/project-manage.git`；`master` 与 `feat/m4-unified-search` 两条都已推上去），所以「无远端 / 绝不 push」这一条的前提已作废 ⇒ 但**每次 push 与每次合并（merge）都仍需需求方当次指示**，一次授权不等于永久通行；10-09 需求方另外指示「合并仓库」，已按仓内惯例（全历史零 merge commit、`master` 是严格祖先）用 **fast-forward** 合完，并把两条分支都推上去；「不 amend / 不 `--no-verify` / 不 `git add -A`」三条不变，首次与后续推送前都按坑 91 的四条做发布前扫描。**远端当前状态**：默认分支（`HEAD` symref）是 `feat/m4-unified-search`（因为它是第一个被推上去的），需求方如要把默认分支换成 `master`，得在 GitHub Settings → Branches 里手改（本机没有 `gh`，控制方改不了）。
-
----
+**每完成一个小节点就提交并推 `origin` 功能分支**（需求方 2026-10 起的常驻指示）；「遇到需要配合的一步一步告诉我改如何操作」——需要人做的事都收在 §4「需需求方做的」里。
 
 ## 2. 已经完成了什么
 
-### 2.1 里程碑与文档（10-07 及更早）
+**M0→M6 全部 ✅ 合入 `master`**。MVP 是 M0→M4，M5/M5.5/M6 在其上加了「启动对账 + 自动追平 + notify 监听 + 图片 OCR」。
 
-- **M0–M3 全部 ✅**，证据与真机结论在 `docs/开发进度.md`（里程碑表 `5-20`、环境结论 `22-45`、M3 验收证据 `70`）。
-- **M4 spec 定稿**（`807e3c1` + 写计划前修订 `34a48e1`）：`docs/superpowers/specs/2026-10-07-m4-unified-search-design.md`。决策 D1–D7 每条都带被否掉的备选与理由；§十把 M3 划过来的账逐条写明为什么不进本轮；§十一 4 条风险（最硬一条：5 万行量级 `LIKE` 全表扫是首屏新引入的每键开销）。
-- **M4 实施计划定稿**（`a44cdac`，**现 2492 行**；定稿之后计划本体又被改过 **16 次**（10-09 占四次：`4b8c851` T8 预检四处、`b2670db` T8 评审四处、`8ebdb92` T9 预检三处、`cd04f33` T9 读数回写并勾掉 Step 1/2/3），数法：`git log --oneline -- docs/superpowers/plans/2026-10-07-m4-unified-search.md | wc -l` 减掉定稿那次 —— 别背这个数，改一次就漂）：`docs/superpowers/plans/2026-10-07-m4-unified-search.md`，9 个任务，每个都是「失败测试 → 跑红 → 最小实现 → 跑绿 → 变异取证 → 门禁 → 按名 stage 提交」的可照抄粒度。**规则**：凡已切过简报的任务，其计划正文被改到就必须重切简报 + Grep 验证（坑 58），否则实现者照抄被否决的旧写法。
+**M6（本轮收口的里程碑）= Windows 原生图片 OCR**：`png/jpg/jpeg/webp/bmp` 里的中文/英文经本机 Windows OCR 引擎进入全文索引，可被 `search_all` 命中与 `doc_preview` 打开。关键落点：
 
-### 2.2 这两天（10-08 实现 T1–T7、10-09 实现 T8 + 做完并收口 T9 + 做完整分支终审评审）：`497c0a1..HEAD` 共 **36** 次提交（`git rev-list --count 497c0a1..HEAD` 在本文件刷新时当场量得；`master..HEAD` = **38**；两个数都会随下次提交漂，见 §头部与坑 73）；**Task 1–9 全部收口，终审评审已做完，整改批次待落地**（见 §3）
+- 新纯能力模块 `src-tauri/src/ocr.rs`：`ocr_available()`（进程内 `OnceLock` 记忆化探测，Err 保守按 false）、`image_text()`（WinRT 识别 + `\\?\` 前缀剥离）、`clean_cjk_spaces()`（仅当空格两侧都 CJK 才删的纯函数；OCR 会在中文字符间塞空格，不清洗就永远搜不到）。
+- `extract.rs` 加 `DocKind::Image`、`kind_of` 认 5 张扩展名、`SUPPORTED` 到 **27 项**（17 纯文本/代码 + `docx/pptx/xlsx/xls/pdf` + 5 图片）；`TEXT_EXTS` 不动（图片不是纯文本）。
+- **D1 同步锁外**：OCR 挂在 `extract_text` 的**抽取阶段**、和 PDF 同侧——`run_pass` 的抽取表达式在写锁外，秒级 OCR 不压写锁。
+- **D4 无包降级门**：`ocr_available=false` 时图片在 `index_scan` 扫描门与「未支持类型」同一条 `continue`——不建行、不进 `over_size`、不占配额。门**只有一个**落点。
+- `index_job.rs` worker 线程体每轮 `ScanOptions::load` 之后立刻 `opts.ocr_available = crate::ocr::ocr_available();` 填真实探测值；`ScanOptions::load` 里默认 `true` 只是兜底、**两条消费路径（`lib.rs:476` `index_overview` / `:578` `doc_preview`）从不喂给 `scan_root`、set-but-never-read 惰性**。
+- `IndexOverview` 只加**一个**线字段 `ocr_available`（serde camelCase 出 `ocrAvailable`），`/index` 支持清单区加一句 `{overview?.ocrAvailable ? 已启用 : 未启用（图片暂不索引）}` 三元提示。
 
-| 任务 | 提交链 | 该任务终态 | 评审结论 |
-|---|---|---|---|
-| T1 `query_terms` 唯一切词入口 + `MAX_QUERY_CHARS` | `497c0a1` | 106 passed / tokenize 7 | Spec ✅ / Approved，0C 0I 7Minor：3 条折进 T3 的「注释保鲜」Step，其余 4 条当场裁定**不改**（各有理由，见账本） |
-| T2 `panic_to_err` 提到 `extract.rs` 做 `pub(crate)` | `f72a5c8` | 106（extract +1、index_job −1） | Spec ✅ / Approved，0C **1I**（plan-mandated）2M。`Cargo.toml:46` 的悬空指针判为**计划本体缺陷**，改在 T5 的 Files+Step 6 里收口 |
-| T3 `clean_snippet` 的 `A B AB` 三连折叠 | `e18864a` → 计划修订 `29d390f` → 整改 `2670768` | 108（tokenize 9） | 首轮 Spec ✅ / **Needs fixes**（0C 3I 6M，其中 2 条 Important 是简报本身写错：签名 `E0106`/`E0716`、那条变异**三重蕴含**下永远不红）→ fix round → 复审 7 条全 ADDRESSED |
-| T4 `search::unified_bundle` 三段聚合 + 段内聚簇 + 三个截断计数；`index_store::indexed_project_count` | `899b58c` → 计划修订 `9dca06c` → 整改 `91476b9` → 计划修订 `cdc5163` | **120**（search 20、index_store 15） | 首轮 Spec ✅ / **Needs fixes**（0C **3I** 5M）→ fix round 1 → **定向复审：5 条 finding 全 ADDRESSED，无新 C/I**，剩 7 条文本级/登记类 open |
-| T5 `doc_preview.rs` 重抽原文 + 窗口拼接 + UTF-16 码元区间 | 计划修订 `c5ed0b1` → 实现 `614f1a2` → 计划修订 `ea4187d` → 整改 `d544175` | **134**（doc_preview 14） | 派发前预检切掉两处计划原文自相矛盾（坑 59）；首轮 Spec ✅ / **Needs fixes**（0C **2I** 5M，三条具名风险全 SETTLED）→ fix round 1 → **定向复审：5 条全 ADDRESSED、无新 C/I**，具名风险 SETTLED（复审自己复现了变异读数并给出「多一扇窗 ⇒ 其后每个命中起点位移 ≥3 码元」的一般化论证） |
-| T6 两条 IPC 命令接线（`search_all` + `doc_preview`） | 实现 `6bc6354` → 计划/spec 修订 `3677865` → **fix round 1 `077c275`** | **134**（本任务 0 条新单测），handler 39 → **41**，`async` 属性唯一落点 `lib.rs:558` | 首轮 **Spec ✅ / Approved**（0C **1I** 4M，三条具名风险全 SETTLED）。I-1 = 「sync 形态把『锁外抽盘』买到的东西抵消掉了」，控制方到 `tauri-macros`/`wry`/`tauri-runtime-wry`/`tauri` 四处源码逐行复核后**采信并选修法 (a)**：`doc_preview` 加 `#[tauri::command(async)]`，`search_all` 留给 T9 实测。fix round 1 只动三件（属性 + `lib.rs:481-482` 两句注释 + 删一个空行），**只提交 `lib.rs` 与 `doc_preview.rs` 两个文件** → **定向复审：Approved / Spec ✅，风险 A（一行属性兑现没兑现）SETTLED、风险 B（还有没有别处在说同一句假话）NOT SETTLED = 恰好一处** → 那 1 条 Important + 3 条 Minor 全部**裁为落终审**（复审建议如此，理由见 §3 缺口表），不开 round 2 |
-| T7 前端类型 + `api.ts` 两条封装 + `search-order.ts` 纯逻辑 + 仓库第一个 `node --test` | 派发前预检 `3a2cfc8` → 实现 `23b8b53` → 计划修订 `c2b3d35` → **fix round 1 `034b0ef`（已完成）** | Rust 侧仍 **134**（本任务零 Rust 改动，四条 Rust 门禁在此是无回归检查）；`node --test` **`pass 8 / fail 0 / exit=0`**（整改夹具并进第 3 条，**没有**新开第 9 条 ⇒ `pass 8` 那 7 处口径全部不动）；首轮实现恰好 5 文件、fix round 恰好 **2 文件（`api.ts` + `tests/search-order.test.ts`）**，`src/lib/search-order.ts` 与 `src/types/search.ts` 在整改轮**零改动**（`git diff --exit-code` 三条对账 = 0），`package-lock.json` 未动 | 首轮 **Spec ✅ / Request changes**（0C **3I** 4M）。四条具名风险：R-1 线格式对账 **SETTLED**（评审逐字段读了 `search.rs:36-88` 四处 `#[serde(rename_all="camelCase")]`、`index_store.rs:222-240`、`doc_preview.rs:39-49`，含 `lib.rs:265 query` / `:561 doc_id` 的入参名）；R-2 `isNewest` 等价变异推论 **SETTLED**（`local-search.ts:17/27/44` 保证 `latest ≥ mine`）；R-3 注释成谎 **NOT SETTLED** ⇒ I-2；R-4 value-import 门禁主目标达成、残留为次要形态。**I-1 = 计划本体给夹具时就漏了段序守护**，控制方用两次实验钉死：交换 `bundleToSections` 的 ledger/docs 两个 `if` 块 ⇒ `pass 8` 全绿；补三段同现夹具 ⇒ 同一处交换 `pass 7 / fail 1` 且失败点指名第 3 条。走 `sdd-plan-revision-fix-loop` 改计划本体（三处）+ 重生成简报（282→300）而不是先派发再返工。**fix round 1 定向复审：Approved / Spec ✅，I-1/I-2/M-1 三条全 ADDRESSED、无新 C/I**；具名风险 NR-1 由复审**自己重做**变异实验并 **SETTLED**，还给了一个比控制方更强的判据（见 §5.G 第 71 条的追加），并把报告 §8.8.4 的一处自我描述**向上纠正**为假门禁 |
-| T8 首屏渲染：store 换 bundle + 三段结果 + 原文预览对话框 | 派发前预检 `4b8c851` → 实现 `40f4ca3` → 计划修订 `b2670db` → **fix round 1 `0757545`（已完成）** | **零 Rust 改动**（`cargo test --lib` 仍 **134**，此格是无回归检查）、`npm run build` exit 0（产物 `index-Bw2yV3Qo.js`）、node 侧仍 **`pass 8 / fail 0`**、T8 自己的删除门 `grep -rn "searchLocal" src/` **exit=1**；首轮恰好 6 文件、fix round 恰好 **3 文件**（`doc-preview-dialog.tsx` / `local-search.ts` / `search.tsx`），`search-order.ts`/`types`/`tests`/`src-tauri` 全程零改动（复审用 `sed -n '20,65p' brief \| diff - src/stores/local-search.ts` = **exit=0** 验逐字性） | 首轮 **Spec ✅ / Request changes**（0C **1I** 8M），具名风险（段级与簇级两套截断说明会不会同屏重复）**SETTLED**：三个上限各指一个不同的轴（平铺段头 / 整簇被丢 / 簇内被截），`cluster_by_project` 先算 `hidden_clusters` 再 `take` 再 `truncate` ⇒ 集合不相交，量词也不同（「个项目」vs「条」）。**I-1 又是计划本体的错**（简报逐字给了 `void api.revealFolder(...)` / `void api.copyText(...)`，把两个**设计承认会失败**的动作的 rejection 吞成零反馈 —— `api.ts` 那句注释自己点名剪贴板失焦会抛、`doc_preview.rs` 专造了 `preview_file_missing`）。裁定：照 `project-detail.tsx::guard` 的既有形态补本地 `guard` + **独立的 `notice` 态**（不复用 `error`：`error` 一真正文整段不渲染，而复制失败必须留着正文让用户再试）。同轮落 M-1（切 `docId` 先 `setData(null)`）、M-2（no-hit 文案改读 `bundle.query`，与判据同源）、M-6（`LocalSearchState.query` 写了没人读，删）。**定向复审：四件全 ADDRESSED、Approved / Spec ✅、0 新 C/I、1 条新 Minor（M-8 `notice` 跨文档残留）** ⇒ 与另 4 条文本级残留一并**落终审，不开 round 2** |
-| T9 真机验收 + D6 实测 + 文档收口（**已 complete**） | 预检 `8ebdb92` → D6 代码 `ef49c1a`（实现者）→ 读数落回文档 `cd04f33` → 任务评审补做 + Step 4 文档收口 `fb6f4cd`（评审包 `review-8ebdb92..ef49c1a.diff` = 1 commit / 7036 B） | 真机部分**零代码改动**（D6 那一改除外）；`cargo test --lib` 仍 **134**、node 仍 **`pass 8`**、两条 clippy exit=0；沙盒三处已删净、真实目录 `stat` 三行**与基线逐字一致**（只读红线守住）；`ef49c1a` 只动 `src-tauri/src/search.rs`（14 ins / 14 dels） | **Spec ✅ / Approved：0 Critical / 0 Important / 3 Minor**（本计划唯一一个「代码先落、评审后补」的格子 —— 需求方在评审包生成前按了暂停键）。三条 Minor：① 30 这个数没有实测动机（语料只有 4 个项目、簇数最多 2），但由 `section_drops_the_31st_cluster_and_reports_it` 守着 ⇒ 不是零守护；② 台账侧对该常量零独立守护（既有缺口，20→30 之前就存在）；③ `DOCS_FETCH_LIMIT` 注释里的 `lib.rs:542` 漂 ⇒ 落终审。**具名风险 SETTLED，且是评审者自己跑的两次变异**：`MAX_CLUSTERS_PER_SECTION 30→31` 打红第一条、`MAX_PROJECT_HITS 15→16` 打红第三条 ⇒ 三条截断测试现在**全有变异证据**，我先前登记的「另两条没做探针」这一格闭合。已确定的读数：断言 1–5 全绿（线格式 7 键 / snippet 无分词空格残留 / `text.slice(ranges[0]) === "验收"` / `preview_unavailable` / `preview_file_missing`）；断言 6 的**前提被当场改写**（`search_all` 是 sync、消息泵串行 ⇒ 它守的不是乱序）；第 7 格 114 万码元 + `truncated=false` 但 **longtask 全程为空** ⇒ 判据字面的「且」不成立，议题按证据重写；第 8 格 **`async` 兑现成立**（`db_status` 3 ms 先回 vs 慢预览 266,093 ms）；D6 ⇒ 稳态 675–737 ms 未越 800 ⇒ `DOCS_FETCH_LIMIT` **维持 200**，触顶簇 100%（稀疏对照 `capped=0` 证明不是夹具假象）⇒ **三个上限 20/10/10 → 30/15/15** |
+**门禁终态**（在 `master` 的 `0aa0d30` 树上合入前刚跑过，最后一次代码提交后复跑读数）：`cargo test -j 1 --lib` **167 passed / 0 failed / exit=0**；两条 clippy `--lib -- -D warnings` 与 `--lib --all-targets -- -D warnings` **exit=0/0 warning**；`node --test "tests/**/*.test.ts"`（在**仓库根**跑） **tests 8 / pass 8 / fail 0**；`npm run build` **exit=0/`error TS`=0**。结构门：`generate_handler!` **41** 条、`TARGET_VERSION` **4**、`allow(dead_code)` 只剩 `db.rs:30`（本批 M6 已把 `ocr.rs` 里 T1/T2 留的两处豁免全收）、`ocr::ocr_available()` 生产两处调用点。
 
-今天最硬的一条证据：T4 的**变异 6**（`partition` 谓词 `== "project"` → `!= "note"`）在补第 11 条测试**之前**跑出来是**全量 119 条照绿** —— 即等价变异，客观证明「台账段」这个三段的三分之一**零行为守护**；补完 `ledger_section_clusters_its_own_hits_instead_of_leaking_into_projects` 之后，同一个变异的**唯一红点**是 `src-tauri/src/search.rs:638` 那句「`「生产门户」不是项目名，平铺段必须空`」，其余 119 条照绿。
+**M6 整分支终审**：Verdict `With fixes`、**0 Critical / 2 Important / 6 Minor**。五条跨模块不变量全 HELD（线格式零改、零新 IPC/迁移、D4 单一落点、`load` 默认 true 不泄漏在 `scan_root` 唯一生产调用点层面复核成立、`pdf_text`+`panic_to_err`+worker 体外三道 panic 边界未折叠）；两条具名库内部行为风险到 vendored 源码按行号坐实（`windows-future` `join()` 是纯 manual-reset event 阻塞、不需要消息泵/STA；`TryCreate…` 空指针 → `windows-core` `from_abi` 落 `Err`、不 panic）。两条 Important 与 Minor-1 由控制方按「文本/测试级不重开派发轮」当场落地（`ocr.rs` 错误 hint 去掉不存在的「设置里关闭」指引、headless e2e 补「垃圾字节 .png 落 failed」断言、T2 夹具测失败信息只回长度）。spec §五.2 / §十.3 按机制 retro-edit（`.get()` → `join()`、`join` 无超时 ⇒ 「本张返回前 cancel 不生效」）。其余 5 条 Minor 有名登记在 `docs/开发进度.md`「## M6 整分支终审」节。
 
-三条 Important 的裁定（权威文本在账本 `## Task 4 首轮评审裁定`）：
-
-- **I-1（台账段零守护）**：授权补第 11 条测试，并**全链同步条数** —— 119→120、search 19→20、下游 133→134（T5/T6/T7/T9 正文与「完成判据」一起改）。
-- **I-2（三个截断计数只相对本次取到的样本，会低报）**：**不加 `docsCapped` 线格式位**。spec §三 把 bundle 的 7 个字段定死为线格式契约，加一位是 spec 级改动，不由实现者或控制方在本轮擅自扩；D7 禁的是「静默丢弃」，而当前每个截断都有承载位。落地为两处诚实性：`DOCS_FETCH_LIMIT` 头注释 + 三个计数字段的注释写明会低报；T8 的文案只能说「本次结果里另有 N 条未展开」，不能说「库里还有 N 条」。**这条留了一个待用户点头的问题**（见 §3）。
-- **I-3（注释里的假声称）**：`cluster_by_project` 头注释改为**逐键写守护现状**（第一级条数键由 5 条测试守着；第二级名字键在「删除」形态只有 2/10 概率红，在「反转方向」形态确定性红；**第三级 id 键当前没有任何测试能打红 = 有名缺口，交 M5**），并把变异 2 的形态从「删行」改成「反转比较方向」，把「去掉第三级」列为**预期不红**的取证条目第 7 条。
-
-复审还独立纠了控制方一处取证口径：它不采信 `bundle_wire_format_is_camel_case`（presence-only 的 `contains_key` 锁不住键集合），改从结构体本体数出 7 个 `pub` 字段。这条我采纳并折进 T6（见 §4.3）。
-
-**当前逐模块实数**（T5 整改落地后 `cargo test --lib` 全量输出；不是筛选命令的聚合行）：
-tokenize 9 / extract 15 / index_job 12 / index_store 15 / search 20 / **doc_preview 14** / db 8 / index_scan 10 / ledger 12 / project 10 / vault 9 = **134**。
-
-T5 两条 Important 的裁定（权威文本在账本 `## Task 5 首轮评审裁定` 与 `## Task 5 fix round 1 复审`）：
-
-- **I-1（并窗判据拿错了操作数 = 真行为缺陷，且继承自简报与 spec 的字面表述）**：判据改成比较**新窗左沿** `lo = start.saturating_sub(半宽)`，即 `Some(prev) if lo <= prev.1`；spec §五.5 与计划本体都已就地更正并注明来源。代价：合并带翻倍 → 链式合并让一扇窗可接近整篇，`text` 载荷失去长度上界（`MAX_PREVIEW_WINDOWS` 封的是窗数）；这条裁为**接受**并在 T9 真机侧看观感（坑 61、§4.5 第三条）。
-- **I-2（`near_hits…` 名不符实的假守护）**：夹具按半宽重算成 8002 间距（第二处命中的窗左沿恰等于第一扇右沿），断言文本、测试名、`body` 签名、14/134 条数链全部不动，另加两条防退化的断言；同一夹具兼任第二格取证（把 `lo` 换回 `start` 也必须红）。效果：T4 那轮的「等价变异全绿 = 零守护」规矩在这里把缺口 B 撤了案。
-
-T6 一条 Important 的裁定（权威文本在账本 `## Task 6 首轮评审裁定（round 1/5，fix round 派发前）`）：
-
-- **I-1（sync 形态把「锁外抽盘」买到的东西原地退掉）**：Tauri 命令默认 `execution_context = Blocking`，而 Windows/WebView2 上 `ipc_handler` 是在 `add_WebMessageReceived` 的 COM 回调里**同步调用**的 —— sync 命令的命令体占的就是消息泵那一个线程，期间没有任何别的 `invoke` 进得来。控制方没有直接采信评审，而是逐条到本机 vendored 源码复核（`tauri-macros-2.7.0/src/command/wrapper.rs:245/:257-258/:355/:382-389`（`$path` 在 `:384`）/`:425/:427`、`tauri-2.12.0/src/ipc/mod.rs:371/:375`、`wry-0.57.0/src/webview2/mod.rs:944-978`、`tauri-runtime-wry-2.12.0/src/lib.rs:5289-5307`），全部为真才落裁定：**选评审给的两条修法里的 (a)** —— `doc_preview` 加 `#[tauri::command(async)]`（非 `async fn` ⇒ kind 是 `sync_threadpool`，命令体被生成进 `async move` 块、再由 `async_runtime::spawn` 投递），`search_all` 本轮保持 sync，交给 T9 的 5 万行实测（判据已写死在 T9 Step 3 新增的第三段）。**这一轮复审的副作用：本文件与计划原本写的 `:357`/`:383-388` 两个行号是错的**，复审后当场重 `grep` 更正为 `:355`/`:382-389`（坑 65 的重演，见 §5.G）。**控制方自查还多核到一条评审没写的事实**：全仓只有 `lib.rs:37` 一处取 `Mutex<Connection>`、既有 39 条命令的 `db(&state)` 调用点全在 IPC 命令里，而后台索引线程自己开连接（`index_job.rs:402`）⇒ 加 `async` 之前这把锁**无人竞争**，「锁外抽盘」对界面延迟的真实收益是 0；加了 `async` 它才第一次承重。这就是不选 (b)「只降级注释」的理由：出锁与换线程是同一个契约的两半。代价三条：① 同类命令从此**可能乱序返回**（sync 下由消息泵天然串行，这事以前不可能发生），T7 的 `isNewest` / T8 的 store `seq` 守卫从防御性写法升为**承重**，派发词已带这一条；② 运行时兑现 134 条单测一条都不覆盖，唯一证据是 T9 Step 2 新增的第 8 条并发对账（`db_status` 是否先于慢预览返回）；③ 顺带把 `lib.rs:481-482` 那句 M3 写下的「此时别的 IPC 进得来」改成实话（它是 sync 命令，那句按机制根本不成立）。
-
-**T6 fix round 1 的定向复审结论（`077c275`，权威文本在账本 `## Task 6 fix round 1 复审`）**：Approved / Spec ✅，无 Critical，**1 条 Important + 3 条 Minor，四条全部裁为落终审、不开 round 2** —— 这是复审自己的建议原话（「我建议的处置：改一句话、落终审、控制方本轮把它连同 M-1 的三处指针一起写进已提交的 HANDOFF」），本文件就是它的落点，因为**账本 gitignored、只落账本等于没落**。两条具名风险：风险 A（一行属性到底兑现没兑现）**SETTLED**；风险 B（还有没有别处在说同一句假话）**NOT SETTLED = 恰好一处**，且复审把症状**改强**了 —— 见缺口表第一行。
-
-**T7 三条 Important + 那条假门禁的裁定（权威文本在账本 `## Task 7 首轮评审裁定（round 1/5，fix round 派发前）` 与 `## Task 7 fix round 1 复审（round 1/5 → complete）`）**：
-
-- **I-1（段序零守护 = 计划本体给夹具时就漏了）**：**不新开第 9 条测试**（那要动 `pass 8` 的 7 处口径链），而是把「三段同现 + `relaxed: true`」夹具**并进第 3 条**，断言 `kind` 序列与三格各自的 `note`（平铺段与台账段都不许跟着说「含前缀放宽匹配」）。依据 = 控制方自己复现的交换实验；同一实验升格为 fix round 的验收判据，写进计划 Step 5 新增的第 6 条变异。代价：零生产代码改动，测试体积 +17 行。
-- **I-2（`api.ts` 那句注释「今日半谎」）**：改成**时间锚**写法（「页面切到这个入口是 Task 8 的事，`searchLocal` 在迁移完成前仍被旧调用方用着」），不写路径锚/行号锚（坑 67 同族）。`searchLocal` 迁完必零调用方这一格**裁给 T8 派发前预检**，不在 T7 删 wrapper —— 删它会牵动 T9 的真机对照通路。
-- **I-3（评审要求「重复口径各留一份」要收）裁定不做**：T8 的计划文本已逐条安排到位（`import { isNewest }` 与三处 `isNewest(mine, seq)`；`SOURCE_LABELS` 留作**簇内行内徽章**、段标题走 `SECTION_TITLES`，即两者本就不该合并），代价为零；但**派发 T8 时必须点名这三格归属**，否则 `isNewest`「只被测试用着的孤岛」会继续存在。
-- **M-1（计划正文自己写了一条假门禁）**：Step 4 原文「`npm run build` 会抓到线格式对不上」按坑 69 改写为「只保证 TS 侧自洽；跨侧对账 = `search.rs` 既有的 `bundle_wire_format_is_camel_case`（断言键集合恰好 7）+ 评审逐字段读两个 `#[serde(rename_all = "camelCase")]` 结构体」，并把 **`DocPreview` 无 Rust 侧 wire 测试**当场 grep 后登记为有名缺口（补它 = 134→135，会重开 Task 5 已定稿的模块条数与整条链，而 T7 不是归属任务；中间由 T9 真机 `invoke("doc_preview")` 读数兜住）。
-- **定向复审贡献的一条可迁移判据（比控制方那格实验更强）**：`bundleToSections` 是**静态块序**（没有输入相关的排序逻辑），所以那条整数组 `deepEqual` 在六种排列里只放过恒等式 ⇒ 三段同现**传递性覆盖**全部两段同现的子序，没有段序错乱绕得过去。复审据此把报告 §8.8.4 的自述**向上纠正**（原写「只调两段且第三段为空仍靠自证」是低估自身覆盖度），判为良性、不阻塞本轮，终审收报告时改写那一格。
-
-**SDD 工件现状**（`.superpowers/sdd/2026-10-07-m4-unified-search/`，**gitignored ⇒ 陈旧只伤下一会话，本文件才是已提交的恢复地图**）：账本 `progress.md`（**382 行 / 32 个 `## ` 段**，`grep -c "^## " progress.md` 现取；**最后一节 `## 整分支终审（10-09 评审已做完，整改批次：文档面已落、代码面待派发）` 在 `:353`** = 当前状态，里面是终审那六条 `Ruling` 的权威文本）；简报 T1–**T9** 全在（T5 **551**、T6 **167**、T7 **300**、T8 **361** = 首切 318 → 预检 344 → 评审后 343 → fix round 前 361，一个任务重切四次是计划本体被改四轮的正常痕迹、T9 **96** = 首切 93 → 预检改三处后 96）；报告 T1–**T9** 全在（`task-9-report.md` **302 行** = 实现者的 D6 部分；控制方的真机报告 `t9-report.md` 的 §五/§六 **本轮已填完**，不再是占位：§五 = D6 裁定 + 按 `t9-d6.json` 复核后的触顶分布订正，§六 = 本轮仍属有名的两格）；**终审输出 `branch-review-m4.md` 284 行**（§8 那张 13 项表 = 整改派发唯一的事实来源）；评审包 **18 份**（`ls review-*.diff | wc -l` 现取；本轮新增 `review-8ebdb92..ef49c1a.diff` 1 commit / 7036 B 与整分支代码面 `review-branch-497c0a1..fb6f4cd-code.diff` 127 KB）；T9 证据 **8 份 `t9-*.json` + 18 份探针脚本 `t9-*.mjs` + 两张截图 + 基线 `t9-realdir-baseline.txt`**。**整改批次派发后要新增：一份评审包（BASE = 这次文档提交）+ 一份定向复审记录 + 账本里那条「整改收口」。**
-
-
-### 2.3 M5 这两天（10-10 一整天：spec → 计划 → 九格代码 + 逐格评审 → 真机十二条 → 文档回写）
-
-**提交构成**：`master..HEAD` = **30**（9 代码 + 21 文档）。文档那 21 条不是灌水，是这套流程的固定回路 —— 每格评审揪出「计划文本自己写错」就改计划本体 + 重生成简报，绝不为过门去改代码或删注释。本轮揪出并改准的**计划/规格本体缺陷四处**：
-
-1. **Task 1**：门里写「`allow(dead_code)` 必须为 0」，而同任务的测试蓝本给尚未接线的新函数加了豁免 ⇒ 门与蓝本互斥。改法：豁免显式留着、门改成计数口径「全仓 `allow(dead_code)` 只剩既有 `db.rs:30` 一处」。
-2. **Task 3**：门期望 `grep -c MISSING_FUSE_MIN_ROWS` 为某个定值，但常量名在我自己写的测试注释与断言消息里各点名一次 ⇒ 恒读不到那个数；同任务里「25 行缺 3」的熔断正对照被 20 行地板当场挡住（3 < 20 根本不触发比例支）⇒ 换成 10 缺 6。
-3. **Task 5**：失效探针「用 `ux_project_root` 那条唯一约束触发事务失败」在真实 schema 下**构造不出**（那个索引不存在 ⇒ 测试恒绿）⇒ 换成入口行 `UNIQUE (project_id, path)` 这条真能撞的；同任务 `unchecked_transaction` 的期望命中数从 1 改 2（`mark_missing` 里已有第二次使用）。
-4. **Task 6 / Task 8**：`grep -rn "20971520" src-tauri/src/` 期望 exit=1，可 M1 起就有三处合法命中（`db.rs:311`/`:416`、`index_scan.rs:32`）⇒ 门的作用域收到「本轮新写的两格」；`generate_handler!` 的计数正则要求尾逗号 ⇒ 恒读 40，改成逗号可选读到 41。
-
-**九格代码任务的评审结论**：每格 Verdict A（spec 合规）与 B（代码质量）**双 Approved、零 fix round**，5 轮配额一次没用。评审独立揪出两条机制性发现，都已回写规格与开发进度：① Task 7 补出「预览红字必须渲染 `hint`，否则 D10『靠 hint 分成因』在界面上落空」⇒ 计划多了 Task 9 Step 3b；② Task 8 算出「自动轮让 worker 持写锁成为**每次启动都发生**的常态，而主线程命令持着 `Mutex<Connection>` 等 SQLite 让锁 ⇒ 最坏首屏排队到 `busy_timeout` 的 5 s」⇒ 真机清单从十条加到**十二条**（写侧探针、撞车提示窗口）。第二条在真机上被实测证实并且**越线一次**（5565 ms / `db_failed`），见 §3 与开发进度 M5 finding 1。
-
-**需求方当轮翻掉的一次初选（D7）**：他先选「轻折叠 + 包事务」，我在派发前发现「折叠」会把同一目录的不同写法并成一行 —— 而 `missing` 行是**会永久说谎的元数据行**（路径已被折叠，文件放回时回填判据对不上）⇒ 摆出证据后他改选「**只做事务，不折叠**」。所以本轮 `set_root_dir` 只有 DELETE+INSERT 包进 `unchecked_transaction`，**路径归一化那一半没做**，登记成 M5.5 的账（与 M4 的 m-6 同源）。
-
-**SDD 工件现状**（`.superpowers/sdd/2026-10-10-m5-reconcile/`，**gitignored ⇒ 陈旧只伤下一会话，本文件才是已提交的恢复地图**）：账本 `progress.md` **315 行 / 26 个 `## ` 段**（`grep -c "^## " progress.md` 现取，最后一节 `## Task 10 期间发现的两条计划外事实`）；简报与报告 T1–T9 各 9 份全在；评审包 **9 份** `review-*.diff`（命名即 `BASE..HEAD`）；真机面 **19 份 `t10-*.json` 读数 + 5 份 `t10-*.mjs` 脚本**（`t10-fixture` 夹具、`t10-run` 多阶段驱动、`t10-probe` 安全门、`t10-ping` / `t10-waitidle` 小工具）**+ `t10-gates.txt`（门禁与结构门原始读数）+ `t10-realdir-baseline.txt` ↔ `t10-realdir-after.txt`（真实目录逐字对照）**。**M5.5 派发前要做的一件事**：把这 5 份脚本里可复用的夹具/探针阶段抄进那一轮的目录 —— 本目录不在版本控制里，会话一断就没人记得 `rowsWhere` 必须先按项目名现取 id（写死 uuid 在删过重造的沙盒上必然空手而归）。
-
----
+**M6 真机口径转换（需求方 2026-10-12 明确批准）**：`tauri dev` GUI 起不来——**本机 16G 机的提交内存吃不下** `project_files_manage_lib` 最终 codegen 要 mmap 的 `windows` 大 rlib，四轮调优（`jobs=1` / `RUST_MIN_STACK=32M,64M` / `debuginfo=0` / 组合）都在同一处报 `os error 1455`「页面文件太小」；`cargo test --lib`（只出 rlib）不受影响 ⇒ 转 **headless 端到端测**：`index_job::tests::ocr_image_flows_end_to_end_through_index_and_search` 用能编过的 `--lib` profile 直驱真代码链（真 `image_text` + `run_pass` + FTS + `doc_preview`），0.4–0.5 s、`--nocapture` 无 SKIP 证本机 `ocr_available()` 为真、走了真 OCR。
 
 ## 3. 当前卡在哪
 
-**没有被技术问题卡住，也没有轮次配额烧完。** M5 的十格任务（9 代码 + 1 真机/文档）全部收口，门禁 **147 / pass 8 / 两条 clippy 0 warning / build exit 0**，真机十二条有读数，真实数据目录逐字未变。下面这张表是**当前唯一「欠着的动作」+ 缺口账**，读它就是读今天的实况：
-
-| 事项 | 状态 | 归属 / 为什么不在本轮补 |
-|---|---|---|
-| **M5 整分支终审** | **已做完（2026-10-12）** | 报告 `branch-review-m5.md`（209 行）：`With fixes` / 0C 2I 10M，A/B/C 三条不变量 HELD、评审自查 D–G 也 HELD，四个零有独立复跑证据。必修六格（`spec §四` 反转句、`spec §八` 补断言 11/12 与写侧那半、`开发进度.md` 那条假理由、`lib.rs` 断言编号指针、`HANDOFF` 提交数法、界面两处文案）随本次收口落地；**没派整改轮**（纯文本 + 一句文案，按坑 56「注释级零行为回归不重开一轮派发+复审」），其余 10 条 Minor 全部登记 M5.5。 |
-| **合入 `master` / 推送** | **等需求方当次指示** | 红线 6：一次授权不永久通行。合的惯例已核过（全历史零 merge commit、`master` 是严格祖先）⇒ 用 **fast-forward**，不造合并提交。 |
-| 自动轮的**写侧排队会打成用户可见失败** | **实测 finding，不修** | 真机八连取到 4.2–4.5 s，另一轮 **5565 ms + `db_failed`**（压在 `busy_timeout` 的 5 s 之外）。机制 M3 就有，但「每次启动都跑」把它从偶发变成开机可遇。M5.5 要先定产品口径（拒绝给「稍后再试」还是让首个写命令到达时自动轮让路），动的是 `index_job`/`db` 的定稿形状。错误 message 原文没抓回来（探针那轮只回 code）⇒ 定性靠 `From<rusqlite::Error>` 的唯一构造点 + 耗时正好压在 5 s 上，这条**算有名缺口**。 |
-| `doc_preview::stitch` 的**平方级换算** | **实测 finding，不修** | 窗数封顶但窗长不封顶 ⇒ 成本是「命中数 × 窗长」。8 MB / 命中 19.55 万处的夹具让单次预览挂起 **>9 分钟**并占死单飞闸门，同尺寸把命中改成 1 处 ⇒ 586 ms。修法是给 `hits` 设上限或预计算前缀码元长度摊成 O(n)，但要先在真实语料上确认这种「同一短词高频重复的大文件」是否常见，不是随手 `take(1000)`。M5.5。 |
-| `notify` 实时监听 | **缩量未做** | 里程碑名里那一半。规格 §九 写明理由：启动追平已经把「重启即可见」这条最便宜的路径兑现了，监听器的取消语义、跨卷、网络盘事件风暴还没设计完。零新依赖本轮是硬门（`grep notify Cargo.toml` exit=1）。 |
-| 后台**分批断点续建** | **缩量未做** | 同上，M5.5 清账批。当前一轮跑到底、可取消，但没有「续到第 N 批」的持久化游标。 |
-| `missing` 行的**清理入口** | 没做 | 本轮设计是「只标不删」（保留元数据行才能自愈）。几千行 `missing` 常驻的库体积没有任何实测 ⇒ 清理入口与体积账一起做，M5.5。 |
-| **D7 的路径归一化那一半** | 被翻掉没做 | 只做了事务。后果仍是「同一目录的不同写法判成改指 ⇒ 多清一次、下一轮重抽、可自愈」，不是损坏。与 M4 的 m-6 同源，M5.5 一起做。 |
-| **M4 那 7 条没收的账** | 沿用 M4 编号 | I-6 分段渲染 / 合并 6 条 LIKE、簇内分页 offset IPC、台账侧 `MAX_CLUSTERS_PER_SECTION` 独立用例、簇序第三级 `id` 键守护、`DocPreviewDialog` 的 `guard` 缺 seq 守卫、m-3~m-6 那批注释与措辞账。**M4 那一节不 retro-edit**，闭账看开发进度的 M5 节。 |
-| **「单文件上限 20 MB」有四个家** | Task 6 评审的独立发现 | `db.rs:311` 种子、`db.rs:416` 断言、`index_scan.rs:32` 默认、以及预览侧现在读的 settings 值 —— 四处的默认值没有任何一致性断言钉着，改一处就会漂。登记在规格 §九 的 M5.5 欠账里。 |
-| **没能自动验证的 9 格** | 逐条见开发进度 | 权威清单在 `docs/开发进度.md` 的「M5 · 没能自动验证」：setup 那行的启动触发无单测、GB 级整轮耗时、无权限子树误标、`missing` 累积体积、三成因在界面上分不分得开、`swap` 那个等价变异无守护、首屏检索延迟只量一次、`missing` 筛选封顶与卡片计数两口径不可视、`index_spawn_failed` 触发路径。 |
-
----
+**代码面没有卡点**。M6 全合入 master、门禁全绿、终审收口完成。
 
 ## 4. 下一步计划
 
-### 4.1 恢复入口（照抄即可）
+按需求方指示二选一，都不难启动：
 
-```bash
-cd /e/zero/demo/2026/project-files-manage
-git branch --show-current          # 应为 feat/m5-reconcile
-git log --oneline -3 | cat         # 本次文档收口提交 / 22bccf5 docs(随 Task 9 评审回写) / 6781a90 feat(m5) 前端四格
-git status --short                 # 应为空
-git rev-list --count master..HEAD  # 应为 31（本次文档提交之后；头部那个 30 是刷新前当场量得的数，随下次提交漂 —— 坑 73）
-cd src-tauri && cargo test --lib   # 应为 147 passed / 0 failed
-node --test "tests/**/*.test.ts"   # 仓库根跑；应为 ℹ tests 8 / pass 8 / fail 0
-npm run build                      # 应为 exit=0
-grep -n "^## " ../.superpowers/sdd/2026-10-10-m5-reconcile/progress.md | tail -3   # 最后一节应为「Task 10 期间发现的两条计划外事实（不在 M5 范围内，登记不修）」
-```
+- **A（默认方向）：开 M7（旧格式 `.doc`/`.ppt`）**——走完整流程：`superpowers:brainstorming` 收口决策（LibreOffice headless 怎么落、是否可选插件、转换产物落哪、并发与内存约束）→ spec → `superpowers:writing-plans` → `superpowers:subagent-driven-development` 执行 → 整分支终审 → 合 master（**需当次批准**）。M7 顺带值得单独修的是 M6 遗留 **Minor-4**：`ocr_available()` 用「任一识别器语言」，而 `image_text` 只用 `TryCreateFromUserProfileLanguages`——在「profile 语言无包但其它语言有包」的机器上探测 true 但每图空指针→整目录刷屏 `failed`，spec §五.2 已给「取 `AvailableRecognizerLanguages` 首个」的现成一行加固。
+- **B（若你腾得出提交内存）：补 M6 三项 deferred GUI 读数**——`.superpowers/sdd/2026-10-12-m6-ocr/m6-cdp.mjs` 已备好，走 `project_create`+`project_set_root`+`index_start`+`doc_hits`+`doc_preview`（**这些是纯字符串 IPC，不需要点原生对话框**）。启动命令：`cd <repo> && WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222" npm run tauri -- dev -c '{"identifier":"dev.zero.pfm.m7test"}'`（M7 时用 m7test），起来后 `SB=<Windows 绝对路径> node .superpowers/sdd/2026-10-12-m6-ocr/m6-cdp.mjs`。要验的是：WebView2 里 `/index` 那句「已启用本机 OCR」的实际渲染、~50 图首轮墙钟、以及需要另一台无包机器（本机不可构造）。
 
-**M5 计划已经没有待派发的任务了**：十格全收口（九格代码双 Approved、零 fix round，Task 10 真机 + 文档由控制方做完）。恢复判据（「第一个没有 `Task N: complete` 的任务」）在此不适用 ⇒ **别重跑真机**：沙盒 `dev.zero.pfm.m5test` 与 `%TEMP%\pfm-m5\`（约 138 MB 语料，含 6 份 20 MB 大文件）已删净，重跑一次要七轮重启、四十分钟以上；十二条读数都已落进 `.superpowers/sdd/2026-10-10-m5-reconcile/t10-*.json`、账本与 `docs/开发进度.md` 的 M5 节。
+**需要需求方做的**（不阻塞代码推进，但每次提醒一次）：
 
-**M5 的整分支终审已做完**（2026-10-12，报告 `.superpowers/sdd/2026-10-10-m5-reconcile/branch-review-m5.md` 209 行，评审包 `review-branch-8aaf233..ea6c39d-code.diff` 68 KB）：Verdict **With fixes / 0 Critical / 2 Important / 10 Minor**，A/B/C 三条不变量 HELD（评审另加查 D–G 四条也 HELD），三条具名风险的裁定见 `docs/开发进度.md` 的 M5 终审段。**必修六格（全文本 + 一句界面文案）已随本次收口落地**，其余 Minor 全部登记 M5.5，**没有派整改轮**（判据见新记的坑 102）。
-
-**下一轮（M5.5）派发终审时照抄这一格的口径**（本轮实测有效）：
-
-1. 评审包 = `scripts/review-package <PLAN> <代码面第一个 feat/fix 提交的父提交> HEAD`，然后**自己按 pathspec 重打一份只含代码面的**：该脚本不接 pathspec，直接跑会把 `docs/` 提交一起灌进去（本轮实测：不筛 **298 KB**，筛后 **68 KB**）。命令形态：`git log --oneline BASE..HEAD -- src-tauri/src src` + `git diff --stat/-U10 BASE..HEAD -- src-tauri/src src` 重定向到 `review-branch-BASE..HEAD-code.diff`。**BASE 数「碰代码面的提交」，不是数「代码任务」**（本轮 12 vs 9，见 Minor-9）。
-2. 派发词固定问那一句**跨模块不变量**，并且**把本轮交付摘要里那句不变量的原话一起给**（评审者会去核原话是否超出代码保证 —— 本轮就是这么揪出「全仓唯一写入点」那句的）。M5 的三条：① `index_docs_fts.rowid == index_docs.doc_rowid` 恒等（点删按 `doc_rowid`）；② `missing` 只有一个**生产**写入点；③ 读侧两处正向 `index_status = 'ok'` 谓词。
-3. 具名风险一律写成「**算不算本分支的责任 + 阻不阻塞合并**」的二问形式，并把机制而不是结论写全（本轮三条都拿到了机制级回答，其中两条翻案：见坑 101、坑 102）。
-4. 终审之后才是**合入 / 推送**：推送已由需求方 10-12 给常驻指示（只限功能分支），**合并 `master` 仍需当次批准**（惯例：零 merge commit ⇒ fast-forward；推送前按坑 91 做发布前扫描）。
-
-M5.5 要新开一份 spec/计划、另建自己的 SDD 工作区目录，**不要动 `.superpowers/sdd/2026-10-10-m5-reconcile/`**（里面是本轮被 `docs/开发进度.md` 按路径引用的证据，**现在还包括 `branch-review-m5.md`**），也**不要动 `2026-10-07-m4-unified-search/`**。清单从 §3 那张表抄，需求方 10-12 已裁定 **13 项合并成一批**（`notify` 监听、写侧让路策略、`stitch` 的 O(n) 化、`missing` 清理入口与体积账、D7 归一化那一半、M4 未收 7 条、20 MB 四个家的一致性断言 —— **加终审新记的三格**：`write_doc` 锁内分词外提（第一优先，零产品决策就能做）、`setup` 的 `data_dir` 注入缝、`stitch` 与预览闸门口径绑成一格）。
-
-**注意 T9 的两个特例**（复查历史时要知道）：① T9 的真机部分**由控制方亲自执行**（红线第 3 条禁子代理跑 `tauri dev` / 浏览器 / CDP），所以有两份报告 —— `t9-report.md`（控制方，§五/§六 **10-09 已填完**：§五 = D6 裁定 + 按 `t9-d6.json` 复核后的触顶分布订正，§六 = 本轮仍属有名的两格）与 `task-9-report.md`（实现者的 D6 代码部分）；② 三个上限的改动**由计划 Task 9 Step 3 的 Files 面明确允许**（`src-tauri/src/search.rs`），不是越界。
-
-助手脚本（都在 SDD skill 目录下）：`scripts/task-brief PLAN_FILE N`（切简报）、`scripts/review-package PLAN_FILE BASE HEAD`（评审包，BASE 必须是**派发前**记的 HEAD，绝不 `HEAD~1`）、`scripts/sdd-workspace PLAN_FILE`（工作目录）。
-
-### 4.2 剩下的任务 + 终审（M4 全部收口：九任务 complete、终审 Approved、整改已落地、复审 0C 0I 3M）
-
-| 任务 | 动什么 | 该任务终态 |
-|---|---|---|
-| ~~T5~~ **已完成** | 新模块 `doc_preview.rs`：重抽原文 + 窗口拼接 + UTF-16 码元区间；`lib.rs` 的 `mod doc_preview;`；`Cargo.toml:46` 与 `extract.rs:577` 两处悬空注释；一块 T6 回收的 `#![allow(dead_code)]`。fix round 1 把并窗判据从「命中起点」改成「新窗左沿」（Important-1）并把 `near_hits…` 的夹具按半宽重算（Important-2） | **134**（doc_preview 14），提交 `614f1a2` + `d544175` |
-| ~~T6~~ **已完成**（`6bc6354` + `077c275`） | 两条 IPC 命令接线（`search_all` 锁内查库；`doc_preview` **锁内查库、锁外抽盘**，刻意不写成一条持锁调用）；回收 `search.rs` 与 `doc_preview.rs` 两块豁免；两处注释/字符串级残留（`PREVIEW_WINDOW_CHARS` 的 6 行 doc 注释、`extract.rs:603` 的 `crate::panic_to_err`）→ 首轮 Files 与 `git add` 是**五个**文件。**fix round 1 的 delta 三件**：`doc_preview` 加 `#[tauri::command(async)]`、`lib.rs:481-482` 那两行注释改为说实话、`doc_preview.rs:9-10` 删掉一个多余空行，**只提交两个文件**（详见 §4.3） | **134**，handler 39 → **41**，门禁六道（首轮的 2 条 exit=1 豁免回收、1 条悬空符号，加本轮的悬空符号两形态与 `tauri::command(async)` 恰好 1 行） |
-| ~~T7~~ **已完成**（`23b8b53` + `034b0ef`） | 前端类型 `src/types/search.ts`（4 个线格式类型）+ `api.ts` 的 `searchAll`/`docPreview` + 纯逻辑 `src/lib/search-order.ts`（刻意只 `import type`）+ 仓库根 `tests/search-order.test.ts` + `package.json` 的 `test` 脚本。**fix round 1 的 delta 三件已全落**：① 第 3 条用例补「三段同现 + `relaxed: true`」夹具（钉段序 + 三格各自的 `note`），并按新加的第 6 条变异取证（交换 ledger/docs 两个 `if` 块 ⇒ `pass 7 / fail 1`）；② `api.ts` 那句注释换成时间锚；③ 报告 §2.2 那句「tsc 会抓到线格式」按假门禁改写，并把 `DocPreview` 无 wire 测试写进「没能自动验证」清单 | Rust 仍 **134**、`node --test` **`ℹ tests 8 / pass 8 / fail 0` / exit 0**、`npm run build` exit 0（`error TS` 计数 0）、`grep -rn "\"search_all\"\|\"doc_preview\"" src/lib/api.ts` **exit=0**（这条把 §4.3 第 6 点两侧对账闭环）。整改轮**恰好 2 文件**，`search-order.ts` / `types/search.ts` / `package.json` / `package-lock.json` / `tsconfig.json` / `src-tauri` 全部 `git diff --exit-code 23b8b53 034b0ef` = **0**（实现体零漂移 ⇒ 「测试能红只靠夹具」这条红线成立） |
-| ~~T8~~ **已完成**（`40f4ca3` + `0757545`） | Files 面（计划 `### Task 8`，起点 `:2021`）**六个文件**（fix round 的那三个文件是它的子集）：`src/stores/local-search.ts`（`hits` → `bundle`，三处内联 `mine === seq` 改走 `isNewest(mine, seq)`，并删掉写了没人读的 `query` 字段）、`src/lib/api.ts`（删 `searchLocal` wrapper + 那句变假话的注释 + import 里的 `FieldHit`）、`src/pages/search.tsx`（收成薄壳：输入框 + debounce + 三种空态 + `<SearchBundleView>`）、**新建** `src/components/search-bundle.tsx`、**新建** `src/components/doc-preview-dialog.tsx`（含 fix round 补的 `guard` + 独立 `notice` 态）、`src/pages/index-status.tsx`（「试搜正文」Card 加一句定位说明）。**本任务零新增单测**（JSX 不在这张网里，spec §八），报告 §七 逐条点名 9 项「没能自动验证」交 T9 | 首轮恰好 6 文件 + fix round 恰好 3 文件；`npm run build` exit 0、node 侧仍 **`pass 8`**、Rust 仍 **134**（零 Rust 改动）、T8 的删除门 `grep -rn "searchLocal" src/` **exit=1**、密文列扫描 `grep -rn "_cipher\|_nonce" src/` **exit=1** |
-| ~~T9~~ **已完成**（`ef49c1a` 代码 + `cd04f33`/`fb6f4cd` 文档，任务评审补做在 `fb6f4cd` 之前） | 真机验收（**三下只有人能点的由需求方点完**：原生目录选择器、`revealItemInDir`、`window.confirm`）+ D6 上限实测 + `async` 并发对账 —— 全部拿到读数；D6 的代码后果 `ef49c1a` 已落；Step 4 的文档收口已做（`docs/开发进度.md` 的 M4 行 ✅ + 「M4 验收证据」整节 + 11 条没能自动验证清单 + M3 缺口归属按 spec §十 改对） | 评审 **Spec ✅ / Approved（0C 0I 3M）**，两条具名变异由评审者自己跑出红点 ⇒ 三条截断测试全有变异证据；三条 Minor 全部落终审（30 无实测动机、台账侧零独立守护、`lib.rs:542` 漂） |
-| ~~终审~~ **评审 + 整改 + 定向复审全部落地**（评审输出 `branch-review-m4.md` 284 行，输入是代码面 `review-branch-497c0a1..fb6f4cd-code.diff` 127 KB；整改 `3ba4c46` + `ea83d98`；复审 `final-fix-rereview-1.md` 163 行 = **Approved / 0C 0I 3M，五条具名风险全 SETTLED**） | Verdict：**Approved + MVP 成立、0 Critical**。13 项整改：第 12、13 项是文档（控制方已做完），第 1–11 项是代码（一次派发，**全部零条数变动**）。它同时**证伪了我四条断言**并新增 I-4/I-5 两条资源型 Important 归 M5 —— 逐条见 §4.7 | 整改后应为：134 / `pass 8` / 两条 clippy 0 warning / `tauri::command(async)` 恰好 1 行 / `lib.rs:[0-9]` 只剩 `extract.rs:31` / `SOURCE_ORDER` exit=1 |
-
-计划正文在执行期间不改；若评审裁定某任务**文本本身**写错，走「改计划本体 → 重新生成该任务简报 → 账本记 `Ruling:` → 派发 fix round」的闭环（10-08 之前 T3/T4/T5/T6 各走过一次，**T7 一天内两次**：派发前预检 4 处 + 首轮评审 3 处；**T8 也是两次**：派发前预检 4 处（含一条把假联合拆掉的简化）+ 首轮评审 4 处），不要为此多开一轮评审，也不要让实现者自己发挥。**连续两轮预检都抓到同一形缺陷：简报逐字给的代码里带着「写了没人读」的声明/导入，而它自己的 `npm run build` 门会因此红**（T7 的 `FieldHit`、T8 的 `as HitSource` + `busy`）—— 预检时必须把每个新增声明问一遍「谁读它」。
-
-### 4.3 T6：首轮六处不可省的活（都已在 `6bc6354` 落地）+ fix round 1 的三件 delta
-
-首轮六处（留作对账，不要重做）：
-
-1. **新增的 Step 4**：T4 定向复审留下的六条逐字替换块（4 条文本级 + 1 条旧任务号指针 + 1 条测试强度）——含把键集合断言补成 `assert_eq!(obj.len(), 7, ...)`，配一条证伪取证：临时往 `SearchBundle` 加一个 `pub docs_capped: bool` 这条**必须红**，然后**删干净**。这道闸是给「M4 不加线格式字段」那条裁定上的，不是装饰。（计划原文这条标题写的「四处」是简报自己的计数错，六条里 5 条落 `search.rs`、第 5 条落 `index_store.rs`；实现者当时读成「四处 = 1–4」并把六条全落地，是唯一安全读法 —— 坑 63。）
-2. **回收两块临时豁免**：删掉 `unified_bundle` 上方的 `#[allow(dead_code)]`（按「紧贴 `pub fn unified_bundle` 的那行」定位，行号会漂），**以及 `doc_preview.rs` 文件头那块 5 行的 `#![allow(dead_code)]`**（Task 5 按预检修订开的，形态同形）。门禁 `grep -rn "allow(dead_code)" src/search.rs src/doc_preview.rs` 期望 **exit=1（0 命中）**，一次扫两个文件。**覆盖面只有这两个文件**：全仓还剩 `db.rs:30` 一处 M1 遗留的永久豁免，不归本任务、不许顺手删（见 §3 的缺口表）。
-3. **同一个 `doc_preview.rs` 里还要同步一句 doc 注释**（T5 复审 Minor-1）：`PREVIEW_WINDOW_CHARS` 上方那句「单窗最长…」在并窗判据换形后成了假话（链式合并能把一扇窗拉到接近整篇），整段换成计划 Task 5 Step 1 里那份 6 行写法，**逐字照抄、不要自己重述**。
-4. **`extract.rs` 多一行字符串**（T5 复审登记的越界残留）：`release_profile_does_not_abort_so_panic_guards_work` 里 `assert_ne!` 的尾句把 `crate::panic_to_err` 改成裸 `panic_to_err`（`f72a5c8` 把边界助手搬进 `extract.rs` 后这个路径根本不存在）。纯字符串，不许动那个函数体里任何其他表达式。
-5. **Step 3 的门：首轮从四条变五条，本轮再变六条**。第五条扫悬空符号两种形态 `grep -rn "crate::panic_to_err\|index_job::panic_to_err" . --include=*.rs --include=*.toml` 期望 **exit=1**（T5 的门只扫 `index_job::` 前缀，所以 `crate::` 那种写法一路绿到今天 —— 坑 60）。第六条钉住本轮裁定的**范围**：`grep -n "tauri::command(async)" src/lib.rs` 期望**恰好 1 行且 exit=0**，紧贴 `fn doc_preview` —— 漏加 = 0 行 = 红，给 `search_all` 也顺手加 = 2 行 = 红，因为「只动 `doc_preview`」是裁定不是随手选择，而编译器和 clippy 都不替你看着这两个方向。
-6. Files 里已点名**五个**文件（`lib.rs` / `search.rs` / `doc_preview.rs` / `index_store.rs` / `extract.rs`，后四者只动注释、那一处断言、那 5 行豁免与那 1 行字符串），`git add` 也是这五个 —— 别让实现者以为无权改它们。Step 5 的字面量对账：`grep -rn "\"search_all\"\|\"doc_preview\"" ../src/lib/api.ts` 在 **T7 落地前必然 exit=1**，T7 之后必须 exit=0 —— T7 要重跑这条并写进它的 Expected。
-
-**fix round 1 的 delta 只有三件**（评审裁定 → 改计划本体 → 重切简报 167 行之后剩下的活；终态是 134 passed / handler 41，**提交只含 `lib.rs` 与 `doc_preview.rs` 两个文件** —— 首轮那五个文件里的另外三个本轮零改动）：
-
-- `lib.rs` 的 `doc_preview` 命令属性 `#[tauri::command(…)]` 补上 `async`，并按修订后的 Step 1 逐字同步它上面那句注释（「光出锁还不够…」）。理由与三条源码出处、以及「为什么 `search_all` 本轮不加」都在计划 Task 6 Step 1 下面那四段里，不要自己重述。
-- `lib.rs:481`（`index_overview` 的「出锁段：`is_dir()` 可以慢，但此时别的 IPC 进得来。」）整行换成计划里给的那两句。它是 M3 落地的 sync 命令写的假话，与本任务 Important-1 同源，零行为改动；`index_overview` 的函数体与那段带「Task 10 评审的 Important 1」的旧任务号注释都不许动。
-- `doc_preview.rs:9-10` 两个连续空行删掉一个。这是简报 Files 那句「前后各留一个空行」逐字执行的结果（**计划自己的措辞缺陷**，已改写成按目标形态下指令），本仓没有 rustfmt 闸门，不留给 M5。
-
-**T6 复审留给终审的三条，逐字替换文本在这里（终审只有一次 fix 派发，别再让实现自己去推导）**：
-
-1. **`doc_preview.rs:7-8`**（I-1，本轮 `async` 落地后成为假话）。现状文本是「…预览跑在 IPC 命令线程上，\n没有边界的话，一份畸形 docx 被用户在首屏点开就当场终止应用进程。」整行 `:7-8` 换为：
-
-   ```rust
-   //! 2. **抽取必须包在 panic 边界里**（`extract::panic_to_err`）。预览自 T6 起是 `async` 形态，命令体跑在
-   //!    `async_runtime::spawn` 出去的 tokio worker 上：没有这道边界时 panic 不会终止进程，而是让那一次
-   //!    `invoke` 永不返回 —— `ipc/mod.rs:375-388` 的 `return_result` 在 panic 之后根本走不到，
-   //!    前端那次 `await` 一直挂着，而本仓没有 `panic::set_hook`，界面上连一条提示都没有。
-   ```
-
-   （证据：`tauri-2.12.0/src/ipc/mod.rs:371/:375/:380/:477` —— `return_result` 在同一个 spawned future 内、排在 `task.await` 之后；`Cargo.toml:45-48` 明令禁 `panic = "abort"`；`grep -rn "panic::set_hook\|set_hook" src/` 零命中。）
-
-   **⚠️ 上面这块文本别再逐字往代码里抄**（10-09 终审整改时就是这么做的，落地版以 `src-tauri/src/doc_preview.rs:8-16` 为准）：块里那句含 `panic::set_hook` **字面量**，而本仓有一条「零命中」的 grep 门守护它 —— 写进 `src-tauri/src/` 会让那条门被**自己的注释**打红（`grep -rn "set_hook" src-tauri/src/` 从 exit=1 变 exit=0）。实现者当时的处置是保留全部信息、把字面量改写成「本仓没装 panic 钩子（那条「钩子零命中」的 grep 门不许被这句注释打红，所以这里刻意不写它的字面量）」，裁定**维持这一版**，并把它记成坑 90。复审还额外验了生死线：`respond_async_serialized<F> where F: Future<Output = Result<…>>` 收的是**裸 future 不是 `JoinHandle`**，所以 panic 会穿过外层 spawn 的 future、`return_result` 永不执行 ⇒「不回执、前端 `await` 永挂」这句是真话。
-
-   **同批核对过、确认不需要跟着改的两处**（避免终审时有人以为漏了）：`extract.rs:575-581` 那条 `release_profile_does_not_abort_so_panic_guards_work` 的头注释和计划 Task 2 Step 5 的「摘掉 `catch_unwind` ⇒ 测试线程 panic 也算红」取证条目，讲的分别是 **release 下 `panic = "abort"`** 和**测试线程**这两个场景，都不依赖「命令体跑在哪条线程」，`async` 改不动它们。本条只改 `doc_preview.rs:7-8` 那句，**`panic_to_err` 边界本身一字未动**。
-2. **三处 `lib.rs:542` 行号指针**（M-1，`index_store.rs:275`、`index_store.rs:671`、`search.rs:21`）。统一改为**符号指针**，例如「`lib.rs` 的 `fn search_docs`（它的 clamp 在命令体内，上界 200）」；同批跑一次清扫 `grep -rn "lib\.rs:[0-9]" src/`，本仓现存 3 处命中就是上面这三处，`extract.rs:31` 那条指向的是依赖包内文件、**不属本仓指针、不许改**。
-3. **`index_overview` 内那对互相矛盾的注释**（M-3，`lib.rs:464-468` 与 `:481-483`）。事实是两个时段：取锁块 `:469-479` 期间别的命令排在 `Mutex<Connection>` 后面（`:465-466` 那句对此为真）；出锁探测块 `:483-496` 期间命令体仍占着消息泵（`:482` 那句对此为真）。**成对改写**：`:464-466` 补限定「排队的时段是上面那块锁」，`:482` 精确成「排在 `:469-479` 那块锁后面的命令同样进不来」。只改其中一句都会留下半句假话，也别顺手给 `index_overview` 加 `async`（40 条 sync 是既有口径）。
-
-**T8 这一轮另留给终审的五条**（同样是逐字动作，终审只有那一次 fix 派发，别再让实现者自己推导）：
-
-1. **`doc-preview-dialog.tsx` 的 `notice` 跨文档残留（M-8）**：在 `DocPreviewDialog` 的 `useEffect` 最顶部（`if (!docId)` 之前）加一行 `setNotice(null);`。为什么在这一格：`useState` 挂在**总是挂载**的组件上（宿主 `search-bundle.tsx` 无条件渲染它，关窗只卸载 `DialogContent`），而 effect 的两条清理分支原本只清 `data`/`error`。现状后果：A 复制失败 → 关 → 开 B，B 带着 A 的红字；B 的加载窗口会「正在抽原文」+「操作失败：…」同屏。**代码形状来自简报 Step 2 逐字** ⇒ 计划层缺口，实现者无过。
-2. **`src/lib/ipc.ts::toAppError` 的兜底分支对 JS `Error` 显示成 `{}`（D-11）**：那一格 `typeof e === "string" ? e : JSON.stringify(e)` 改成 `typeof e === "string" ? e : e instanceof Error ? e.message : JSON.stringify(e)`（`Error.message` 不可枚举 ⇒ `JSON.stringify(new Error("x"))` 是 `"{}"`）。**同批一起看**反向形态：`src/pages/project-detail.tsx::guard` 用的是 `e instanceof Error ? e.message : String(e)`，遇到后端 AppError 那种**普通对象**会显示成 `[object Object]` —— 两个方向的兜底各只覆盖一半，终审一次收干净（共享函数改一处，所有调用方同时受益；不要在各调用点加守卫）。**引既有账而不是新开议题**：这一条 spec §十 早就登记过（`(c)` 行「`toAppError` 把原生 `TypeError` 渲染成 `{}`，归 M5、全仓债务、6 个 store 共享」）⇒ 终审动手时引那一行，别当 M4 新发现的缺陷计数。**10-09 真机给了一条降级证据**：`revealItemInDir` 失败时回来的 rejection 是**字符串** `path doesn't exist`，走的是 `typeof e === "string"` 那支，本轮没踩到 `{}`。
-3. **`SOURCE_ORDER` 自 T8 起零消费方（M-4）**：现在只有 `types/search.ts` 里那句「M4 要把文件正文结果插进来时改这里」的注释还指着它。终审裁定删还是留（它在 M3 期是既有导出，删它要确认没有别处 import）。
-4. **预览的两句措辞不精确（M-5）**：`doc-preview-dialog.tsx` 里「只显示命中附近的窗口，中间以 ⋯ 分隔」在**单窗**时不成立（一扇窗没有分隔符），而「正文里没有这个词，命中的是文件名」除了文件名命中之外还有 `lower_first` 折叠这一成因。纯文案，零行为。
-5. **`search.rs:26` 那句「交给 Task 8 文案」的诚实性补偿没落地（M-7）**：T8 的段级文案最终形态是 `s.note`（见 §2.2 的 T8 行），没有覆盖那条评论所指的东西。动它要碰被 3 条 Rust 测试钉着的注释 ⇒ 会重开 Task 4 的条数链，所以**明确不在 T8 做**，终审统一处置。
-
-**T9 这一轮（真机 + D6）另留给终审的六条**：
-
-1. **`search_all` 是否也加 `#[tauri::command(async)]`**：真机读数 —— 并发「`search_all` + `db_status`」⇒ `searchAllMs = 612`、`dbStatusMs = 620`、**`dbReturnedFirst = false`** ⇒ `db_status` 被顶到后面，**sync 的 `search_all` 确实在占消息泵**（对照：async 的 `doc_preview` 期间 `db_status` 3 ms 就回）。但写死的判据是「`search_all` > 800 ms **且** `db_status` 被推到后面」，稳态 675–737 ms 没越过 800 ⇒ **判据不成立，本轮没加**。终审议题写成「首屏每次键入都短冻消息泵约 0.6–0.8 s，值不值得换 `async`」——注意换了之后前端 `seq` 守卫就从「防御性」变成「正在承重」（这条本轮已经靠 `doc_preview` 验过一次）。
-2. **预览的极端单文档成本 + 没有取消入口**（第 7 格，议题已按证据重写）：载荷 1,139,999 码元 / `ranges.length = 60,000` / `truncated = false`，而**渲染侧 `longTasks` 全程为空、rAF 1 ms ⇒ 不是卡顿**；真正不可用的是等 160–266 秒且对话框只有「关闭」——关掉只卸载前端，后端那次抽取照跑完。**别照着「渲染卡顿」这个错议题去给合并加长度上限**（那会重新制造 Task 5 Important-1 已修掉的相接窗失效形态）。
-3. **首屏输入框 placeholder 仍是 M3 那句**「搜项目、网址、账号用途、备注…」，而 `search_all` 现在带回三段、正文段是本轮的主体。一行文案，落终审（`src/pages/search.tsx`，不在 T8/T9 的 Files 面）。
-4. **另两条截断测试没做变异探针**：`ef49c1a` 里实现者只对 `MAX_ITEMS_PER_CLUSTER` 做了「改回 17 ⇒ 必须红」的取证（结果红，非零守护）；`MAX_CLUSTERS_PER_SECTION` 与 `MAX_PROJECT_HITS` 那两条测试没做同等探针 ⇒ 终审可补，或照本仓口径登记为「未证明可红」。
-5. **`lib.rs:542` 那组行号指针的第四处出处**：`search.rs` 注释里的 `lib.rs:542` 漂了（clamp 实际在 `src-tauri/src/lib.rs:551`，**值 200 仍与注释一致 ⇒ 是行号漂不是假话**）。与 T6 复审 M-1 那三处（`index_store.rs:275`/`:671`、`search.rs:21`）**同批换成符号指针**，清扫命令仍是一条：`grep -rn "lib\.rs:[0-9]" src/`（`extract.rs:31` 那条指依赖包内文件，别改）。
-6. **反向提示（免得终审误改）**：`src/pages/index-status.tsx` 里那个「20 个」是 `PROGRESS_EVERY` 的巧合，**不是**旧上限的残留；`grep` 到它别动。实现者已核过 `src/` 与 `src-tauri/src/` 的旧上限字面量 `grep -rn "20/10/10\|20 簇\|10 条\|10 平铺"` 双双 exit=1。
-
-### 4.4 完成判据（计划里的原话，可逐条核对）
-
-- `cargo test --lib` → **134 passed; 0 failed**（分模块：tokenize 9 / extract 15 / index_job 12 / index_store 15 / search 20 / doc_preview 14 / db 8 / index_scan 10 / ledger 12 / project 10 / vault 9）
-- `node --test "tests/**/*.test.ts"` → **pass 8 / fail 0 / exit=0**；`npm test` 与 `npm run build` 两条 exit 0
-- 两道 clippy（`--lib -- -D warnings`、`--lib --all-targets -- -D warnings`）都 exit 0 且输出里 0 条 warning
-- 结构 grep 门禁（**注意方向**：期望 0 命中的那几条，正确结果是 `exit=1`，不是命令失败）：`grep -rn "chars().count() > 128" src/` → exit 1；`grep -rn "crate::panic_to_err\|index_job::panic_to_err" src/`（两种前缀都要扫，见坑 60）→ exit 1；`grep -rn "\.cut(" src/tokenize.rs` → 恰好 1 行；`grep -rn "File::open" src/doc_preview.rs` → exit 1；`grep -rn "\.cut(\|cut_for_search" src/doc_preview.rs` → exit 1；另有一条在 T6 Step 3 而不是完成判据里：`grep -rn "allow(dead_code)" src/search.rs src/doc_preview.rs` → exit 1（就是 §4.3 第 2 条那两块豁免的回收证据）；同一格还有钉裁定范围的一条：`grep -n "tauri::command(async)" src/lib.rs` → **恰好 1 行且 exit=0**（只给 `doc_preview`；0 行 = 没落实裁定，2 行 = 越界改了 `search_all`）
-- `generate_handler!` 条数 = 41；**每任务 1–2 个提交**（走过 fix round 的 T3/T4/T5/T6/T7/T8 各多一个），每个只含该任务 Files 点名的文件；`git status --porcelain` 干净
-- `%APPDATA%\dev.zero.pfm\` 逐文件与真机基线快照一致；`%TEMP%` 无本轮残留
-
-### 4.5 T9 里已经预先写死的裁定（不用再问人）
-
-**10-09 状态：这一节的五格全部跑完了，裁定照字面执行，没有一项需要再问人。** 逐格读数与结论都写在**计划 Task 9 Step 1/2/3 正文**（那三个复选框现在是 `[x]`）与账本 `## Task 9 真机 + D6 落地`，本节的规则保留作为出处：① 延迟稳态 675–737 ms 未越 800 ⇒ `DOCS_FETCH_LIMIT` **维持 200**；② 触顶簇 100%（稀疏对照 `capped=0`）⇒ **三个上限 20/10/10 → 30/15/15**（`ef49c1a`）；③ 载荷 114 万码元但渲染不卡 ⇒ 判据字面不成立，议题按证据重写后落终审（见 §4.3 第 2 条）；④ `async` 兑现成立（`db_status` 3 ms 先回 vs 266,093 ms）；⑤ `search_all` 期间 `db_status` 确实被顶到后面（620 vs 612 ms），但 800 ms 那半边不成立 ⇒ 本轮不加 `async`，登记终审。
-
-沙盒灌 5 万行 `index_docs`（正文 1–2 KB 随机 CJK，全在 `%TEMP%`）后量两件事，只回数字：
-
-- **一次 `search_all` 往返 > 800 ms** ⇒ `DOCS_FETCH_LIMIT` 200 → 100，并在 `docs/开发进度.md` 登记「降到 100，因为 X ms」。
-- **触顶簇占比 > 30%** ⇒ `MAX_ITEMS_PER_CLUSTER = 10` 太小，三个数一起上调 20/10/10 → 30/15/15，并同步改 T4 的三条截断测试期望值与 spec §四。
-- 两条都没触到就维持原值，只记数字。**不许**为了「看起来更快」偷偷放宽 `truncated`/`hidden` 的语义。
-- **预览载荷长度**（T5 复审 Minor-1 的有名缺口，判据也已写死）：沙盒造一份 ≥4 万 char、命中间隔约 8000 char（刻意落进合并带）的长文，`doc_preview` 后只回 `text` 码元长度、`ranges.len()`、`truncated` 三个数字。**`text` > 6 万码元且页面渲染明显卡顿或滚动失效** ⇒ 升级为终审的独立 finding（议题：给合并加长度上限、上限处宁可多插一个 `⋯`）；不卡就记数字收口，不在 T9 里顺手改算术。
-- **`async` 到底有没有兑现**（T6 Important-1 裁的那条，全链条唯一的运行时证据就在这一格）：沙盒造一份慢到可辨的文件（几百 MB 纯文本或多页 PDF，只读、跑完删），页面里**同一时刻**并发发 `invoke("doc_preview", {慢文件})` 与一条便宜的 `invoke("db_status")`，只回两个毫秒数 + 「`db_status` 是否先返回」。先回 = 属性生效；被推到 `doc_preview` 之后 = 属性没起作用 ⇒ 终审独立 finding。这条是 134 条单测一条都不覆盖的格子，跑不通就不许在收口文档里说「预览不再冻结界面」成立。
-- **`search_all` 要不要也换 `async`**：同一口径顺手量它 —— 5 万行那次往返期间并发 `db_status`。若 `search_all` 已 > 800 ms **且** `db_status` 被顶到后面，就在 `docs/开发进度.md` 写明「首屏检索也在冻消息泵，`search_all` 应一并换 `async`」，交终审那一次性整改落地；**不在 T9 趁真机顺手改 Rust**，免得绕过任务评审这道闸。
-
-收口文档必须含「没能自动验证」清单（逐条点名，不许省略）：JSX 渲染正确性、`revealItemInDir` 那一步要人点、`isNewest` 的 `>=` 变异假绿、`lower_first` 折叠展开型映射（ß/İ）在本机无夹具、纯静默拒绝 WAL 那条分支自 M0 起就无测试守护、5 万行延迟只是沙盒数字、第三级簇序键无守护（M5）、预览「重复段落」症状在重叠带内（4000–8000 char）无专用夹具（只由并窗不变量间接守）、`PREVIEW_GAP` 的字面值本身无守护（T5 复审裁定：它不是线上协议，为常量写断言等于重言式）、`#[tauri::command(async)]` 的运行时兑现（只有上面那条并发对账覆盖，编译绿不等于它成立）。
-
-### 4.6 本轮明确不做（别顺手加）
-
-结果分页/展开按钮（要做就得给 `search_all` 加 offset，而 offset 会和「段内聚簇」纠缠）、`docsCapped` 线格式位、失效核对写回 `missing`（M5）、`/index` 页 `scanning` 文案（M5）、路径归一化（M5）、图片 OCR（M6）、全仓旧任务号注释大扫除（实测 25 处，指的都是 **M3 计划**的 Task 10/11/12，语义不算错；本轮只改 `index_store.rs:671` 那一条，因为它同时含会被 grep 门数进去的裸字面量）。完整表在 spec §十。
-
-### 4.7 M4 整分支终审（10-09 已做完评审，整改批次待落地）
-
-评审者读的是**代码面**（`review-branch-497c0a1..fb6f4cd-code.diff`，127 KB；476 KB 的全量包含 20 个文档提交，太大且会诱导它去评审文档）。输出在 `branch-review-m4.md`（284 行）。
-
-- **Verdict A：Approved，可以合入 master**，条件是终审这一次 fix 批次落地（13 项，**全部零条数变动**）。**Verdict B：MVP 成立** —— 装→建索引→首屏搜→跳转→预览每一格都有守护或真机读数。Critical **无**。
-- **它证伪了我四条断言，四条我都自己复核过、确认它对我错**（这条很重要，别再引用我原来的写法）：① 我写的「密文列扫描应 exit=1」是**永远不可能成立**的门禁（schema 自己就定义那些列）⇒ 见 §1 红线第 4 条已改写；② 我登记 T8-5 的理由「`search.rs` 那句注释被 3 条 Rust 测试钉着、动它会重开条数链」是**假前提** —— 全仓 `include_str!` 只有 2 处（`extract.rs` 读 `../Cargo.toml`、`tokenize.rs` 读自己），没人读 `search.rs` 的注释，改注释不增删测试；③ `SOURCE_ORDER` 我留着的理由（spec §六「`field_hits` 仍在用」）也是假的 —— `field_hits` 在 Rust，永不消费 TS 常量 ⇒ 裁定**删**；④ 我把 `ledger_notes.body` 当加密列写进派发词 —— 它是明文列。
-- **两条新的资源型 Important（M3 期不存在的路，M4 新开的格子）**：I-4 `doc_preview` 按登记的 path 重抽，**绕过全仓唯一那道 `max_file_bytes` 门**（那 gate 在 `index_scan` 的扫描循环里），且 `render_preview_with` 把整篇放大成约 4 份全量驻留（两份 String + 两份 `Vec<char>`）⇒ 合法 20 MB 文件约 120–140 MB 峰值；索引后文件膨胀时分配失败是 **abort**，`panic_to_err` 抓不到也不在边界内。I-5 预览**没有并发/取消闸门**，而 §6.1 亲验命令体是直接跑在 tokio **多线程** worker 上（`kind="sync_threadpool"` 只是 tracing span 字段，全文件零次 `spawn_blocking` ⇒ **spec 原稿把标签读成了机制**，已改写）⇒ 连点 N 份慢文档 = N 个 worker 占死，之后所有 async 命令一起排队。两条都归 M5，但**必须登记在案**（spec §十一 第 5、6 条）。
-- **14 条已登记残留的裁定：照改 4 / 改法要变 4 / 撤销 6**。撤销的六条是：T8-2（`toAppError` 归 M5，spec §十 早有一行）、T9-1（`search_all` 不换 async，议题改写成「先做分段渲染/合并 LIKE」）、T9-2 的「给合并加长度上限」那个动作（两个独立理由：判据的「且」不成立 + 加上限会重造 Task 5 Important-1 修掉的相接窗）、T9-4（那两条测试的结构已可证伪，只是没实测，登记即可，别为它开轮）、T9-5（**与 T6-2 是同一处，我登记时重复计数了**；全仓内部行号指针恰好 3 处）、T9-6（`PROGRESS_EVERY` 那条反向提示留账本即可，无需动作）。
-- **整改批次**：第 1–11 项是代码（`doc_preview.rs` 头注释、三处 `lib.rs:542`→符号指针、`index_overview` 两句成对改写但**不写行号**、`search.rs` 头注释与 `DOCS_FETCH_LIMIT` 注释对齐 shipped 文案、`setNotice(null)`、预览两句文案、`placeholder`、删 `SOURCE_ORDER`、`DocPreview` 键集合断言**并进** `preview_highlights_every_hit_in_the_stitched_text`、中带 6000 间距夹具**并进** `near_hits_share_one_window…`），第 12、13 项是文档（已随本提交做完）。**两条并进型补强是这次唯一动的「测试」，形状是 134→134 / 14→14**（本仓先例：`ledger.rs` 的 `"usernameSet":true`）。
-- **整改前实测（控制方当场跑的，作为「门禁会咬」的基线）**：`grep -rn "lib\.rs:[0-9]" src-tauri/src/` = **4 命中**（`index_store.rs:275`、`index_store.rs:671`、`search.rs:21` 三处漂掉的 `lib.rs:542` + `extract.rs:31` 那条依赖指针）；`grep -rn "SOURCE_ORDER" src/ tests/` = **1 命中**（`src/types/search.ts:27` 定义行，零消费者 ⇒ 删前确认成立）；`grep -n "tauri::command(async)" src-tauri/src/lib.rs` = **恰好 1 行**。**这三条数就是派发词里的「改前应为」**，实现者改完必须看到 4→1、1→0（exit=1）、1→1。
-- **对评审文本 itself 的一处纠正（第 2 项的清扫门scope 写错了）**：`branch-review-m4.md` §8 第 2 行与 §8 末的「门禁复跑口径」都写 `grep -rn "lib\.rs:[0-9]" src/`，而它给的「只剩 `extract.rs:31`」里的 `extract.rs` 在 **`src-tauri/src/`** —— 按字面那条命令永远不可能产出它的预期残留（`src/` 是前端树）。裁定：**清扫门按 `grep -rn "lib\.rs:[0-9]" src-tauri/src/` 执行**；前端 `src/types/index.ts:3` 那句 `lib.rs:66-73` 指针**不在本轮范围**（它是 M2 期写的、指向 Rust `DbStatus` 的键形状说明，评审的三处清单里没有它，动它属于「顺手大扫除」）。
-- **复跑口径（整改落地后）**：`cargo test --lib` 仍 **134**、node 仍 **`pass 8`**、两条 clippy **0 warning**、`grep -n "tauri::command(async)" src-tauri/src/lib.rs` 仍**恰好 1 行**、`grep -rn "lib\.rs:[0-9]" src-tauri/src/` 只剩 `extract.rs:31`、`grep -rn "SOURCE_ORDER" src/ tests/` **exit=1**。
-- **整改已落地（10-09 收口）**：`9a0dec8`（文档面 12/13）+ `3ba4c46`（代码面 1–11，实现者，7 files / +61 / −21）+ `ea83d98`（控制方追加清扫）。**定向复审 Approved / Spec ✅ / 0 Critical 0 Important / 3 Minor，五条具名风险全 SETTLED**（评审包 `review-9a0dec8..ea83d98.diff` = 2 commits / 28428 B，范围内无 docs ⇒ 不需要「规格来源」声明；报告 `final-fix-rereview-1.md` 163 行）。它自己跑的变异：摘 `rename_all` ⇒ 唯一红点是那条并进的键集合断言（炸在「缺 docId」）；**加第 7 个 camelCase 字段 ⇒ 只有 `len()` 红**（`left:7 / right:6`）；六键齐 + 多一个 snake 别名 ⇒ 红的是 `!contains_key("doc_id")` ⇒ **没有装饰格**。并窗判据退化回 `start` ⇒ 红；**删掉旧的 8002 相接夹具只留中带仍红** ⇒ 中带不是重复覆盖。
-- **三条 Minor 的处置（都已登记，不阻断）**：M-1 = `DocPreviewDialog` 的 `guard` 是**唯一没有 seq/挂载守卫的 `setNotice` 写路径**，footer 两个动作也是 IPC 往返，A 未回时切到 B ⇒ A 的迟到 rejection 会写进 B（归 **M5**，与 I-5 同根；登记在 `docs/开发进度.md` 的 M4 缺口表第 8 条）。M-2 = HANDOFF 注册的 T6-1 逐字替换文本含 `panic::set_hook` 字面量，逐字落地会让「零命中」的 grep 门自咬 ⇒ **维持实现者的改写版**，并记成坑 90。M-3 = `ranges` 的值形状无独立断言、`types/index.ts:3` 的 `lib.rs:66-73` 实测应为 67-74（漂 1 行，不在本轮清单里）⇒ 登记不补（同表第 9 条）。
-- **`superpowers:finishing-a-development-branch` 是下一步，唯一动作需要需求方点头**：合不合 `master`（无远端 ⇒ 不 push）。
-
-### 4.8 派发纪律（今天的两个平台限制，别再假装做过）
-
-- 本会话 `Agent` 工具**不暴露 model 参数** → 子代理一律继承会话模型，SDD 的模型分级做不到，账本里记为 inherited。
-- **resume 不可用** → fix round 用**全新实现者 + 完整报告路径**（报告文件尾部有前几轮的记录），已记为 fallback。
-- 同一 worktree 只允许**一个会提交的实现者**；它跑的时候控制方**不在这个 worktree 里提交任何东西**（连纯文档也不）——见 §5 第 55 条。
-
----
+1. **远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`**（本机无 `gh`）——只能在 GitHub **Settings → Branches** 手改成 `master`。这一格从 M4 起一直挂着。
+2. 若走方向 B：**腾出提交内存**——关几个大户（`vmmemWSL` 常占 ~1G、`Everything`/`ChatGPT`/`Weixin` 各数百 MB）或在 Windows 高级系统设置把「分页文件」临时调大（比如 30–50 GB），然后我一键跑。
 
 ## 5. 踩过的坑，绝对不要再踩
 
-### A. 第三方库/运行时的内部行为 —— 不实测就去读源码，别凭印象
+按「新人最容易踩」排。每条都是独立可读的（旧版编号的坑在 git 里可查）。
 
-1. **`pragma_update` 的 Ok/Err 不携带任何信息**：它内部就是 `execute_batch`，而 `execute_batch` 故意丢弃 pragma 结果行（`Error::ExecuteReturnedResults` 那条返回被 `if false` 硬关）。SQLite 拒绝切 WAL 的方式是**返回原模式**，不是报错。所以「切 WAL」必须读回 `PRAGMA journal_mode` 并断言 `wal`，且读回要写在**库层函数体内**而不是测试里。网络盘/被拦截路径就是这种静默拒绝。
-2. **`bm25()` 交回的是 `-1.0 * score`，越小越好**：`ORDER BY bm25(...)` 升序才是「最相关在前」。当降序排就全反了。
-3. **unicode61 默认 token 字符集是 `L* N* Co`**：标点 P* 是分隔符（不会造成假命中），符号 S*（™ € ± ★）也不是词字符；但私有使用区 Co **是**词字符而 `is_alphanumeric` 回 false —— 这是查询侧判据比索引侧唯一窄的一处，已在 `tokenize.rs` 注释里登记，别再「顺手统一」。
-4. **中文全文检索的隐性失效**：unicode61 会把一整句连续中文切成一个巨型 token，`trigram` 要 3 字符而中文高频是 2 字词。表现是「界面在工作、就是搜不到，且不报任何错」。唯一防线是入库/查询同一个分词器同一套预处理 —— 这就是 `query_terms` 必须唯一切词入口的原因。
-5. **FTS5 前缀：`*` 必须写在引号外面**。`"维保"*` 能命中索引里的「维保期」，`"维保*"` 里的 `*` 只是词内字面字符，永远不中。
-6. **`snippet()` 是从原始列文本重建摘要的**，所以正文里保留标点才可读；而本项目摘要取的是**预分词后的正文列**，`cut_for_search` 的复合词会连着出现两次（实测「里面只有付款条件**付款条件**与验收流程」）。这不是 bug，D5 的折叠规则是针对它的，且只折「第三个 token 恰等于前两个按原序拼接」，任一 token 带高亮标记就整组不折。
-7. **jieba 的索引膨胀比不是容量常数**：实测 `cut_for_search` 相对 `cut` 的词条数比从 **1.0 到 1.57** 波动，别拿单个比值做体积预算。
-8. **rusqlite 取 `usize` 会编不过**：`from_sql_integral!(usize)` 在 `rusqlite-0.40.2/src/types/from_sql.rs:146`（不是 `src/types.rs`），而它**上面那行 `:145` 挂着 `#[cfg(feature = "fallible_uint")]`**，本项目 `Cargo.toml:25` 只开 `bundled` —— 所以 `count(*)` 只能 `get::<_, i64>()` 再转（`index_store::indexed_project_count` 就是这么写的，Task 4 实测撞过 `E0277`）。控制方写计划时只查到「有 `from_sql_integral!(usize)`」而没查它上面的 `cfg`，这条已作为「库 API 断言要读到那行 cfg」的教训登记。换版本前先复核第 1 条那两个源码位置。
+1. **绝不用 `taskkill //F //IM node.exe` 或 `//IM msedgewebview2.exe` 通杀**：映像名通杀会把需求方**其他项目的 vite**（E:\myjob\…、treasure-os 等）一并干掉，也把你自己的 CDP 会话打断。**只按你自己记下来的 PID 精确回收**。识别自己的孤儿进程用 `Get-CimInstance Win32_Process` 的 `CommandLine` 特征（本项目路径下的 `node_modules\vite`），并用 `Get-Process -Id <pid> StartTime` 与你自己几次尝试的 log mtime 对时间戳；不匹配的一律不动。这条我在 M5.5 犯过一次、教训已入跨会话记忆。
 
-### B. 测试与计划文本 —— 断言必须能被它守护的东西打红
+2. **16G 机上 `tauri dev` 的最终 lib codegen 会因提交内存不够崩 `os error 1455`**（mmap `windows` 大 rlib）。**不要**把它当栈溢出/元数据真坏/代码 bug 反复调编译参数——四条调优组合都试崩在同一处。分岔判据：`cargo test --lib`（只出 rlib）过 ⇒ `tauri dev`（三 emit + debuginfo=2）挂，就是提交上限。**转 headless 端到端测**用 `--lib` profile 直驱真链是可行且更可复现的替代；GUI 那一眼留「需求方亲手点完」名单（同 M4 那次）。
 
-9. **期望条数只能实跑数出来，不能累加**。本计划第一版链数就写错了（109/120/134），虚增的数会让实现者以为自己写多了、评审以为自己写少了。
-10. **恒绿断言是缺陷不是守护**：「两处同源」这种事复制实现照样绿，写不出能红的行为断言 —— 改用文本门禁（`include_str!` + 数 `.cut(` 恰 1 次；grep `File::open`）。派发前对被守护表达式做**反值心算**。
-11. **变异取证要每条实测**：本计划给 T1/T3/T4/T5/T7 都列了「把 X 改成 Y，必须让第 N 条红」，不许只做第一条就交。已登记的有名假绿：T7 里 `isNewest` 的 `>=` 变异不会被任何一条测试打红。
-12. **测试里别写死会被本任务 grep 门禁判成违规的字面量**：T4 的测试用 `DOCS_FETCH_LIMIT` 而不是裸 `200`（同任务 Step 5 的门禁就是查裸值）。
-13. **不要为生命周期问题发明助手**：`body` 夹具最终口径是 `fn body(text: String)` + 调用点 `.to_owned()`；`&'static str` / `impl Into<String> + 'static` 那两版都是把计划文本逼去造 `static_str()` 这种不该存在的东西。
-14. `let mut x = x;` 影子重绑在 `-D warnings` 下有 `clippy::redundant_locals` 风险 —— 把 `mut` 写进 tuple pattern。
-15. `Vec<&str> == Vec<String>` 在 Rust 里不成立，比较两侧类型要统一。
-16. **夹具文件名会改变命中段**：M3 真机上文件叫 `维保.docx` 时，`search_docs("维保")` 回的是 `matchedBy="exact"` —— 因为 `SELECT_SQL` 的 `MATCH` 没限定列名，**文件名**里的词在精确段就够着了，前缀段根本不触发。写「前缀放宽」类用例时文件名必须避开查询词。
-17. **「不该有测试」也要显式记**：本机不可构造的分支（纯静默拒绝 WAL、`lower_first` 的 ß/İ 展开）不是没写测试，是不可构造，必须在账本/文档里点名为 deferred minor，否则下一个人以为漏了。
+3. **16G 机上所有 cargo 加 `-j 1` 或 `-j 2`**：默认并行下 rustc 偶报 `0xc0000409 STATUS_STACK_BUFFER_OVERRUN`（其实是内存不够的 abort 表现）和 os error 1455，**先重跑一次再判**，别当成真实失败。node `--test` 也同类。
 
-### C. 前端与 `node --test`
+4. **命令退出码口径**：一律 `cmd > /tmp/x.log 2>&1; echo "exit=$?"; grep … /tmp/x.log`，**绝不** `cmd | tail; echo $?`——管道里的 `$?` 是 `tail` 的退出码，会吞掉真结果（`git push` 也一样中招）。**cwd 残留坑**：cargo 前要 `cd src-tauri`；`node --test "tests/**/*.test.ts"` 要在**仓库根**跑，别在 `src-tauri/` 里跑（M6 合入后我一次误读 `tests 0/pass 0/fail 0`，就是这个）。
 
-18. **`node --test` 的 glob 空匹配 = exit 0 且 tests 0**（静默假绿）；传目录实参 exit 1；`--test-match` 组合 exit 9。所以门禁只认输出里的 **`pass N`**，`exit=0` 本身不构成证据。
-19. **本机 PATH 上的 node 是 v26.3.0**，harness 报的 v24.18.0 不是仓库实际用的那个。版本相关判断以实跑 `node -v` 为准。
-20. **`src/lib/search-order.ts` 里不许出现运行时值 import**（只 `import type`，会被类型剥离抹掉），否则 `node --test` 跑不动。测试放仓库根 `tests/`：`tsconfig.json` 的 `include` 只有 `["src"]`，且 devDependencies 里**没有 `@types/node`**。
-21. **本轮不引新依赖**（前端测试网是用户明确选的「node --test + 纯逻辑抽取」）。别顺手装 vitest。
-22. **`package.json` 的 `test` 脚本与 `tests/` 目录是 T7 的产出，不是前置条件**（T7 之前两者都不存在，别在 T1–T6 里以为「测试网已经在了」）。T7 落地后：`"test": "node --test \"tests/**/*.test.ts\""` 排在 `build` 之后，仓库根 `tests/search-order.test.ts` 有 8 条 —— 现在**可以**直接 `npm test`，T8/T9 的前端侧门禁就接在这一格上，不要再另起一套。
+5. **计数永远现跑，不写死、不累加**：`generate_handler!` 命令数、`TARGET_VERSION`、每格测试条数——本仓烧过多次。`generate_handler!` 计数正则**必须让逗号可选**：`^\s+[a-z_]+,?$`；要求尾逗号那版恒读 40。计划里每格的「Expected N passed」**必须由实跑数出来**（`cargo test --lib` 的 `test result` 行 + `grep -c '^    fn '`），不许凭印象累加。
 
-### D. 真机验证（CDP）
+6. **行号指针只认命令**：文档里出现的 `file:line` 都当**取数命令**用（`grep -n` 现取），别照抄——每格代码一动行号就漂；本仓已烧过 7+ 次。
 
-23. **React 受控输入直接改 `.value` 不触发状态更新**：要用 `Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set` 赋值再派发 `input` 事件；Radix Select 需要带 `pointerType:"mouse"` 的 `pointerdown` 才展开。
-24. **合成事件与 `disabled` 的关系要分控件**：真 `disabled` 的原生 `<button>` 合成 click **进不来**（M3 两轮独立实测），只挂 `data-disabled`/`aria-disabled` 的 Radix 控件进得来。判据是 DOM 上那个真属性，不是文案。
-25. **别在同一个 click 助手里既 `dispatchEvent(new MouseEvent("click"))` 又 `el.click()`** —— 那是点两下，M2 就是这么建出了重复项目。
-26. **shadcn 的 `Field` 是 `<label>` 把 `<input>` 包在里面**，`label.parentElement.querySelector("input")` 会拿到相邻的另一个框。正确做法是先 `hit.querySelector("input,textarea")`，再退回 `parentElement`，并支持 `htmlFor`。
-27. **事件残留会把你读到上一轮的终态**：进度事件往 `window.__m3prog` 里堆，发命令前不清空就会拿到上一轮结果（M3 因此把一次 `skipped=1` 读成自相矛盾）。`index_overview` 是两阶段的，页面不 remount 时 `overview` 是旧的 —— 要看新登记项目的红标必须先切一次路由再回来。
-28. **`-c` 覆盖 identifier 要走 npm 的 `--`**（`npm run tauri -- dev -c '{...}'`），且**动手前先做两个必然失败的编译前探针**（`-c <不存在的文件>` 报 os error 2；`-c '{"__probe_unknown_key__":1}'` 报 `was unexpected`），零成本验掉「JSON 被三层引号咬碎、应用悄悄落到真实 identifier」这个风险。
-29. **跑 `tauri dev` 时别同时跑 `cargo test`/`clippy`**：抢同一个 `target/` 会让 rustc 报内部编译错误、`cargo test` 以 101 退出，看着像内存问题其实是文件占用。先把自己起的 dev 进程树收干净再跑门。
-30. **停 dev 会留孤儿**：vite 占 1520、`msedgewebview2.exe` 占 9222。重启前先按命令行特征找回来，否则报 `Port 1520 is already in use`。
-31. **dev 端口 1420 本机不可用**（Windows 把 1397–1496 列为 TCP 排除端口），已改 1520，`vite.config.ts` 与 `tauri.conf.json` 的 `devUrl` 必须同步。
-32. **真机断言失败是 finding，不是绕面对象**；数字变了照实报，绝不为凑数改测试。库文件名是 `ledger.db`，不是 pm.db。
+7. **库/运行时内部行为不凭印象**：关于第三方库返回值语义、错误吞没、异步阻塞、「某 API 会不会 panic」的论断，**去 vendored 源码读真实签名**（`~/.cargo/registry/src/*/windows-0.62.2/src/...` 之类），别靠记忆或猜测。M6 就是这条救回了 `.get()` vs `join()`（真实用的是 `windows-future` inherent `join()`）、`rusqlite::ffi::Error` 构造方式、`windows-core` `from_abi` null→`Err` 不 panic。
 
-### E. 环境 / Git / 工具
+8. **rusqlite `pragma_update(journal_mode, WAL)` 的 Ok/Err 都不可信**：必须**读回 `PRAGMA journal_mode` 断言等于 `wal`**。WAL 落地失败会静默降级；本仓 `db.rs` 的 `after_open` 里有这条硬门。另：**同一 WAL 库活着时**第二个连接可能打不开（os error 1455 的另一副面孔），别在测试里并发开两条同一路径连接。
 
-33. **16 GB 内存会让 rustc 报假失败**（`os error 1455` / 内部编译错误）：先重跑一次再判定是不是真错。
-34. **管道会吞退出码**：`cmd | tail -5; echo $?` 取到的是 `tail` 的状态。要 `cmd; echo exit=$?`。
-35. **Git Bash 路径是 `/e/zero/demo/2026/project-files-manage`**（`/e/demo/...` 不存在），而 HOME 解析到 `/c/Users/zero`，但活动 profile 在 `D:\Users\zero`。
-36. **仓库源文件是 CRLF**：脚本处理要保留换行（Python 侧 `newline=''`），`git` 会刷 `LF will be replaced by CRLF` 警告，属正常，不是有文件坏了。`docs/` 下的 md 是 LF。
-37. **从 Read 回显复制文本去做 Edit 可能匹配不上**：本会话实测 Read 把文件里的 `=>` 显示成 `->`，导致 `old_string` 0 命中。用 `sed -n 'X,Yp' file | cat -A` 核对真实字节再改。
-38. **Git 纪律见第 1 节红线第 6 条**。另外 `.superpowers/sdd/` 自带 `.gitignore`（内容 `*`），账本和简报不会被 stage；`git status` 开头那句「工作树 cleanliness 未知」是因为仓库配了 content filter，不是有脏文件。
+9. **真实数据目录 `%APPDATA%\dev.zero.pfm\`（`ledger.db`）是只读红线**：真机验证一律用一次性 identifier（`npm run tauri -- dev -c '{"identifier":"dev.zero.pfm.mXXtest"}'`），跑完删净，**绝不为验证改 `tauri.conf.json`**。验证前后各一次快照该目录三文件的 `size + mtime + sha256`（`ledger.db/-wal/-shm`），逐字一致才算红线守住。
 
-### F. 协作与子代理
+10. **测试断言必须可证伪**（「变异取证」）：删掉被守护的那段代码，测试要**当场红**；否则就是恒绿断言、零守护。反值心算先跑，别写只有 `assert!(true)` 语义的断言。**同一个 worktree 只允许一个会提交的实现者**（并发提交会互相踩脏工作树）；只读评审可并行。
 
-39. **账本第一行必须写 `# SDD ledger — plan: <计划路径>`**。没有它，压缩上下文后的控制器会重跑已完成的任务序列 —— 这是被观测到的最贵的失败。恢复时信任账本 + `git log`，而不是自己的记忆。
-40. **同一 worktree 只允许一个会提交的实现者**；只读评审可以并行。不要对热重载/未提交的树取验收证据。
-41. **实现者绝不派生子代理**（包括「找个 reviewer 帮我看看」）；评审只从控制方来。子代理也不得擅自新建 Skill。
-42. **派发词里不要粘历史**：简报路径 + 报告路径 + 接口清单 + 红线，就这些。曾有一个会话的派发词 42k 字符、其中 99% 是粘贴的前序任务总结。
-43. **评审包给「代码面」并声明 diff 是地图**，评审提问固定包含一条「跨模块不变量有没有被破坏」。
-44. **裁定评审发现时自己复现最便宜的那个实验**；数据生命周期类问题走成因修法，不要推到下一个里程碑只压症状；整改派发只做高价值 Minor。
-45. 本会话一个平台事实：`Agent` 工具**不暴露 model 参数**，所以「为子代理显式选模型」这条做不到，一律继承会话模型 —— 已在账本口径里记为 inherited，不要假装做过分级。
-46. **变异还原用的备份必须是「本轮编辑之后」的那份**。拿「开工前」备份 `cp` 回去会把自己本轮刚做的编辑一起回滚，而且除了 CR 计数（338→332）表面上完全看不出来。每次还原后 `diff -q` + 数 CR。
-47. **`cargo test --lib <模块名>` 的聚合行不是模块真数**：筛选走全路径子串匹配，`search` 会连 `extract::tests::real_pdf_yields_searchable_chinese_text` 这类同名巧合一起算进去（首轮报出 22 passed，模块真数是 19）。数模块条数要从**全量**输出按 `^test <模块>::tests::` 数；注意 `-- --list` 的行首**没有** `test ` 前缀（格式是 `mod::tests::name: test`），拿 `grep "^test "` 去数 `--list` 会数出 0。
-48. **`#[allow(dead_code)]` 这类临时豁免必须在本里程碑内被一条 grep 门禁回收**（M4 的形态：Task 6 落地后 `grep -rn "allow(dead_code)" src/search.rs` 期望 exit=1）。只写在注释里的「Task N 记得删」等于没人负责。
-49. **注释与测试文本也算进 grep 门禁的命中范围**：计划里给实现者的示例注释若含 `unwrap_or(50)`、`, 200)` 这类字面量，会直接把自己的门禁弄红。指针一律写「函数名 + 行号」，不写被门扫描的字面量形态。
-50. **数字链一改就要全链同步**：补一条测试 = 该模块 +1、该任务终态 +1、后续每个任务的 Expected、完成判据、交接文档表格与分模块清单全部跟着改。控制方用 `grep -n "旧数"` 收口，别指望实现者发现。
-51. **随机 id 让「删除排序键」这种变异变成抛硬币**：`project::create_project` 用 UUID v4（`project.rs:110`），并列簇在去掉名字键后按随机 id 序排，实测 10 次只红 2 次。做排序键的变异取证要用**反转比较方向**，不要用删行；确实无法守护的键（如第三级 id）就写成「预期不红」的取证条目并登记有名缺口，别伪造确定性。
+11. **子代理一律不跑 `tauri dev`/`npm run dev`**；「UI/OCR 实际渲染未验证」这类话**如实写**进「没能自动验证」清单，不许假称通过。OCR/隐私类验证脚本**只回布尔/条数/错误码名**，绝不把 OCR 出的正文文本打印进日志（红线④）。
 
-### G. 今天（10-08）新加的二十二条（52–73）
+12. **CDP 驱动 WebView2 时的两个已知坑**：`__TAURI_INTERNALS__.invoke` 可达（不需要 `withGlobalTauri`），`window.__TAURI__` 通常不存在。React 受控 `<input>` 在页面里要用 `Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set` 再派发 `input` 事件，直接改 `.value` 不触发状态更新；Radix Select 需要带 `pointerType:"mouse"` 的 `pointerdown` 才展开。**原生目录选择对话框**（`plugin-dialog` 的 `open`）是系统窗口，DOM 点不到、**只能人真点**——但本项目的 `project_set_root`/`project_add_entry` 接受**纯字符串 path**，可以在 CDP 里绕开原生框（M6 学到的）。**CDP 请求 id 计数别用 `send._i || (send._i=0)`**——`id=0` 是 falsy 会永远匹配不上响应、hang 30 s；用 `let seq=0; const i=++seq`。
 
-（标题订正：上一版写「十六条」而那一版实际列了 52–66 共 **15** 条 —— 坑 63 说的「计数词会说谎」在本文件自己身上也应验了，这次改完用 `awk '/^### G\./,/^---/' | grep -c '^[0-9]'` 核过。本轮又加 69–71 三条，标题跟着从「十七条」改成「二十条」—— **同一个计数句在同一天里第二次说谎**，所以这条标题的数今后一律用上面那条命令现量再写。本文件最后这版加 72–73 两条后改成「二十二条」，改完再量一次 = **22**，与标题一致。）
+13. **Windows 上路径细节**：源文件多为 CRLF；WinRT 的路径解析器拒绝混合分隔符与相对段（实测 `0x800700A1`），要 `canonicalize` 后**剥 `\\?\` 前缀**再落 HSTRING；`\\?\UNC\...` 的剥离目前残缺（M6 有名登记）。**Python 是 Windows 原生版**——看不见 MSYS `/tmp`，脚本里要用 `C:\...\Temp\...` 或 `E:\...` 这类 Windows 可见路径。
 
-52. **presence-only 断言锁不住键集合**：`contains_key("projectId")` 只证明「该在的在」，不证明「不该在的不存在」。线格式是契约时要用 `assert_eq!(obj.len(), 7)`，并配对一条证伪取证（临时加一个字段 → 必须红 → 删干净）。M4 的教训具体形态：T4 的 `bundle_wire_format_is_camel_case` 被控制方当成「7 字段契约已守住」报了出去，复审不采信，才补出 T6 Step 4 那条长度断言 —— **「我们决定不加 `docsCapped`」这条裁定在补断言之前没有任何闸门**。
-53. **等价变异全绿 = 那段代码零守护的客观证据**，不是「测试很稳」。某条变异改完**全量照绿**（T4 当时是 119 条），结论必须是「补测试」，而不是「这条变异不成立」。T4 的变异 6 就是靠这条把「三段之一的台账段从没被测过」查出来的。
-54. **不可满足的变异期望是计划缺陷，不是实现缺陷**：不许为了让它红而改夹具、删守卫或注随机 id。正确动作是把那条改写成「预期不红」的取证条目 + 登记有名缺口（T3 走过一次、T4 走过一次），并在账本写 `Ruling:`。
-55. **控制方不能在跑着「会提交的实现者」的 worktree 里提交任何东西**，哪怕纯文档：会和它的 `git add`/`commit` 抢 `index.lock`，而且 HEAD 中途移动会让 `review-package` 的 BASE/HEAD 对不上报告里写的范围。今天 11:33 那次交接文档提交是刻意**压到 fix round 落地之后**才做的。
-56. **「注释级 / 断言级零行为回归」不配开新的一轮派发+复审**：折进下一个本来就要改那个文件的任务（今天 6 条全进 T6 Step 4）。但**必须同时把文件名列进那个任务的 Files 和 `git add`**，否则实现者按简报的边界无权改，残留在下一轮又弹出来。
-57. **报告与简报的行号指针必然漂**（今天实测 ±1 到 ±3，还有一处顺序颠倒）：判定标准是语义目标（那段注释 / 那个函数），不是行号。要求 fix round 在报告新章节里按**本轮终态**重出全部指针；报告是 git-ignored 的 SDD 工件，漂了由控制方直接改文本，不开轮。
-58. **改计划 markdown 时，代码围栏的配对是给 `task-brief` 用的**：该脚本的 awk 按每行 `^``` ` 翻一个 `infence` 标志，围栏总数一旦变**奇数**，后续所有 `### Task N` 都被判成「在代码块里」，于是不再切边界 —— 今天插了一段带闭合围栏的散文，Task 5 简报直接暴涨到 1333 行（一路吃到文件尾），Task 6 报 `exit 3 / no heading matching`。改完计划先 `grep -c '^```' PLAN` 验偶数，再生成简报；简报行数暴涨/为 0 就是这个信号。
-59. **「模块声明归下一个任务」是计划级陷阱**：Rust 里没被 `mod` 声明的文件不参与编译，本任务的 RED 期望、`N passed`、全量条数、`cargo clippy --lib` 全都不会成立，而且失败形态是**静默的**（`cargo test --lib` 一声不响停在旧数）。补上声明后又有第二层：`cargo clippy --lib` 不带 `--tests`，`cfg(test)` 关闭时该模块每个 pub 项都没有 caller，会被逐条判 `dead_code`（`%TEMP%\dcprobe` 用 `rustc --crate-type lib --deny warnings` 实测复现）—— 所以必须同形开一块**带具名回收点**的 `#![allow(dead_code)]`，并把回收门扩成一次扫所有豁免所在文件。
-60. **一条 grep 门只挡住它写出来的那种字面形态**：T5 的门扫 `index_job::panic_to_err` 全仓 0 命中，控制方就报「悬空指针收干净了」；实际 `extract.rs:603` 的断言消息写的是 `crate::panic_to_err` —— 搬迁后同样悬空，但模式不匹配，门是绿的。改名/搬家的残留要按**符号本体**扫（grep `panic_to_err` 把每一处读一遍），或把门扩成 `crate::X\|old::X` 两种前缀（T6 Step 3 现在是五条就是这个原因）。
-61. **「并窗 / 合并」类判据的两种写法差在带宽，而不变量才是规格**：spec §五.5 字面写「后续命中落进已有窗口」，按字面拿命中自身 `start` 比上一扇右沿 → 间距落在 `(半宽, 2×半宽)` 时既不并窗、新窗左沿又越过上一扇右沿，同一段正文被拼两遍并在其间插一个代表「有省略」的分隔串，而那段一字未省。正确判据是比较**新窗左沿** `start - 半宽`。连带后果要知道：合并带翻倍后链式合并能让一扇窗接近整篇，`MAX_PREVIEW_WINDOWS` 封的是**窗数不是窗长**，`text` 载荷失去上界；给合并加长度上限会重新制造相接处（就是本坑的失效形态），所以只能接受并在真机侧看观感（T9 Step 2 第 7 条）。判据换形时，旧夹具的间距必须重算 —— `four_spaced_hits` 看不见这个缺陷只是因为它的间距 10002 恰好在带外。
-62. **报告里「提交后又复跑了一次」如果耗时逐字相同，就是复贴不是复跑**：T5 fix round 的报告里提交前后两次 `cargo test` 报出完全一样的 `7.84s` / `0.35s`。本轮结论没受影响（另有 md5 与 `git status` 干净作字节级 dedup 证据），但「复跑」这一格要的证据形态是**两次之间必然不同的东西**（时间戳、或改动前后的对照），派发词里要提前写明，否则这条自证毫无强度。
-63. **计划/简报里的「计数词」是第二个会说谎的地方，比行号更难发现**：Task 6 Step 4 标题写「四处文本残留」而下面编号到 6 条（六条里 5 条落 `search.rs`、第 5 条落 `index_store.rs`），实现者只能猜 —— 它猜成「四处 = 1–4」并把六条全落地，是唯一安全读法，但那是侥幸不是流程保证。同形前科还有坑 60（门只挡它写出来的那种形态）。修法：Files 与 Step 标题里的计数句必须和编号同批写；一旦发现不符，按 `sdd-plan-revision-fix-loop` 入口 B 改本体 + 重切简报，别留给下一轮去猜。
-64. **Tauri 命令默认 `execution_context = Blocking`，Windows 上 sync 命令占的就是 WebView2 消息泵那一个线程**：所以「先出锁再做慢 IO」在 sync 形态下**不会**让别的 IPC 进得来 —— 它们连不上那个线程。要换线程必须写 `#[tauri::command(async)]`（对非 `async fn` 生成 kind `sync_threadpool`，`$path(...)` 被放进 `async move` 块、再由 `async_runtime::spawn` 投递）。三条同源事实：① 全仓 `Mutex<Connection>` 只有 `lib.rs:37` 一处取锁、38 个调用点全在 IPC 命令里，后台索引线程自己开连接（`index_job.rs:402`）⇒ **没有 async 之前那把锁无人竞争**，「锁外抽盘」对界面延迟的真实收益是 0，加了才第一次承重；② `async` 让同类命令**可能乱序返回**（sync 下由消息泵天然串行，这事以前不可能发生）⇒ 前端 `seq` 守卫从防御性写法升为承重设计；③ 运行时兑现单测证明不了，只有真机并发对账那一格。取证位置（本机 vendored 源码，逐行读过的）：`tauri-macros-2.7.0/src/command/wrapper.rs:245/:257-258/:355/:382-389`（`$path` 在 `:384`）/`:425/:427`、`tauri-2.12.0/src/ipc/mod.rs:371/:375`、`wry-0.57.0/src/webview2/mod.rs:944-978`、`tauri-runtime-wry-2.12.0/src/lib.rs:5289-5307`。
-65. **写进规格的行号引用必须当场 `grep -n` 取，不能凭「我刚读过」的印象**：本轮我在计划里把 `body_async` 写成 `:354-362`，第一次纠正成 `:357`/`:383-388` —— **那个纠正本身还是错的**，fix round 1 复审后重 `grep` 才落到真值 `:355`（`fn body_async`）/ `:382-389`（生成体，`$path` 在 `:384`）。也就是说同一处引用连错两次，而两次都是「我刚读过」的产物。而「`$path` 在 `async move` 块**内**」这一格才是裁定成立的关键，引用漂了就等于把一个正好支撑结论的证据弄丢。规格里的假行号比没行号更坏：下一个读者去那一行找不到东西，然后会怀疑整段。
-66. **往 markdown 表格/文档中间插行：`old_string` = 锚点行、`new_string` = 只写新行 ⇒ 把锚点整行覆盖掉**（本轮 HANDOFF §2.2 的 T5 行被 T6 行吃掉一次，靠读回才发现；同形前科是账本里以 `## 暂停点` 标题为锚插入、两次毁掉那个标题）。做法：插行时 `new_string` 必须**原样重复**锚点行，或者改完立刻 `Read` 那一屏确认。
-67. **复审给出的行号读数，采信前自己到实时树上一格一格重核**：T6 复审对 `lib.rs:542` 的判定是「仍落在 `search_docs` 头注释那一格内 ⇒ 不是假话，只是脆」；控制方按派发词里「别转述，实时核对」的要求重跑，`sed -n '542p'` 打出来是**空行**（`:543` 才是头注释、`:545` 是 `fn search_docs`、clamp 在 `:551`），而离 542 最近的代码 `:538` 属于**另一条命令** `index_docs` 的 clamp ⇒ 严重度从「脆」升到「当下就指错」，归属不变（仍落终审）但描述变了。同类漂移跨三个文件（`index_store.rs:275`/`:671`、`search.rs:21` 都写 `542`），所以修法不是补一个正确数字，而是**换成符号指针 + 跑一次 `grep -rn "lib\.rs:[0-9]" src/` 清扫**（注意 `extract.rs:31` 那条指向的是依赖包内的 `lib.rs`，不属本仓指针，别一并改掉）。
-68. **转述评审/复审「它还要求改 X」之前必须回到它的原文定位 X；缓存文件会消失**：本轮把一条 `extract.rs:574-576` 的「跟着改期望」写进了 HANDOFF 终审清单，随后要去核对时发现复审的那份输出落在 `%USERPROFILE%\.qoder\cache\...\agent-request-*-received.txt`，**会话中途已被清理、文件不存在了**。核查后确认那两处（`extract.rs:575-581` 的 release-abort 守卫、计划 Task 2 的摘边界取证条目）讲的分别是 release `panic = "abort"` 和测试线程，都不依赖命令体在哪条线程，**根本不需要跟着改** —— 于是把那一格改成「同批核对过、确认不需要改」的正面记载。教训：评审要求里凡是会变成下游任务的**行号/文件级动作**，落档时要么当场从原文抄出可复核的字面，要么只写自己到实时树上核过的，否则缓存一没就只剩我自己的想象。
-69. **计划正文的「Expected」可以理直气壮地写一条守不住任何东西的门禁**：Task 7 Step 4 原文写「`npm run build` exit 0 —— tsc 段守类型，`ranges: [number, number][]` 与 Rust 的 `Vec<(usize, usize)>` 线格式对不上就会在这里红」，实现者照抄进报告，评审一戳就破：**Tauri 的 `invoke<T>` 是类型断言不是校验，前后端之间没有任何编译期耦合**，Rust 侧改字段名时 tsc 一个字都不会报。这条与坑 52/53 不同族：那两条是「断言太弱」，本条是「散文把不存在的守护说成存在」，而散文不会红，只有去读依赖侧结构体的人才看得见。做法：凡 Expected 里出现「X 会抓到 Y」这类句子，先问一遍「Y 坏掉时 X 到底会不会红」，答不出机制就是假门禁，就地改写并把真对账路径写出来（本轮改法是 `search.rs` 既有的 `bundle_wire_format_is_camel_case` + 评审逐字段读两个 `#[serde(rename_all)]` 结构体，并把 `DocPreview` 没这层测试登记为有名缺口）。
-70. **控制方自己的派发词也会犯它写在坑 19 里的错，而且错得更隐蔽**：我在 T7 派发词里写「node v24.18.0」，那是 **harness 环境元数据**里的值，本机 PATH 上实为 **v26.3.0**（`which node` = `/d/tools/nodejs/node`）—— 而计划 `:51` 与坑 19 早就把这条写对了，是实现者实跑 `node -v` 把我纠正的。两个结论：① 平台元数据不是实测，写进派发词前同样要现查；② 把实测事实写进计划正文（本仓的「已实测事实」表）真的会在下游救回来 —— 这条是它的一次正面回放。
-71. **测试名里承诺的行为也算一条断言，必须有夹具钉住；判定方法是做一次「交换/合并/借用」变异**：T7 第 3 条的名字写「有内容的段按 项目 / 台账 / 正文 顺序产出」，但 8 条夹具**没有一条让两段同时非空**（`sections[0]` 全来自单段夹具）⇒ 把 `bundleToSections` 里 ledger 与 docs 两个 `if` 块整体交换，8 条照绿（控制方实测：`pass 8 / fail 0 / exit=0`）。补上「三段同现」夹具后同一处交换变红（`pass 7 / fail 1`，失败点指名第 3 条）。可迁移的判据：测试名或注释里出现「顺序 / 各自 / 互不 / 只追加一次」这类关系词时，就用**交换输出块顺序**、**合并两个分支**、**让 A 段借用 B 段的计数**这三类变异去证伪；红不了就是零守护，按坑 53 走「补测试」而不是「这条变异不成立」。**复审把这条推得更远**：被测函数若是**静态块序**（没有输入相关的排序逻辑），一条**整数组** `deepEqual` 会传递性地覆盖所有两段同现的子序（六种排列只放过恒等式），于是一格「我以为只自证了一半」的断言其实全守住了 —— 这既可能让人**高估**也可能让人**低估**覆盖度，而唯一分辨办法还是那句：自己跑变异，别读报告。
-72. **派发词里同时写「改写 X 节」和「不要删旧内容」= 把冲突丢给实现者裁决**：T7 fix round 的派发词两条都说了，实现者只能发明第三种读法 —— 它选了「假句**原位保留** + 紧贴下方一句『是假的，本轮撤回』+ 完整新叙事**另置** §8.3」。复审与控制方一致判**可接受**（线性阅读者不可能越过假句而不撞见撤回；报告是 gitignored 工件，误导面止于本目录），但那是侥幸。**规则**：改派发词时，凡对同一处文本同时下达「替换」与「保留」两种强度，必须当场写清哪一种赢；否则下游的读法不在你的裁定里，复审就没法判它对错。
-73. **控制方自己的一次计划编辑，就是下游行号的漂移源**（坑 65/67 在本文件身上**第三次**应验）：我在 §6 指针里写了 `T8 = 1993`、`T9 = 2311`（那是 `10ba0ef` 时的真值，计划 2403 行），而**我自己随后又改了两次计划**：`3a2cfc8`（T7 派发前预检）净 +10 行 ⇒ T8 到 `2003`，`c2b3d35`（T7 首轮评审裁定）净 +18 行 ⇒ T8/T9 落到 `2021 / 2339`（现 2431 行）。两次合计把下游整体推下 **28 行**，而这 28 行全是我自己写的。前两次（坑 65、坑 67）的错数来自「我引用别人给的读数」，这次是**我自己量的数被我自己随后的编辑弄漂** —— 漂移源换成了控制方本人，所以更隐蔽：它躺在「指针」这一节里，读者会当成权威去 `sed -n`。**规则**：文档里凡是指向**会变的文件**的行号，一律写命令（`grep -n "^### Task" PLAN`）而不是数；确实要留读数就标「只作对照，取数只认命令」。
+14. **计划文本自身错了走「改文本闭环」而不是加评审轮**：裁 → 修订计划本体 → `task-brief` 重生成该任务简报 → 账本与计划一起提交 → 带明确 FIX_BASE 派发 fix round 复审；**注释级零行为回归不重开派发+复审轮**（控制方当场改准，改完重跑受影响的结构门）。
 
----
+## 6. 关键指针
 
-### H. 今天（10-09，Task 8 这一轮）新加的六条（74–79）
-
-74. **「写了没人读」有两种强度，简报逐字给代码时两种都要当场查**：`busy` 那种（声明了、effect 里写、JSX 从不读）会被 `noUnusedLocals` 抓成 `TS6133`，**编译器替你看着**；`LocalSearchState.query` 那种（interface 成员 + 初值 + 两处 `set` 全在、全仓零读取方）**tsc 一个字都不报**，只有主动问「谁读它」才能抓。T7 预检的 `FieldHit`、T8 预检的 `as HitSource`、T8 定稿的 `busy`、T8 评审的 `query` 是同一条坑的四次应验，强度依次递减。**判据**：对本轮新增的每个 state 字段 / interface 成员 / import 做一次读取方点名，答不出就删。
-75. **给「总是挂载」的组件加状态，必须列出「effect 每个分支清哪些格」**：M-8 就是这么漏的 —— `DocPreviewDialog` 的 `useState` 挂在宿主无条件渲染的那个组件上（关窗只卸载 `DialogContent`，不是卸载组件），而 `notice` 只有 `guard` 的成功路径清、effect 的两条分支都不碰 ⇒ A 文档的「操作失败」红字跨到 B 文档上。**「组件卸载所以状态自然消失」这个假设在受控对话框里根本不成立**。修法一行级（effect 顶部 `setNotice(null)`），但要紧的是流程：新状态的清除路径必须逐条写明，不能靠读者推断。
-76. **兜底格式化对真实 rejection 形状是盲的，而一个 `catch` 里三种形状都会出现**：当场 `node -e` 验过 —— `JSON.stringify(new Error("x"))` = **`{}`**（`message` 是不可枚举自有属性），`String({code:"a",message:"b"})` = **`[object Object]`**。也就是说 `ipc.ts::toAppError` 那句 `JSON.stringify(e)` 兜不住 JS `Error`，而 `project-detail.tsx::guard` 那句 `String(e)` 兜不住后端 AppError 形状的普通对象 —— **两处各只覆盖一半，方向还相反**。Rust 侧回来的（对象）、插件抛的（裸字符串）、JS 自己抛的（`Error`）三类都会进同一个 `catch`，所以兜底分支必须显式分派三种，不能只写一个 stringify。
-77. **派发词里指定「追加为报告第 N 节」之前必须先 grep 现有标题编号**：我在 fix round 派发词里写「追加为 §八」，而首轮报告已经有 `## 八、遗留 / 建议` ⇒ 撞号。实现者没擅自给别人定稿的正文重编号（对的），控制方当场把新节标题改成 `九`、节内 `8.x` 小节沿用并在节首注明。报告是 gitignored 工件 ⇒ 直接改文本、不开轮（坑 57 同口径）；但下次凡指定章节号，先 `grep -n "^## " 报告` 再写。
-78. **具名风险写成「状态机 / 不变量」的形式，复审就会在 diff 之外找到东西；写成「功能对不对」它只会打勾**：本轮 NR-1 问的是「`notice` 与 `error` 会不会互相盖掉或残留」，复审的结论是 NOT SETTLED —— 互相盖掉**没有**（两格写路径不相交，它逐处列了 `setError`/`setNotice` 的落点），但**跨文档残留**有，于是带出新 Minor M-8。如果那条风险写成「预览失败处理对不对」，它会答「ADDRESSED，有 catch 有回执」然后收工。同形前科是坑 62：证据形态要求写死（「两次之间必然不同的东西」），自证才有强度。
-79. **「代码是简报逐字给的」不减轻 finding，只改变处置路径**：T8 的 I-1（`void api.revealFolder(...)` 吞掉设计承认会失败的动作）与 M-8 都是简报自己的形状。评审照样按级别提，但裁定必须是「**先改计划本体，再派 fix round**」（本仓闭环），而不是「实现者临场发挥补一下」。反过来也成立：实现者按简报写出缺陷代码时，只要在报告里点名「这是简报的形状」，控制方就不能把它记成实现质量差 —— 本轮实现者两处都这么报了，判为正确处置。
-
-### I. 今天（10-09，Task 9 真机 + D6 这一轮）新加的六条（80–85）
-
-80. **探针 / 夹具脚本本身就是被测环境的一部分，它错了会把结论整体带走**：这一轮我自己的探针连续三次误引导 —— ① 量渲染卡顿时「点击之后每轮开头都点一次『关闭』」⇒ 刚打开的对话框被自己关掉，读数成 `marksAppearedMs = null`，我当场把它记成「渲染 160 秒不出来」；② 嵌套模板串里的正则被转义打坏 ⇒ 探针静默挂死 25 分钟；③ 一个 `[class*=outline]` 的选择器打穿对话框内容 ⇒ **违反本仓红线第 5 条**，把生成语料整段打印进上下文。**规则**：CDP/DOM 探针每步单独一次 evaluate（别写大循环）、只回布尔/计数/文案前缀、超时给足并且**失败先怀疑探针而不是被测**。三次里只有一次是真发现（M-8），而那一次的证据也是换成小步探针之后才拿到的。
-81. **给 sync 命令做 CDP 计时，必须在空队列上取**：超时不会取消服务端那次执行 —— 它会留下**孤儿调用占住消息泵那一个线程**，于是后续每一次测量都排在它后面，读数逐次递增（我这轮 `search_all` 从 32 s → 240 s 就是这么来的，看着像一个性能发现，其实是探针事故）。两个处置：要么每次超时后先等队列排空（用一次便宜的 `db_status` 探，回到个位数毫秒才算空），要么把长任务改成小步分别 evaluate。**同一条也解释了为什么 async 的命令不会这样：`db_status` 3 ms 就能插进去。**
-82. **会改库状态的索引动作要排在依赖旧状态的断言之后**：D6 那轮跑了 `index_start(rebuild: true)`，它把断言 5 依赖的那格状态（「文件已从磁盘删掉但库里还留着 `ok` 行」）扫成了 `missing` ⇒ 我随后给需求方设计的接力实验直接做不成（她回「没有命中」）。**取证顺序 = 先用旧状态跑完所有断言，再做会改状态的步骤**；已经改完就得另造一份等价夹具（本轮后来新建 `红字残留实验.txt` 只索引到单个项目、`rebuild: false`，就是为了不再动别的行）。
-83. **观察类结果不要从数据库反推，一次一问直接问**：我试图用 `project_list` + 扫 `index_docs` 路径判断需求方那三下有没有做成，但软删 + 索引清扫已经把证据抹平（只剩「项目数回到 4」这种两读事实）；我甚至一度想用只读连接去打开那个 WAL 正被应用占着的库 —— **打不开，也不该打**（第二个连接会参与 checkpoint）。改成一次一问，第一问就拿到决定性事实（红字没跨文档），而它比我猜的结论更好：顺着它读出了 `busy` 那格与结果树互斥卸载这条机制。**判据**：凡「只有人眼能看见」的读数，问人；数据库只用来回答「状态有没有落盘」。
-84. **判据里的「且」要按证据重写议题，既不按字面放过也不硬凑**：第 7 格写的是「`text` > 6 万码元 **且** 渲染明显卡顿或滚动失效 ⇒ 升级终审」。实测载荷那半边 114 万 ≫ 6 万成立、渲染那半边不成立（`longTasks` 全空、rAF 1 ms、20 万次同步循环 2 ms）⇒ 按字面就该「记数字收口」放过了。但真正不可用的是**等 160–266 秒且对话框只有『关闭』没有取消**（关掉只卸载前端，后端那次抽取照跑完）。裁定：照样登记终审，**议题写成「极端单文档成本 + 无取消」**而不是「渲染卡顿」—— 因为议题决定下一轮改什么，写成卡顿就会去给合并加长度上限，而那正是 Task 5 Important-1 修掉的相接窗失效形态的重演。
-85. **改一个常量要顺着它把「名字里的数字」全查一遍**：D6 三个上限 20/10/10 → 30/15/15 牵出的不是三行赋值，而是 ① 两条测试的**函数名**本身就嵌着数字（`section_drops_the_21st_cluster…` / `cluster_keeps_10_items_and_reports_the_other_2`）② `cluster_by_project` 上方的注释**按测试函数名**点名证据（写着「21st」「21 个等条数簇」）③ 夹具里的字面量 `"p20"`（代表「名序最大的那一簇被扔掉」，上限变 30 后它不再是被扔的那个）。漏掉任一处，仓库里就留下一句假话，而 tsc、cargo、clippy 都不会报。本仓被「名字/注释与实现脱节」咬过四次（坑 57/60/63/71），这次是第一次发生在**常量**而不是代码位置上。**判据**：改常量后跑一遍 `grep -rn "<旧值>"` 加上「谁在注释里提这个名」的 grep，两处都要 exit=1 才算收干净。
-
-### J. 今天（10-09，整分支终审、整改与合并这一轮）新加的七条（86–92）
-
-86. **门禁命令的「作用域」必须和它自己承诺的「预期残留」在同一棵树里**：终审 §8 第 2 项给的清扫门写 `grep -rn "lib\.rs:[0-9]" src/`，而它承诺的残留 `extract.rs:31` 在 **`src-tauri/src/`** —— 本仓有两棵 `src/`（前端与 Rust），照字面跑那条门产出的是前端 `src/types/index.ts:3` 那句 `lib.rs:66-73`，**永远看不到它承诺的那条残留**。同形前科是我自己写的「密文列扫描应 exit=1」：`db.rs` 的建表语句自己就定义着那些列，那条门永远不可能成立（红线第 4 条已改写）。**规则**：写门禁时当场跑一遍「改前应为」，确认它能产出**非零**命中并且命中的文件路径在承诺的那棵树里；只写「改后应为 exit=1」的门等于没有门。
-87. **tracing span 的字段名不是执行机制**：spec §五 原稿（我写的）从 `kind = "sync_threadpool"` 推出「命令体走 `spawn_blocking` 线程池」。终审去读 vendored 源码，我这轮独立复核过：`grep -rn "sync_threadpool" ~/.cargo/registry/src/*/tauri-macros-2.7.0/src/` = **恰好 1 行**（`command/wrapper.rs:258`，`ExecutionContext::Async if function.sig.asyncness.is_none()` 那条 match 臂产出的一个 `&'static str`），而 `tauri-2.12.0/src/` **整棵零命中** —— 它只是一个被塞进 `log::trace!` 的标签，没有任何调度语义；`grep -rn "spawn_blocking" tauri-2.12.0/src/ipc/` 同样 **0**（`async_runtime.rs` 那 10 处全是它自己的 API 定义与文档示例，不在命令派发路径上）。⇒ 命令体直接跑在 tokio **多线程** worker 上，连点 N 份慢预览 = N 个 worker 占死（spec §十一 第 6 条）。**规则**：凡是「某 API 内部会怎么调度 / 会不会吞错 / 会不会 abort」这类论断，必须看到 **`spawn` / `spawn_blocking` / `set_hook` 这个调用本身**出现在派发路径的文件里；看到一个语义相符的**字符串常量**不算证据。同族：坑 1（`pragma_update` 的 Ok/Err 不携带信息）、坑 69（`invoke<T>` 是断言不是校验）。
-88. **同一处缺陷被两个任务各登记一次，账面就凭空多一条待办**：终审前我攒的 14 条残留里，T9-5 与 T6-2 是**同一格**（内部行号指针漂），我登记时按发现次序计数、没按「文件 + 符号」去重。撤销的六条里就有这一条。**规则**：往跨任务清单里加条目前，先 grep 已有条目看有没有指向同一处的；收口时按「文件+符号」去重再报数，报「几处」比报「几条」诚实。
-89. **「X 被 Y 守着 / X 被 Y 用着」这类理由，落笔前必须给出一条可跑的 grep 和它当前的命中数**：终审证伪我的四条里有三条是同一形 —— ① 「`search.rs` 那句注释被 3 条 Rust 测试钉着」：全仓 `include_str!` 实测 **2 处**（`extract.rs:585` 读 `../Cargo.toml`、`tokenize.rs:334` 读自己），没人读 `search.rs`，改注释不增删测试；② 「`SOURCE_ORDER` 被 `field_hits` 在用」：`field_hits` 是 Rust 函数，永不消费 TS 常量 ⇒ 裁定删；③ 我把 `ledger_notes.body` 当密文列写进派发词：`db.rs:262` 是 `body TEXT NOT NULL DEFAULT ''`，明文。共同点是**它们都没有被任何命令验证过**，只是我按语义顺推。**规则**：这类理由要么当场 grep 出命中数，要么在派发词里明写「未验证，核对路径是 X」。
-90. **「逐字替换文本」里不要含被本仓零命中门守护的字面量 —— 抄进代码会自咬**：我在 HANDOFF 给 T6-1 的替换块写了「本仓没有 `panic::set_hook`」这句（信息本身正确、复审也到 vendored 源码验过是真话），而本仓有一条门是 `grep -rn "set_hook" src-tauri/src/` **应为 exit=1**。实现者如果逐字落地，那句注释自己就成了唯一的命中 ⇒ 门变 exit=0，看起来像「有人装了钩子」或「门失效」。它的处置是对的：**保留全部信息、把字面量换成描述**（「本仓没装 panic 钩子（那条零命中门不许被这句注释打红，所以刻意不写它的字面量）」），门复跑回 exit=1，我裁定维持改写版而不是改门口径。**这是坑 12 的反向同族**：坑 12 是「测试里别写死会被本任务 grep 门判成违规的字面量」（T4 用 `DOCS_FETCH_LIMIT` 而不是裸 `200`），这一条是「**给别人的逐字文本**里也不能带」，因为写文本的人不会去跑那条门，而抄文本的人会。**规则**：凡是「期望零命中」的门，把它守护的那个字面量在任何交付物（简报、替换块、注释模板、commit message 模板）里出现一次，就要在派发前跑一遍那条门确认落点不在被扫的树里。
-91. **首次给仓库接远端 = 一次「发布」，不是「备份」，推之前要按发布来扫**（10-09 需求方要求把代码推到 GitHub 时踩出来的）。四条必做：① **先确认远端是什么状态** —— `git ls-remote --heads <url>` **exit=0 且零行输出 = 库存在但是空库**（不是失败，别看到没输出就以为连不上），而这条命令只证「可读」，不证有写权限；本机没有 `gh` 就**推之后无法再改可见性**，匿名能读通常意味着它是 public。② **扫「被跟踪的内容」而不是「当前工作区」**：`git ls-files` 对照 `\.env|secret|token|credential|\.key|\.pem|\.db$|node_modules|target|\.superpowers`，再 `git log --all --diff-filter=A --name-only` 扫一遍**历史上加过的所有文件名**（只看树会漏掉「曾经提交过、后来删掉」的东西）—— 本仓这次扫出的唯一命中是 `tokenize.rs` 里含 `token` 子串的假阳性，`.superpowers/`（实现者报告 + 真机证据）靠它自己那行 `*` 的 `.gitignore` 排除在库外。③ **内容级扫一遍凭据形状**：`git grep -nIE "(password|passwd|密码|secret|api[_-]?key)[\"']?\s*[:=]\s*[\"'][^\"']{4,}[\"']"` 与一条 base64/hex 长串门。本仓扫出一条**测试夹具字面量** `"机密串-Zhang@2026"`（`index_store.rs:616` 与 M3 计划文档各一处，纯测试用、不是真凭据），但它进了公开历史就删不掉了 ⇒ 记在这里。④ **`docs/` 里的业务上下文是独立一栏**：本仓的 `docs/技术方案.md`、`HANDOFF.md`、`开发进度.md` 含真实项目名、`E:\zero\...` 与 `%APPDATA%\dev.zero.pfm` 这类本地路径。**「推上去」这个决定只能由需求方做**，控制方给出的选项要按「可见性 + 要不要含 docs + 要不要含完整历史」三项摆开，别替他选（本轮他选了「全推：含 docs 与完整历史」）。
-92. **文档里写下的「核对命令」必须当场跑一遍 —— 我这次给的是一条根本跑不通的**：合完 `master` 我在 HANDOFF 与 `开发进度.md` 各写了一句「核法：`git rev-parse --short master feat/m4-unified-search` 应相同」，**第一次真跑就是 fatal: Needed a single revision**（`--short` 只接一个 rev，多接直接报错，与分支名无关）。可用的形态：`git for-each-ref --format='%(refname:short) %(objectname:short)' refs/heads/master refs/heads/feat/m4-unified-search`（当场 exit=0，两条同 SHA）；`git show-ref --heads master feat/m4-unified-search` 也行，但 `git show-ref --verify --heads master` 反而 exit=128「not a valid ref」（`--verify` 要全名 `refs/heads/master`）。**同轮还第二次踩了坑 65**：用 `git show-ref ... > f; echo "$?"` 之外的 `cmd | head -3; echo exit=$?` 形态读到了 `head` 的状态、把失败当成成功。**规则**（本仓第五次抓同一形，坑 73/86/89 是它的三个近亲）：凡是交付物里写给「下一个人」执行的命令，落笔后当场执行一次，并把退出码与输出前几行一起贴进报告；给不出实跑读数的命令句就改成描述形态（「两条分支应同指一个提交」）。
-
----
-
-### K. 今天（10-10，M5 这一轮）新加的八条（93–100）
-
-93. **「门禁正则」有四条是我自己写错的，而且全都长得像能过**。形态只有两种：门与被引用的仓库现实/计划蓝本互斥（`allow(dead_code)` 门 vs 蓝本给的豁免；`20971520` 全 `src-tauri/src/` 作用域 vs M1 起就有的三处合法命中），以及**数法本身不成立**（常量名在注释与断言消息里还会各出现一次，于是 `grep -c 常量名` 永远读不到「定义处那条」；`grep -c "^test <模块>::"` 要从**全量**输出数而不是筛过的尾巴）。⇒ 写门的时候**先当场跑一遍拿到实数，再把数字抄进计划**；已经落盘的门发现错了，就改计划文本（并让账本留下「门错在哪」），**绝不允许反过来删注释/改名去过门**。本轮四处全踩过，见 §2.3。
-94. **门要跑到边界元素**：`generate_handler!` 的计数正则写成「行尾必须有逗号」⇒ 宏里最后一项没尾逗号 ⇒ **恒读 40**，而 41 才是对的。这类「少算最后一个」在 `sed` 截段、`grep -c` 数行、`awk` 取列上都成立。⇒ 任何「数条数」的门，都要先在**已知答案**的对象上跑一遍（本轮已知：M4 收口时命令数就是 41），读不到已知值就是正则错，不是代码错。同一件事本轮我又踩了一遍（见 §4.1 的门禁读数），因为它太像「代码少了一条」。
-95. **`cd` 残留会把门禁读数打成失败**：真机阶段我 `cd` 进了 `%APPDATA%` 与 `%TEMP%`，下一条命令跑 `cargo clippy` 时报 **exit=101**（那里没有 `Cargo.toml`），看着像代码坏了。⇒ 每条门禁命令**显式锚目录**（`cd /e/zero/demo/.../src-tauri && ...`），或在报告里同时写下 cwd。同族的还有一条：`ls -d 目标; echo $?` 里 **2 = 不存在**，别把「目标已删净」读成命令失败。
-96. **`echo "x_exit=$?"` 前面一旦有管道，取到的就是管道尾的退出码**（本轮在 `cargo test | tail` 上又取到一次假的 0，`git push` 也差点）。⇒ 门禁取证一律 `cmd > /tmp/x.log 2>&1; echo "exit=$?"` 再 `grep` 日志，别 `cmd | tail; echo $?`。
-97. **批量 `sed -i` 的文件清单必须逐字列出**：本轮一次 `sed -i` 顺手把历史文档 `docs/开发进度.md` 的旧段落一起改了。所幸内容经 `cmp` 逐字节验证一致、`git checkout --` 还原，没有损失。⇒ 教训是**「工作树脏但 `git diff` 看起来空」时先做字节比较再决定怎么处置**，不要直接 `checkout` 也不要直接提交。
-98. **探针的夹具设计能把被测代码带进平方级**（这条最贵，占了本轮一小时多）。第一版「慢文档」= 同一句 22 字重复 195,500 次的 8 MB 文本，意图是「抽取慢」；结果 `doc_preview::stitch` 对每个命中做一次 `utf16_len(&chars[ws..hs])`，成本变成「命中数 × 窗长」⇒ **单次预览挂起 >9 分钟不返回**，还把 I-5 的单飞闸门一直占着，看起来既像产品死锁又像闸门失效。把同一尺寸改成「大而只有一处命中」⇒ 586 ms 返回。**⇒ 造「慢」夹具要按被测的**成本驱动量**选维度**（这里是命中数与窗长，不是字节数）；挂起先怀疑夹具与探针，再怀疑被测。附带记一条真 finding：这条平方级路径在真实语料上是否可达仍未验证，已登记 M5.5（§3）。
-99. **删过重造的沙盒里 uuid 全是新的**：`t10-run.mjs` 的 `ids` 阶段原本写死上一轮两个项目 id，新沙盒上直接空手而归，看起来像「索引没建行」。⇒ 一律**按项目名现取 id**（`project_list` 里 `x.name === name`；注意 `Project` 上**没有** `deletedAt` 字段，软删的在 list 里已被过滤掉，写 `x.deletedAt === null` 会恒不匹配）。另两条同族：`index_docs` 一页只回 200 行，跨项目找文件必须带 `projectId`；`DbStatus` 没有 `rename_all`，回的是 snake_case key。
-100. **写侧排队是能被自动轮打出来的，且会打成用户可见失败**：`project_update` 在自动轮进行中的八连读数是 879 / 4253 / 4260 / 4256 / 4468 / 4257 / 26 / 168 ms，另一轮 **5565 ms 且 `code=db_failed`**。机制是「主线程命令持着 `Mutex<Connection>` 等 SQLite 让写锁」，天花板是 `busy_timeout` 的 5 s。⇒ 给「自动轮不拖慢 IPC」取证时**必须同时量读侧和写侧**，只量 `db_status` 会得到 2–10 ms 的漂亮数字并把问题漏掉；本轮那条错误 message 原文没抓回来（探针那版只回 code），要复现就在轮里连发多次写命令直到越过 5 s。
-
-### L. 今天（10-12，M5 整分支终审这一轮）新加的三条（101–103）
-
-101. **「为什么这一格没有测试」的理由必须写机制，不能写成环境限制 —— 假理由会把下一个里程碑引向「无解」而不是「缺一个注入缝」**（本轮最值的一条，由终审评审者证伪我自己写下的话）。我在 `docs/开发进度.md:116` 写的是「真实 `App` 起不来的环境里 `tauri::test` 不可用」，评审者去读 vendored 源码后判定这句**是假的**：`tauri-2.12.0/src/lib.rs:1129-1131` 是 `#[cfg(any(test, feature = "test"))] pub mod test;`，`Cargo.toml:123` 的 `test = []` 只是个空标记 feature，`src/test/mod.rs:166` 的 `mock_builder()` 返回 `Builder<MockRuntime>`、**不创建真实窗口**，`.build()` 会跑 setup 钩子。控制方随后自己到那三处逐行复核，确认评审者对我错。**真实阻碍只有两条，而且都是本仓自己的约束**：① 要让本 crate 的 `cfg(test)` 看见 `tauri::test` 得开 `features = ["test"]` ⇒ 撞本轮硬边界「`Cargo.toml` 一行不动」；② `mock_context` 把 `identifier` 设成 `Default::default()`（空串）、`app_directories_override: None`（`test/mod.rs:116`/`:125`）⇒ setup 里 `app.path().app_data_dir()` 会解析到**真实用户目录**，`db::open` 就在那儿落 `ledger.db` ⇒ 撞红线二。**判据**：凡登记「本机/本环境构造不出」，理由要落到**具体哪个输入构造不出来**（如 `thread::spawn` 要 commit charge 耗尽、纯静默拒绝 WAL 要网络盘），并且顺手写一句「**如果非要它可测，最小改法是什么**」。两条假理由的代价形态不同：「构造不出」只是没证据，「环境不支持」会让后来人根本不去试。同族（但反过来）是坑 89 —— 那条是「X 被 Y 守着」的**正面**假声称，本条是「X 守不了因为环境不行」的**负面**假声称，两类都得给出一条可跑的核对命令才算落档。
-102. **交付摘要里「全仓唯一 X」式的保证，措辞会超出代码实际提供的东西；不变量要按「哪一类写入点」限定**：本轮写的是「`mark_missing` 是全仓唯一写 `index_status='missing'` 的地方」，评审者 grep 后发现 `db.rs` 的 CHECK 枚举用例 `index_status_check_accepts_the_five_documented_states` 用裸 `INSERT` 也写过一次 `'missing'` —— 那不是产品通路，但**字面上「全仓唯一」不成立**。⇒ 准确形态是「**唯一生产写入点**」，并把那个例外点在同一条句子里点名（已回写 `docs/HANDOFF.md:16` 与 spec §三）。同族是坑 89（「注释被 3 条测试钉着」）与红线第 4 条（全仓密文列 grep 门永远不可能成立，因为 DDL 自己就定义那些列）：**这三条都是同一个失效 —— 把「作用域内的不变量」说成「全域的」**。写保证时当场问一遍「有没有一条测试/建表语句/夹具也会做这件事」。
-103. **终审的必修格若全是文本 + 一句界面文案，控制方直接落地、不开整改轮（要记为裁定，不是悄悄省）**：本轮 0C 2I 10M，其中两条 Important 与四条 Minor 的动作面是 spec/开发进度/HANDOFF 的文本加一处注释指针，另两处是 `index-status.tsx` 的两句文案（零行为改动、不碰线格式）。按坑 56「注释级零行为回归不配重开一轮派发+复审」执行：控制方自己改，然后在开发进度的变更日志与账本各点名一次「本轮未派整改轮、理由是什么」。两条前置纪律：① 改注释前后要**重跑受影响的结构门**（本轮 `SET index_status = 'missing'` 恰好 1 行、`tauri::command(async)` 恰好 1、`generate_handler!` 41 —— 注释里写这些字面量会把零命中门打红，坑 90 同形）；② **代码面改动一旦超过注释/文案层级就必须派轮**（本轮 tsx 那两处是纯字符串，判为可自落；若动到状态机或 IPC，本条不适用）。反例是 M4：终审 13 项里有代码动作，老实走了一次 fix 派发 + 定向复审。
-
-104. **16 G 机 `tauri dev` 撞提交内存上限 ⇒ 真机走 headless `--lib` profile 直驱真代码链（不是 retry 一次能救的）**：本机 `FreeCommit` 会掉到 9 MB 甚至 bash 连 fork 子进程都失败（Win32 error 299/`0xC0000142`/`errno 11`），`cargo build` 的 `project_files_manage_lib` 最终 codegen mmap `windows` 那个大 rlib 时 `os error 1455`「页面文件太小」崩，报的是 `error[E0786]: found invalid metadata files`（**这不是栈溢出、不是元数据真坏、不是代码 bug**）。四条常见调优都试崩在同一处：`CARGO_BUILD_JOBS=1`、`RUST_MIN_STACK=32M/64M`、`CARGO_PROFILE_DEV_DEBUG=0`、组合起来的四轮。**关键分岔**：`cargo test --lib`（只 emit rlib）能编过 → `tauri dev` 走 staticlib+cdylib+rlib 三 emit + debuginfo=2，同一段 rlib mmap 需求翻数倍 → 提交上限吃不下。**判据**：只要错误文本出现 `os error 1455` + `mmap file '\\?\...\lib<某大 crate>-*.rlib'` + 顶格在 `project_files_manage_lib` 那格，就**不要**再重试编译调优、也不要盲 kill 别的进程腾内存；转成 headless 端到端测（用 `--lib` profile 直驱真链：tempdir + `db::open_in_memory` + `seeded_project` + 真 `run_pass` + 真 `ocr::image_text` + `doc_hits` + `row_for_preview`+`render_preview` + 源文件 size+mtime 前后逐字比）——**能证到的断言与 GUI 路径一致，且比一次性沙盒读数更可复现**。GUI 那一眼（WebView2 实际渲染）留在「没能自动验证」名单，同 M4 需求方亲手点完那条路。**顺带**：孤儿进程按命令行特征精确识别、只 kill 本项目 `node_modules\vite` 那一只的 PID，绝不 `taskkill //IM node.exe`（这条我在 M5.5 犯过一次，把用户别的项目 vite 一并杀了）；孤儿 vite 用 `Get-Process` 拿 StartTime 与我四次 dev 尝试的 log mtime 对时间戳区分「我起的 vs 用户长跑的」。
-
-## 6. 指针
-
-| 东西 | 路径 | 关键位置 |
-|---|---|---|
-| **M5 spec（决策权威）** | `docs/superpowers/specs/2026-10-10-m5-reconcile-design.md`（**199 行**，`wc -l` 现取；10-12 终审后从 192 增至 199） | 行号一律 `grep -n "^## "` 现取（现量：一 `9` / 二 `23` / 三 `38` / 四 `82` / 五 `95` / 六 `110` / 七 `122` / 八 `139` / 九 `160` / 十 `182` / 十一 `195`）。九节结构：决策表 D1–D10、状态口径、判据、**八落点**、错误处理（`preview_unavailable` 三成因共用一码靠 `hint` 分）、测试策略、**真机十二条**（10-09 的十条被 Task 8 评审加到 12）、**不在本轮（§九 = 缩量声明与 M5.5 欠账，含「20 MB 有四个家」）**、风险 1–8、回写清单。回写清单那条是 Task 10 文档面照抄的清单。**10-12 整分支终审 retro-edit 六处**（都是「活契约/权威句子说错」那一类，不是历史描述）：§三 把「全仓唯一写入点」收正为「唯一**生产**写入点」并点名 `db.rs` 的 CHECK 用例例外（坑 102）、§四 那句**写反的**熔断代价按代码与真机读数改准（≤20 行的小项目照常回收，这正是地板存在的理由）、§二 D5 的「假阳性只会欠标」降一级为「成片错标被挡住，单点错标是已知代价且不自愈」、§八 补齐断言 11/12 与第 2 条的写侧那一半（§十.4 曾声称改过第八节、其实没改）、§八 第 8 条 I-5 的落点从「连点两份」订正为「连发同一份」（本轮闸门封的是单飞）、§九 加三行 M5.5 欠账（锁内分词外提 / `data_dir` 注入缝 / `stitch` 与闸门口径绑一格）、§十 加风险 9（路径串就是身份 + 自动轮每开机执行一次） |
-| **M5 实施计划（执行权威）** | `docs/superpowers/plans/2026-10-10-m5-reconcile.md`（**1341 行 / 10 任务 / 62 步**，`grep -c "^### Task"` 与 `wc -l` 现取） | Global Constraints 与红线在文件头；**测试条数链**（T1 +2 → 136、T2 +2 → 138、T3 +4 → 142、T4 +1 → 143、T5 +1 → 144、T6 +1 → 145、T7 +2 → 147）逐格都被实跑验证过；**完成判据**在文件末（含八条结构门与「期望 exit=1」的口径）。计划本体本轮被改 **8 次**（四处门/夹具缺陷 + 两次评审收口 + 定稿后修订），所以 `grep -n "^### Task"` 现取行号、别背 |
-| **M5 账本（恢复地图）** | `.superpowers/sdd/2026-10-10-m5-reconcile/progress.md`（行数与 `## ` 段数**现取**：`wc -l` / `grep -c "^## " progress.md`，别背） | 首行是 `# SDD ledger — plan: …`；红线 8 条在 `13-21`；基线复跑读数在「基线」节；**每格任务的 verdict/裁定各一节**；**最后一节 = `## 整分支终审（2026-10-12 Verdict With fixes）`**，它前面两节是 `## Task 10 真机十二条` 与 `## Task 10 期间发现的两条计划外事实`（后者是写 M5.5 spec 的事实来源）。**注意本目录不在版本控制里 ⇒ 脚本与读数只能靠这份文件按路径找回去** |
-| **M5 终审输出 = M5.5 spec 的事实来源** | 同目录 `branch-review-m5.md`（209 行） | Verdict **With fixes / 0 Critical / 2 Important / 10 Minor**；`### Cross-module invariants` 那节是 A/B/C + 评审自查的 D–G（全 HELD，各有能被打红的承重断言出处）；`### Named risks` 那节三条各给了「算不算本分支职责 + 阻塞与否」并**纠正了控制方的两处登记**（坑 101、坑 102 的来处）；`### Recommendations` 第 2、3、4 条是 M5.5 的头三项（锁内分词外提 → `stitch` 与闸门同格 → `bootstrap(data_dir)`）；`### Ledger triage` 那节逐条判了「哪些 Ruling 可以放行、哪些必须改」，结论是零条需要改代码才能合 |
-| **M5 真机证据** | 同目录 `t10-*` | **19 份 `t10-*.json`**（十二条 + 前端三格 DOM + 安全门 `t10-gate-fresh.json`）、**5 份 `t10-*.mjs`**（`t10-run.mjs` 是主驱动：`create/ghost/auto/pos/ids/afterrestart/hidecheck/previ4/previ5/writeprobe/nav11/dommissing/cardtext/selfheal/recall` 多阶段，一次一个 `evaluate`）、`t10-gates.txt`（门禁与结构门原始读数）、`t10-realdir-baseline.txt` ↔ `t10-realdir-after.txt`。**这些被 `docs/开发进度.md` 的 M5 节按路径引用 ⇒ 不删**；`t10-fixture.mjs` 的 `slowdoc`/`bigs`/`touch` 三条是 M5.5 直接要复用的（坑 98/99 的来处） |
-| M5 评审包 | 同目录 `review-*.diff`（**10 份**，`ls review-*.diff | wc -l` 现取，命名即 `BASE..HEAD`） | 9 份是任务级（**单提交、只含该任务 Files 点名的文件**）；第 10 份 `review-branch-8aaf233..ea6c39d-code.diff`（68 KB）是 10-12 整分支终审用的**代码面**包。两条取数口径留给下一轮：**① BASE 取第一个 `feat`/`fix` 提交的父提交**（本轮 = `8aaf233`），**但包里的提交数要按 pathspec 数**（`git rev-list --count BASE..HEAD -- src-tauri/src src` = 12），别写「代码任务数 = 提交数」；**② `scripts/review-package` 不接 pathspec** —— 直接跑会把 `docs/` 一起灌进去（本轮实测：不筛 298 KB / 筛后 68 KB），要代码面包就自己按上面三条命令重定向到文件（本仓 M4 也是这么做的，文件名前缀 `review-branch-…-code.diff` 已成惯例）|
-| M5 实现者报告 | 同目录 `task-{1..9}-report.md` + `task-{1..9}-brief.md` | 报告里含每格的门禁原始输出与 `exit=` 行、变异证据；**Task 8 那一格刻意零新单测**（启动触发要真实 `App`），它的替代证据是四道门 + 两条实数 + 留给 Task 10 的六条清单 —— 读报告时别把「零测试」当成漏做 |
-| M4 spec（决策权威） | `docs/superpowers/specs/2026-10-07-m4-unified-search-design.md` | 行号一律 `grep -n "^## "` 现取（共 **204** 行，本次刷新量得：交付与边界 `:7`、决策表 `:20`、契约 `:32`、排序与截断 `:87`、**预览通路 `:95`（末尾新增「线程口径」整段 = T6 Important-1 的裁定）**、模块切分 `:110`、错误处理 `:126`、测试策略 `:140`、**真机与性能 `:163`（「三格」已扩成「四格」，第 4 格 = `async` 的运行时对账）**、不在本轮 `:174`、风险 `:197`）。**注意 `:110/:140` 这一类后半篇的数已被 `3677865` 那次追加往下推过两行**，与本文件坑 73 同形，取数只认命令。**例外登记**：§四 `:92` 与 §八 `:148` 在 10-09 被 retro-edit 过一次（D6 三个上限 20/10/10 → 30/15/15，连带夹具规模与期望值 21/12/15 → 31/17/20），带日期、出处与「上调不改变不做展开这条边界」的附注 —— 本仓 ordinarily 不 retro-edit 历史规格里「描述旧状态」的句子，这次例外的理由是那一格是**活的契约数字**，代码已经是新值，spec 留着旧数就是假话。**10-09 终审这一轮又 retro-edit 四处**（就是 §3 第 1 步那份未提交改动）：§一.4「打开文件」改成实际三动作并写明为什么不外开、§五 把「`kind="sync_threadpool"` ⇒ 走 `spawn_blocking`」那句按标签读成机制的论断改掉（出处见坑 87）、§九.1 落需求方三下的真机读数、§十一 风险从 4 条扩到 **6** 条（第 5、6 条 = 终审 I-4 预览绕过尺寸门、I-5 无并发/取消闸门，两条都归 M5 但必须登记在案） |
-| M4 实施计划（执行权威） | `docs/superpowers/plans/2026-10-07-m4-unified-search.md` | Global Constraints `13`；**已实测事实 `37`、条数链 `58`**；文件结构 `62`；T1–T9 起点**一律 `grep -n "^### Task"` 现取**，本次刷新量得：T6 = `1554`、T7 = `1721`、**T8 = `2021`**、T9 = `2382`。**Task 6 Step 1 下面那四段 = `async` 裁定的权威文本**（`body_async` 的行号在 fix round 1 复审后更正为 `:355`/`:382-389`，`$path` 在 `:384`）；完成判据与「本轮不做」在文件末（共 **2494** 行；围栏计数 **124 = 偶**，坑 58 的门 —— T9 与终审这几轮改动全落在既有围栏内或散文里，改完重量过）。**Task 9 的复选框：Step 1–4 全部 `[x]`（`:2396` / `:2406` / `:2431` / `:2445`，本次刷新量的），四个 Step 都带执行记录**（现取：`grep -n "^- \[.\] \*\*Step" PLAN \| awk -F: '$1>2390'`，别背）。Step 1/2/3 的勾是把真机读数直接写进正文（含两条前提纠正与 D6 的诚实附注），Step 4 的勾是「清场 + 文档收口都做完」，收口落在 `fb6f4cd`。 |
-| SDD 账本（恢复地图） | `.superpowers/sdd/2026-10-07-m4-unified-search/progress.md` | 预检 10 行表 `9-20`；红线 `24`；进度一览 `33`；**最后一节 `## 整分支终审（10-09 评审已做完，整改批次：文档面已落、代码面待派发）` 在 `:353`** = 当前状态：终审的六条 `Ruling` 权威文本（四条被证伪的断言、14 条残留的照改 4 / 变 4 / 撤 6、I-4 与 I-5 归 M5 但登记在案、**评审文本自身两处错的纠正**（清扫门作用域 `src/` 应为 `src-tauri/src/`；§8 第 12 项漏了 spec §四 那句 `lib.rs:542`）、**按 `t9-d6.json` 复核后对 D6 触顶分布的订正**（6 簇里 5 触顶 = 5/6，不是「每一个都触顶」；「两词 737 ms」「稀疏 56–60 ms」两条无归档 JSON 已标明）、整改前实测三条）（共 **382** 行 / **32** 个 `## ` 段，`grep -n "^## " progress.md \| tail -3` 现取） |
-| **下一步（M4 已收口并合入 master）** | 已完成：① ~~是否合入 `master`~~ **10-09 需求方指示后已 fast-forward 合完**（仓内零 merge commit 的惯例被尊重）；② ~~是否接远端并推送~~ **已推完**（`origin` = github.com/fallen-zero/project-manage，两条分支都在，远端默认分支目前指向功能分支）；③ 两件可选：JSX 文案真机点验、`tauri build` release 构建 | M4 之后是 **M5**（notify 监听 + reconcile）：另开 spec/计划与自己的 SDD 工作区目录，**别动 `.superpowers/sdd/2026-10-07-m4-unified-search/`**（`docs/开发进度.md` 与本文件按路径引用其中的 `t9-*.json`、`t9-d6.json`、截图与基线，删了会让已提交文档指向空目录）。M5 的已知议题已在 `docs/开发进度.md` 的「M4 留下的已知缺口」9 条里点名（I-4 尺寸门、I-5 并发/取消闸门 + `guard` 缺 seq 守卫、I-6 首屏键入短冻消息泵、D6 簇内分页 offset IPC、台账侧与第三级排序键） |
-| T1–T8 实现者报告 | 同目录 `task-{1..8}-report.md` | T4 报告 391 行（尾部 §八 = fix round 1 与全部变异实测）；**T5 报告 §九 = fix round 1**（原始门禁输出 + `exit=` 行、两格变异读数、7 处还原的 `diff -q` 证据）；T6 报告含 Step 4 六条的逐条落点行号表与那条「`… \| tail -N; echo exit=$?` 读的是 tail 的状态」的自我否证补跑；**T7 报告 769 行 / 八节**（§一–§七 = 首轮：6 格变异读数（其中 `>=` 那格按简报要求如实记「不红」）、value-import 的**两格区分**（`@/lib/ipc` 红在加载期 `ERR_MODULE_NOT_FOUND`、`node:fs` 红在第 8 条断言）、它自己抓到的那次转写偏差；**§八 = fix round 1**：三条还原证据（`cp` 备份 sha256 `58b76330…` 与实现者记录逐字节相同 + `git diff --exit-code` = 0 + `git status --porcelain` 空）、变异 #6 的 `pass 7 / fail 1` 读数、以及它按裁定把 §2.2 那句假门禁就地改写并补「没能自动验证」条目 —— 复审后来还把这一格的自述**向上纠正**了一次，见 §3 缺口表末行）；**T8 报告 694 行 / 九节**（§九 = fix round 1：四道门禁各自的原始 `exit=` 行、四件 delta 的**可证伪证据明写成「三件零守护 + I-1 半守护」不粉饰**、还原的四件证据 md5 `de6b507f…` + `diff -q` + `git diff --exit-code` + `porcelain` 全列；定向复审另落 `task-8-rereview-1.md` 100 行，含它自己重做的变异与还原） |
-| **终审输出 = 整改派发的事实来源** | 同目录 `branch-review-m4.md`（284 行） | **§8 那张 13 项表是派发词唯一要给实现者的东西**（1–11 代码、12–13 文档）；§6.1–§6.2 是它自己到 vendored 源码核实的两条机制（`ipc/mod.rs::respond_async_serialized_inner` 的 `task.await` 在 `return_result` **之前** ⇒ panic 不回执、前端那次 `await` 静默挂着，且全仓无 `panic::set_hook`；`tauri-macros-2.7.0/src/command/wrapper.rs:51/:500-501` 的 `ArgumentCase::Camel` ⇒ `doc_id`↔`docId`）；**§7 那份「本轮没能验证」清单要照抄进收口文档**（JSX 渲染、`tauri build` 未跑、I-4/I-5 无真机大文件复现、`isNewest` 的 `>` 形态已裁定不做） |
-| 评审包 | 同目录 `review-*.diff` | **18 份**（`ls review-*.diff \| wc -l` 现取），命名即 BASE..HEAD。**新增的两份是这轮的**：`review-8ebdb92..ef49c1a.diff`（T9 补做的任务评审，**1 commit / 7036 B**，基线就是 T9 预检那次 docs 提交 ⇒ docs 天然在范围外）与 `review-branch-497c0a1..fb6f4cd-code.diff`（整分支终审，**只含代码面 127 KB**；全量 476 KB 那份含 20 个文档提交，会把评审者引去评审文档 —— 这条经验值得留给 M5）。T8 fix round `review-40f4ca3..0757545.diff`（**2 commits / 21595 B** —— docs 提交 `b2670db` 晚于 FIX_BASE、靠基线排除不掉，复审派发词同样显式声明它是**规格来源、不是评审对象**，复审照做、对文档零 finding）；T8 首轮 `review-4b8c851..40f4ca3.diff`（**1 commit / 20123 B**，基线恰是 docs 提交所以天然在范围外；评审者还独立验出 Step 1/Step 3 落地代码与简报 **byte-identical**）。T7 首轮 `review-3a2cfc8..23b8b53.diff`（**1 commit / 13978 B** —— 同上，范围干净）；T7 fix round `review-23b8b53..034b0ef.diff`（**2 commits / 75994 B** —— 含文档轮的体积信号：13978 → 75994）。T6 首轮 `review-5a00500..6bc6354.diff`（1 commit / 18315 B，范围内**没有**文档）；T6 fix round 1 `review-6bc6354..077c275.diff`（**2 commits / 103580 B，范围内含 docs 提交 `3677865`**） |
-| 里程碑与证据史 | `docs/开发进度.md`（本次刷新 **299** 行，`wc -l` 现取） | 里程碑表 `5-21`（**M5 行 `:14` 已改 ✅ 完成 2026-10-10**，M4 行 `:13`）；表下那段 `:22-23` 是「MVP 已达成 + M5 已交付 + 缩量声明」三句；**「M5 验收证据」整节 `:73`**（门禁实跑 `:77`、真机十二条表 `:86`、**两条实测 finding `:109`**、**9 条没能自动验证 `:114`**、**M5 留下的已知缺口 `:126`**）；`## M4 验收证据` 从 `:137` 起（那一节**未 retro-edit**，闭账看 M5 节）；变更日志 `:287`，末尾两条是 10-10 的 |
-| 技术方案（更早的权威） | `docs/技术方案.md`（**241 行**） | §3.4「不做假的归一化」是 D2/D3 的依据；**10-10 改三处**：§6.1 变更检测那一行按交付改写（`:168`，启动 reconcile 已做、`notify` 延 M5.5 并写理由）、§八 M5 行（`:213`）与那行过期状态（M4 从「待开始」改「完成 2026-10-09」）、§九 监听开关那条加 **2026-10-10 附注**（`:232`，明写「本条没兑现、自动轮没有开关、加开关之前先定让路策略」） |
-| 上一版交接（本文件历史 **19** 版，本次落地后 **20**；数法 `git log --oneline -- docs/HANDOFF.md \| wc -l` 现取） | `git show 3677865:docs/HANDOFF.md`（§G 15 条 / 全 66 条坑，§2.2–§3 写「T6 fix round 1 待派发」）、`git show 10ba0ef:docs/HANDOFF.md`（§G 17 / 全 68，T6 已 complete、T7 未派发）、`git show c2b3d35:docs/HANDOFF.md`（§G 20 / 全 71，写「T7 fix round 1 待派发」）、`git show e0c09eb:docs/HANDOFF.md`（§G 22 / 全 73，写「下一个动作 = Task 8 的入口 B 派发前预检」）、`git show 62af638:docs/HANDOFF.md`（§G+§H 28 / 全 79，写「下一个动作 = Task 9 真机验收 + D6 上限实测 + 文档收口」）| 再加 `git show 22bccf5:docs/HANDOFF.md`（M5 九格代码收口、真机未跑那一版，坑到 92）。本文件已含各版全部坑并扩到 **100 条**（A–F 51 + §G 22 = 52–73 + §H 6 = 74–79 + §I 6 = 80–85；现量：`awk '/^### [GHI]\./,/^---/' docs/HANDOFF.md \| grep -c '^[0-9]'` = **34** 条分节条目）。**这几版里最要命的不是数旧，是那句「下一个动作」都已过期** —— 恢复时只认本文件 §3 与账本最后一节，别 `git show` 一个旧版照着派发 |
+| 主题 | 位置 |
+|---|---|
+| 项目定位 / 架构 / 里程碑表 | `docs/技术方案.md` |
+| 里程碑实态 + 每格验收证据 + 变更日志 | `docs/开发进度.md` |
+| M6 规格（决策 D1–D7、判据、真机 §八、风险、回写清单） | `docs/superpowers/specs/2026-10-12-m6-ocr-design.md` |
+| M6 实施计划（6 任务 31 步） | `docs/superpowers/plans/2026-10-12-m6-ocr.md` |
+| M6 SDD 账本（每格 Ruling、两条 T4 concern 的代码级裁定、终审处理） | `.superpowers/sdd/2026-10-12-m6-ocr/progress.md` |
+| M6 终审评审包（11 提交、165 KB） | `.superpowers/sdd/2026-10-12-m6-ocr/review-a8d053b..740124f.diff` |
+| M6 CDP 真机脚本（需求方腾出内存后可直接复用） | `.superpowers/sdd/2026-10-12-m6-ocr/m6-cdp.mjs` |
+| M6 端到端真机测（headless） | `src-tauri/src/index_job.rs` 的 `ocr_image_flows_end_to_end_through_index_and_search` |
+| OCR 能力层 | `src-tauri/src/ocr.rs` |
+| 远端仓库 | `https://github.com/fallen-zero/project-manage.git`（默认分支 symref 待手改，见 §4） |
+| 旧版累加 HANDOFF（100+ 条编号坑与账本交叉引用） | `git show 0aa0d30:docs/HANDOFF.md` |
