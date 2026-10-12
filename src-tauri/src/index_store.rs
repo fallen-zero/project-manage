@@ -43,6 +43,15 @@ pub fn write_doc(
         DocOutcome::Failed(msg) => ("failed", None, Some(msg), None),
     };
 
+    // 减锁（M5.5 D6）：`index_text` = `cut_for_search` + 逐词 String 分配 + join，是**纯 CPU**。
+    // 原先它在下面 `params![..]` 里求值，而事务第一句 INSERT（本函数 :49 那笔）早已拿到
+    // SQLite 写锁 ⇒ 锁持有时间 ≈ 分词一整篇正文 + 两条 INSERT，自动轮进行中别的 sync 命令
+    // 就在 `busy_timeout` 上排队（M5 实测 4.2 s / 一次 5565 ms db_failed 的直接来源）。
+    // 提到开事务之前，锁里只剩两条 INSERT（微秒级）。抽取本身本就在锁外（run_pass 的
+    // `match panic_to_err(|| extract_text(..))` 先抽、其 Ok arm 才调本函数写库）。
+    let name_tokens = index_text(&file.file_name);
+    let body_tokens = body.as_ref().map(|b| index_text(b));
+
     let tx = conn.unchecked_transaction()?;
     // ON CONFLICT 不动 id / doc_rowid（事实 21）：同一行被重新索引时 rowid 稳定，
     // 于是 FTS 侧可以先按 rowid 点删再插，不需要先查一次。
@@ -79,10 +88,10 @@ pub fn write_doc(
     // 这一笔是**硬性前提**而不是「免得累积历史版本」的优化：FTS5 对重复 rowid 直接回约束错误。
     // 控制方实测把这句抽掉，第二次写同路径当场 Err（rusqlite 文案 `constraint failed` → AppError `db_failed`）。
     tx.execute("DELETE FROM index_docs_fts WHERE rowid = ?1", params![rowid])?;
-    if let Some(body) = body {
+    if let Some(tokens) = body_tokens {
         tx.execute(
             "INSERT INTO index_docs_fts (rowid, name_tokens, body_tokens) VALUES (?1, ?2, ?3)",
-            params![rowid, index_text(&file.file_name), index_text(&body)],
+            params![rowid, name_tokens, tokens],
         )?;
     }
     tx.commit()?;
