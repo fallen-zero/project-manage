@@ -10,7 +10,11 @@ use std::sync::Arc;
 /// （index_job::start 只吃单个 Option<String> project_id、targets() 追平轮本就该扫全部）。
 pub struct WatchShared {
     pub dirty: AtomicBool,
-    /// 与 IndexShared.running 共享同一个 Arc，ticker 用它判「有没有轮在跑」。
+    /// 「有没有轮在跑」的判据位点。**注意**：`IndexShared.running` 是裸 `AtomicBool` 字段
+    /// （Arc 套在 `IndexShared` 外，`index_job.rs:397`），拿不到与它同址的 `Arc<AtomicBool>`。
+    /// 故本字段是占位、Task 8 接线时**必须落定**：最懒可行 = ticker 直接持 `Arc<IndexShared>`
+    /// 读 `index.running.load()` 传进 `due_for_pass`（`index_job.rs` 零改动），届时删掉本字段。
+    /// 见账本 Task 7 的 Ruling。（此处不谎称「已共享同一个 Arc」——那兑现不了。）
     pub running: Arc<AtomicBool>,
 }
 
