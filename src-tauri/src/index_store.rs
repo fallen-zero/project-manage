@@ -47,7 +47,7 @@ pub fn write_doc(
     // 原先它在下面 `params![..]` 里求值，而事务第一句 INSERT（紧跟 `let tx` 之后的 index_docs 那笔）
     // 早已拿到 SQLite 写锁 ⇒ 锁持有时间 ≈ 分词一整篇正文 + 两条 INSERT，自动轮进行中别的 sync 命令
     // 就在 `busy_timeout` 上排队（M5 实测 4.2 s / 一次 5565 ms db_failed 的直接来源）。
-    // 提到开事务之前，锁里只剩两条 INSERT（微秒级）。抽取本身本就在锁外（run_pass 的
+    // 提到开事务之前，锁里只剩取 rowid 的一条 SELECT、一条点删与两条 INSERT（全微秒级）。抽取本身本就在锁外（run_pass 的
     // `match panic_to_err(|| extract_text(..))` 先抽、其 Ok arm 才调本函数写库）。
     let name_tokens = index_text(&file.file_name);
     let body_tokens = body.as_ref().map(|b| index_text(b));
