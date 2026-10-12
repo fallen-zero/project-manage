@@ -10,6 +10,7 @@ mod project;
 mod search;
 mod tokenize;
 mod vault;
+mod watch;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
