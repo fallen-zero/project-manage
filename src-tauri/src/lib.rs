@@ -34,6 +34,12 @@ struct AppState {
     index: Arc<index_job::IndexShared>,
     /// 预览的抽盘单飞闸门（终审 I-5）：占用中第二条预览直接拒，不再占 tokio worker（spec D9）。
     preview: Arc<doc_preview::PreviewShared>,
+    /// 文件监听 → 追平的脏位点（M5.5 D4）。watcher/ticker 两个常驻线程各持自己的 Arc clone 干活，
+    /// 这里随 AppState 存活只为「整个进程共享同一个位点」这一事实，本批无 IPC 读它（Task 9+ 才会在界面用）。
+    /// 这不是 Task 7 那块 watch.rs 顶部整模块豁免（那条已回收）：watch.rs 里 mark_dirty/due_for_pass/
+    /// spawn_* 全有真实调用方；只是这一个 AppState 字段在本批确实暂未读，豁免精确到这一个字段。
+    #[allow(dead_code)]
+    watch: Arc<watch::WatchShared>,
 }
 
 fn db(state: &AppState) -> AppResult<MutexGuard<'_, rusqlite::Connection>> {
@@ -599,13 +605,26 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             let conn = bootstrap_data(&data_dir)?;
             let index = Arc::new(index_job::IndexShared::new());
+            let watch = Arc::new(watch::WatchShared::new());
             app.manage(AppState {
                 conn: Mutex::new(conn),
                 data_dir: data_dir.clone(),
                 mk: Mutex::new(None),
                 index: Arc::clone(&index),
                 preview: Arc::new(doc_preview::PreviewShared::new()),
+                watch: Arc::clone(&watch),
             });
+            // M5.5 D4：把文件监听接进运行态 —— watcher 只置脏，ticker 每 5 s 在空闲时起一轮追平。
+            // 都必须在 `manage` 之后（ticker 要 app.handle() 且要 index/watch 已就绪），在启动轮之前
+            // 之后皆可（二者共用 index.running 这同一个闸门，先后不影响正确性）。
+            // watcher 初始化失败（极少：库打不开 / 系统起不了线程）不阻断启动，界面仍有手动索引兜底。
+            let _ = watch::spawn_watcher(&data_dir, Arc::clone(&watch));
+            watch::spawn_ticker(
+                app.handle().clone(),
+                data_dir.clone(),
+                Arc::clone(&watch),
+                Arc::clone(&index),
+            );
             // M5 D1：启动即追平一轮。rebuild=false 走既有增量判据（size + mtime + ok 相同 ⇒ 连文件都
             // 不打开），所以常态代价是一次目录遍历 + stat，不是重抽；root 不可达的项目连 walkdir 都不发起。
             // 与用户手动点撞车的主防线其实是两个 start 按钮的 `disabled={running}`（口径来自
