@@ -1,6 +1,6 @@
 # 交接文档 —— 项目资料管理（写给一个完全没有上下文的新对话）
 
-**快照时间**：2026-10-12。**HEAD**：`master` = `feat/m6-ocr` = `0aa0d30`，本地与 `origin` 逐字一致，全历史零 merge commit。
+**快照时间**：2026-10-12。**当前分支 `master`，HEAD 现取**：`git rev-parse --short master`（本文最后一次提交即这份交接本身，别把 SHA 写死在这里、必漂）。`feat/m6-ocr` 停在其终审合入点（`master` 已含它全部提交，`git merge-base --is-ancestor feat/m6-ocr master` = 真）。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。
 
 ## 0. 先读这一段
 
