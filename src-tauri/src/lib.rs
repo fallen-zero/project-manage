@@ -582,7 +582,7 @@ fn doc_preview(
 /// 建库并在**指定目录**打开（M5.5 D8）。把「开库 + WAL 读回」从 setup 里拆出来，是为了能喂 tempdir
 /// 单测它——`index_job::start` 要 AppHandle、本批不开 tauri::test，所以可测切分只能到这一步；
 /// 取默认数据目录的路径与起轮仍留在 setup。`db::open` 内部已做 `create_dir_all` 与 WAL 读回断言
-/// （`db.rs:16` 建目录、`db.rs:71` 的 after_open→M0 那条 WAL 硬门），所以本函数只是薄转发——
+/// （`db.rs:16` 建目录、`db::after_open` 里 M0 那条 WAL 读回硬门），所以本函数只是薄转发——
 /// 价值全在「data_dir 是参数、不是 app.path()」这条可注入的边界上。
 fn bootstrap_data(data_dir: &std::path::Path) -> AppResult<rusqlite::Connection> {
     db::open(data_dir)
