@@ -1,7 +1,8 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import * as api from "@/lib/api";
+import { isNewest } from "@/lib/search-order";
 import { toAppError } from "@/lib/ipc";
 import type { DocPreview } from "@/types/search";
 
@@ -36,16 +37,21 @@ export function DocPreviewDialog({ docId, projectId, query, onOpenChange }: Prop
   /** footer 那两个动作的失败回执，与 `error`（预览本体失败）分开：预览失败会整段不渲染正文，
    *  而「复制路径失败」必须留着正文让用户再试一次。 */
   const [notice, setNotice] = useState<string | null>(null);
+  // M4 缺口 8：单调计数当作「当前挂载代次」。docId/query 一变（effect 顶 ++）就进新一代，
+  // 作废上一代在途的 guard 回执，防 A 文档迟到的 rejection/success 写进切到的 B 文档。
+  const seqRef = useRef(0);
 
   /** 复用 `project-detail.tsx::guard` 的形态：失败要说出来。`copyText` 在窗口失焦时抛（`api.ts`
    *  那句注释自己点名的），`revealFolder` 在文件已被移走时抛（后端专造了 `preview_file_missing`），
-   *  两者都不是不可能的边角，静默吞掉就是让用户以为成功。 */
+   *  两者都不是不可能的边角，静默吞掉就是让用户以为成功。
+   *  seq 守卫（M4 缺口 8）：进入时捕获 `mine`，两处 `setNotice` 只在仍是同一代时才写。 */
   const guard = async (fn: () => Promise<void>) => {
+    const mine = seqRef.current;
     try {
       await fn();
-      setNotice(null);
+      if (isNewest(mine, seqRef.current)) setNotice(null);
     } catch (e) {
-      setNotice(`操作失败：${toAppError(e).message}`);
+      if (isNewest(mine, seqRef.current)) setNotice(`操作失败：${toAppError(e).message}`);
     }
   };
 
@@ -54,6 +60,8 @@ export function DocPreviewDialog({ docId, projectId, query, onOpenChange }: Prop
     // 而下面两条清理分支原本只碰 `data`/`error` ⇒ 同一结果集里换文档时，上一条「操作失败：…」的红字
     // 会跟着新文档一起来，甚至在「正在抽原文」的加载窗口里同屏。收口在 effect 最顶，不放分支里。
     setNotice(null);
+    // M4 缺口 8：换 docId/query 即进新一代，作废上一代在途的 guard 回执（seqRef 守卫）。
+    seqRef.current += 1;
     if (!docId) {
       setData(null);
       setError(null);
