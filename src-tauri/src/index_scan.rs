@@ -47,7 +47,8 @@ impl ScanOptions {
                 .collect(),
             max_file_bytes: bytes.parse().unwrap_or(DEFAULT_MAX_FILE_BYTES),
             max_files_per_project: cap.parse().unwrap_or(50_000),
-            // 默认「可用」：load 拿不到探测值（不该为此依赖 ocr 模块）；真实值由 run_pass 调用方覆盖。
+            // 默认「可用」：load 拿不到探测值（不该为此依赖 ocr 模块）；生产里真实值由 `index_job`
+            // 的 worker 线程体在调 `run_pass` 之前用 `ocr::ocr_available()` 覆盖（run_pass 只吃 &ScanOptions、不 load）。
             ocr_available: true,
         })
     }
