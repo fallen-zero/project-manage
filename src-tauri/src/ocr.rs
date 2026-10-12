@@ -25,9 +25,6 @@ fn windows_probe() -> windows::core::Result<bool> {
 
 /// Windows OCR 会在 CJK 字符间插空格（「合 同 验 收」）。仅当**空格两侧都是 CJK** 才删该空格，
 /// 保留英文词之间的空格（D7，借 dowse 设计）。
-/// 回收点：本函数已被 `image_text` 生产调用；`#[allow(dead_code)]` 待 T3 把 image_text 接进
-/// extract 后随 image_text 的放行一起清理（image_text 未接线上游前整条链仍会被判 dead）。
-#[allow(dead_code)]
 pub fn clean_cjk_spaces(s: &str) -> String {
     let is_cjk = |c: char| matches!(c as u32,
         0x3000..=0x303F | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF);
@@ -55,11 +52,7 @@ pub fn clean_cjk_spaces(s: &str) -> String {
 /// → `OcrEngine::TryCreateFromUserProfileLanguages`（无识别器时返回空指针，windows-core 的
 /// from_abi 将其落成 Err 而非 panic，type.rs:43-51）→ `RecognizeAsync` → `Lines/GetAt/Text` 逐行拼接。
 /// 任一步失败 → `extract_failed`（D5：单张真失败由调用方落 failed，不吞错）。
-///
-/// 回收点：生产调用点在 T3（extract.rs 接线）；接上后删本条 allow（与 `clean_cjk_spaces` 那条一起）。
-/// 注：本任务内它有测试调用点，但测试调用不计入 `cargo clippy --lib`（非 test cfg 编译），
-/// 不加会 dead_code 红、 `-D warnings` 直接挡门 —— 见 task-2-report「被迫偏离」一节。
-#[allow(dead_code)]
+/// 生产调用点：M6 T3 起由 `extract::extract_text` 的 `DocKind::Image` 臂调用。
 pub fn image_text(path: &std::path::Path) -> crate::error::AppResult<String> {
     use crate::error::AppError;
     use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapDecoder, BitmapPixelFormat};

@@ -518,8 +518,10 @@ mod tests {
     fn io_errors_are_translated_and_other_codes_pass_through() {
         let missing = render_preview_with("d1", &row_for("C:/definitely/not/here.txt"), "验收", extract_text).unwrap_err();
         assert_eq!(missing.code, "preview_file_missing", "fs_failed 不能原样给前端");
-        let png = render_preview_with("d1", &row_for("C:/definitely/not/here.png"), "验收", extract_text).unwrap_err();
-        assert_eq!(png.code, "extract_unsupported", "非 io 码保持原样");
+        // M6 起 png 分派到 Image 走 OCR（不存在的路径会落 io 码被翻译成 preview_file_missing），
+        // 「非 io 码原样透出」的例子换成 kind_of 仍为 None 的 .dll。
+        let dll = render_preview_with("d1", &row_for("C:/definitely/not/here.dll"), "验收", extract_text).unwrap_err();
+        assert_eq!(dll.code, "extract_unsupported", "非 io 码保持原样");
     }
 
     /// M3 的 I2 教训：中间层没有测试等于没守。这一条钉住 panic 边界真的接到了预览这条路上。

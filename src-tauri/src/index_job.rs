@@ -542,7 +542,7 @@ mod tests {
         std::fs::write(dir.join("维保.txt"), "维保期为十二个月".as_bytes()).unwrap();
         std::fs::write(dir.join("大图.txt"), vec![b'a'; 300]).unwrap(); // 配合下面的小上限
         std::fs::write(dir.join("空扫描.txt"), "   \n\t".as_bytes()).unwrap(); // 抽取成功但正文空白
-        std::fs::write(dir.join("图片.png"), b"\x89PNG").unwrap();
+        std::fs::write(dir.join("附件.zip"), b"PK").unwrap(); // 压缩包：kind_of 为 None，仍走「不支持不建行」（M6 起 png 已被 OCR 支持，不能再当例子）
         std::fs::write(dir.join("合同/node_modules/x.txt"), "不该被索引".as_bytes()).unwrap();
     }
 

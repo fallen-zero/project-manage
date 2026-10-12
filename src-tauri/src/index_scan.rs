@@ -167,7 +167,7 @@ mod tests {
         touch(dir, "交付/Node_Modules/index.js", b"z");        // 大小写不同，也要排除
         touch(dir, "dist/bundle.js", b"w");                     // 排除目录本身
         touch(dir, "readme.txt", b"hello");
-        touch(dir, "图片/logo.png", b"\x89PNG\r\n\x1a\n");      // 支持清单外，不建行
+        touch(dir, "图片/logo.exe", b"MZ");                     // 可执行文件，支持清单外，不建行（M6 起 png 已支持，例子换成 exe）
         touch(dir, "报价.xlsx.zip", b"PK");                     // 压缩包，不建行
     }
 
@@ -191,7 +191,7 @@ mod tests {
         tree(dir.path());
         let out = scan_root(dir.path(), &opts(&[]));
         assert!(!out.files.is_empty(), "整棵树什么都没扫出来时，下面那条 all() 是空转的真");
-        assert!(out.files.iter().all(|f| f.ext != "png" && f.ext != "zip"), "{:?}",
+        assert!(out.files.iter().all(|f| f.ext != "exe" && f.ext != "zip"), "{:?}",
             out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
     }
 
