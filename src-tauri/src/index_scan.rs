@@ -17,6 +17,9 @@ pub struct ScanOptions {
     pub exclude_dirs: Vec<String>,
     pub max_file_bytes: u64,
     pub max_files_per_project: i64,
+    /// 本机 Windows OCR 是否可用（M6 D4）。`load` 只给保守默认 true，真实探测值由
+    /// `index_job` 的 worker 在 `ocr::ocr_available()` 填进来；false 时图片在扫描门视同未支持类型。
+    pub ocr_available: bool,
 }
 
 impl ScanOptions {
@@ -44,6 +47,8 @@ impl ScanOptions {
                 .collect(),
             max_file_bytes: bytes.parse().unwrap_or(DEFAULT_MAX_FILE_BYTES),
             max_files_per_project: cap.parse().unwrap_or(50_000),
+            // 默认「可用」：load 拿不到探测值（不该为此依赖 ocr 模块）；真实值由 run_pass 调用方覆盖。
+            ocr_available: true,
         })
     }
 }
@@ -117,8 +122,12 @@ pub fn scan_root(root: &Path, opts: &ScanOptions) -> ScanOutcome {
                 let Some(scanned) = to_scanned(&entry) else {
                     continue;
                 };
-                if kind_of(&scanned.ext).is_none() {
-                    continue; // 未支持类型不建行，也不占配额，见测试里的说明
+                match kind_of(&scanned.ext) {
+                    None => continue, // 未支持类型不建行，也不占配额，见测试里的说明
+                    // D4：无 OCR 时图片同未支持 —— 不建行不占配额，与上面那支完全同路（降级门在
+                    // 这一处而非 run_pass，见账本 Task 4 Ruling：这里才是「未支持不建行」的单一落点）。
+                    Some(crate::extract::DocKind::Image) if !opts.ocr_available => continue,
+                    _ => {}
                 }
                 // 配额必须打在「分大小两桶之前」：超限文件同样会各落一行 skipped，同样撑表。
                 // 放在 oversize 分支之后，上限对「全是超限大文件的项目」根本不生效 ——
@@ -150,6 +159,7 @@ mod tests {
             exclude_dirs: exclude.iter().map(|s| s.to_string()).collect(),
             max_file_bytes: MAX,
             max_files_per_project: 50000,
+            ocr_available: true,
         }
     }
 
@@ -237,6 +247,35 @@ mod tests {
         assert!(out.files.is_empty(), "全部超限不该有可抽取行：{}", out.files.len());
         assert_eq!(out.over_size.len(), 10, "超限行也要撞配额就停：收了 {}", out.over_size.len());
         assert!(out.capped, "只有超限文件的项目触顶同样要标记");
+    }
+
+    /// D4：本机没有 OCR 识别器时，图片在**扫描门**就视同未支持类型 —— 不建行、不进
+    /// files/over_size、不占配额（等同 png 未支持的老行为）。降级门在 :120 而非 run_pass：
+    /// 那里才是「未支持不建行」的单一落点（Ruling，见账本 Task 4）。
+    #[test]
+    fn images_are_not_scanned_when_ocr_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.png"), b"not-really-png").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "合同验收").unwrap();
+        let mut o = opts(&[]);
+        o.ocr_available = false;
+        let out = scan_root(dir.path(), &o);
+        assert!(out.files.iter().all(|f| f.ext != "png"), "OCR 不可用时 png 不该进 files：{:?}",
+            out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
+        assert!(out.over_size.iter().all(|f| f.ext != "png"), "也不该进超限桶（不占配额）");
+        assert!(out.files.iter().any(|f| f.ext == "txt"), "txt 不受影响");
+    }
+
+    /// OCR 可用时图片照常放行建行（这里不真跑 OCR，只验扫描层放行；真识别在 extract 阶段）。
+    #[test]
+    fn images_are_scanned_when_ocr_available() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+        let mut o = opts(&[]);
+        o.ocr_available = true;
+        let out = scan_root(dir.path(), &o);
+        assert!(out.files.iter().any(|f| f.ext == "png"), "可用时 png 应放行建行：{:?}",
+            out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
     }
 
     /// 根目录自己的名字命中排除清单时不许剪掉整棵树：少掉 `entry.depth() > 0` 会得到

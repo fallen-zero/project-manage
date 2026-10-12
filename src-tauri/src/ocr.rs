@@ -5,17 +5,14 @@ use std::sync::OnceLock;
 /// 本机有没有可用的 OCR 识别器（任一语言）。进程内探一次记忆化——`AvailableRecognizerLanguages`
 /// 取值有成本，且降级判据必须全局一致（别在同一轮里忽有忽无）。探测抛错按「不可用」保守处理。
 ///
-/// Task 1 只铺能力层，调用点在 Task 4/5（索引轮降级判定），所以现在本 crate 生产路径还没有使用者；
-/// 同 `db::open_in_memory` 的处理，显式放行而不是全局关掉。回收点：T4 接 scan 后删这条 allow。
-#[allow(dead_code)]
+/// 生产调用点：`index_job` worker 每轮开头把它填进 `ScanOptions.ocr_available`（M6 T4，D4 降级门）。
 pub fn ocr_available() -> bool {
     static OK: OnceLock<bool> = OnceLock::new();
     // Err 走 bool 的默认值 false：探测失败即当作没有 OCR。
     *OK.get_or_init(|| windows_probe().unwrap_or_default())
 }
 
-// 回收点：唯一调用者是 ocr_available，随它一起在 T4 接 scan 后清。
-#[allow(dead_code)]
+// 唯一调用者是 ocr_available（T4 已接上生产调用点，allow 已收口删除）。
 fn windows_probe() -> windows::core::Result<bool> {
     use windows::Media::Ocr::OcrEngine;
     let langs = OcrEngine::AvailableRecognizerLanguages()?;

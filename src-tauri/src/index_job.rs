@@ -469,10 +469,12 @@ pub fn start(
                 Ok(c) => c,
                 Err(err) => return report_failure(&mut emit, &worker, format!("{err}")),
             };
-            let opts = match ScanOptions::load(&conn) {
+            let mut opts = match ScanOptions::load(&conn) {
                 Ok(o) => o,
                 Err(err) => return report_failure(&mut emit, &worker, format!("{err}")),
             };
+            // M6 D4：load 的默认 true 只是兜底，降级判据必须用真实探测值（ocr_available 进程内记忆化）。
+            opts.ocr_available = crate::ocr::ocr_available();
             match run_pass(&conn, &opts, project_id.as_deref(), rebuild, &worker.cancel, &mut emit) {
                 // state 由 run_pass 自己定（它末尾已经按 cancel 判过一次），这里不再重算第二遍。
                 // 注意是 `Ok(s)` 而不是 `Ok(mut s)`：少了「外面再算一遍 state」之后没人改它，
@@ -522,7 +524,7 @@ mod tests {
     const MAX: u64 = 20 * 1024 * 1024;
 
     fn opts() -> ScanOptions {
-        ScanOptions { exclude_dirs: vec!["node_modules".to_owned()], max_file_bytes: MAX, max_files_per_project: 50000 }
+        ScanOptions { exclude_dirs: vec!["node_modules".to_owned()], max_file_bytes: MAX, max_files_per_project: 50000, ocr_available: true }
     }
 
     fn seeded_project(conn: &Connection, id: &str, root: &Path) {
