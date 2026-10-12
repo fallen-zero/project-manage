@@ -579,6 +579,15 @@ fn doc_preview(
     doc_preview::render_preview(&doc_id, &row, &query, max_file_bytes)
 }
 
+/// 建库并在**指定目录**打开（M5.5 D8）。把「开库 + WAL 读回」从 setup 里拆出来，是为了能喂 tempdir
+/// 单测它——`index_job::start` 要 AppHandle、本批不开 tauri::test，所以可测切分只能到这一步；
+/// 取默认数据目录的路径与起轮仍留在 setup。`db::open` 内部已做 `create_dir_all` 与 WAL 读回断言
+/// （`db.rs:16` 建目录、`db.rs:71` 的 after_open→M0 那条 WAL 硬门），所以本函数只是薄转发——
+/// 价值全在「data_dir 是参数、不是 app.path()」这条可注入的边界上。
+fn bootstrap_data(data_dir: &std::path::Path) -> AppResult<rusqlite::Connection> {
+    db::open(data_dir)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -587,7 +596,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
-            let conn = db::open(&data_dir)?;
+            let conn = bootstrap_data(&data_dir)?;
             let index = Arc::new(index_job::IndexShared::new());
             app.manage(AppState {
                 conn: Mutex::new(conn),
@@ -659,4 +668,25 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_data_opens_a_wal_db_at_the_given_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = bootstrap_data(dir.path()).unwrap();
+        // 传进去的目录被真用了（红线二的守护：绝不回落到 app.path() 默认目录）。
+        assert!(dir.path().join("ledger.db").exists(), "库必须落在喂进来的 data_dir");
+        let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+        let ver: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        // db::TARGET_VERSION 是 db.rs 私有 const（lib.rs 够不着），这里写字面 4；
+        // 若哪天加迁移改了 TARGET_VERSION，这条会红 → 提醒同步改这里（与 spec「零新迁移」一致）。
+        assert_eq!(ver, 4, "= db.rs 的 TARGET_VERSION，M5.5 不加迁移");
+    }
 }
