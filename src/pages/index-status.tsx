@@ -361,7 +361,7 @@ export function IndexStatusPage() {
       {/* 另一条错误来源：上一轮作业失败的原因串（刷新后唯一还留下的证据），没有 code，整段念。 */}
       {overview?.lastError && (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          <div className="font-medium">上一轮索引失败</div>
+          <div className="font-medium">上一轮索引未正常完成</div>
           <div className="mt-0.5 break-all" title={overview.lastError}>
             {overview.lastError}
           </div>
@@ -659,7 +659,7 @@ export function IndexStatusPage() {
           )}
           {!searchError && searched && hits.length === 0 && (
             <p className="text-xs text-muted-foreground">
-              没有命中。先确认上面「支持类型」里有没有它，再看项目表里它的行是 ok 还是 skipped。
+              没有命中。先确认上面「支持类型」里有没有它，再看项目表里它的行是 ok、skipped 还是 missing。
             </p>
           )}
           {hits.length > 0 && (
