@@ -665,7 +665,7 @@ Expected: exit=0、0 warning。
 
 - [ ] **Step 5: 变异取证**
 
-只往 `SUPPORTED` 加 `"doc"` 而不加 `kind_of` ⇒ `supported_exts_list_matches_the_dispatch_table` 红（清单有、分派无）。只加 `kind_of` 不加 `SUPPORTED` ⇒ 同一条反向红（`能分派却不在 UI 清单里`）。两处都加但漏 `extract_text` 的臂 ⇒ 编译失败（`match` 非穷尽），同样打回。
+只往 `SUPPORTED` 加 `"doc"` 而不加 `kind_of` ⇒ `supported_exts_list_matches_the_dispatch_table` 红（清单有、分派无）。只加 `kind_of` 不加 `SUPPORTED` ⇒ **本任务新增的 `legacy_office_exts_dispatch_and_are_listed` 红**。（T3 实跑校正：既有那条一致性测试 `supported_exts_list_matches_the_dispatch_table` 的**反方向循环只覆盖 `TEXT_EXTS`**，`doc`/`ppt` 不在它里面，所以「分派有、清单无」这一向是**新测试**在守、不是老测试在守 —— 原计划这里写「同一条反向红」是错的。两条合起来仍无逃逸口，代码无需改动。）两处都加但漏 `extract_text` 的臂 ⇒ 编译失败（`match` 非穷尽），同样打回。
 
 - [ ] **Step 6: 提交**
 
