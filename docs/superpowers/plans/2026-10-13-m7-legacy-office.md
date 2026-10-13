@@ -1109,7 +1109,9 @@ git commit -m "feat(m7): IndexOverview 透出 sofficeAvailable + /index 两态�
         let src_after = std::fs::metadata(&fixture).unwrap();
         assert_eq!((src_after.len(), src_after.modified().ok()), (src_before.len(), src_before.modified().ok()),
             "源夹具一字未动");
-        assert_eq!(std::fs::metadata(&doc).unwrap().len(), doc_before.len(), "被索引副本一字未动");
+        let doc_after = std::fs::metadata(&doc).unwrap();
+        assert_eq!((doc_after.len(), doc_after.modified().ok()), (doc_before.len(), doc_before.modified().ok()),
+            "被索引副本一字未动（size+mtime 同判据：同尺寸改写也要能抓，T7 评审 Minor-4）");
     }
 
     /// **两笔转换并发**：把 T2 那一轮的设计翻转钉成**确定性**守护，而不是靠多线程 harness 撞运气。
@@ -1186,7 +1188,7 @@ Run: `cd src-tauri && cargo test -j 1 --lib index_job::tests::legacy_ > /tmp/t7.
 Expected: 两条 PASS、`finished in N s`。把 N 如实报给控制方（本批**真起子进程**的测试，M6 的 e2e 是 0.4–0.5 s，本批预期 2–5 s/条）——这是 spec §十一.8 那条基数。
 
 Run: `cd src-tauri && cargo test -j 1 --lib > /tmp/t7a.log 2>&1; echo "exit=$?"; grep "test result" /tmp/t7a.log | tail -1`
-Expected: **193 passed**（190 + 3）。第三条（并发）是本计划在执行期追加的：T2 那一轮的 profile 翻转把并发安全
+Expected: **193 passed**（190 + 3 条：doc 端到端 / ppt 端到端 / 两笔并发）。第三条（并发）是本计划在执行期追加的：T2 那一轮的 profile 翻转把并发安全
 交给了「每笔独立目录」，而 T2 的守护只依赖 harness 默认多线程（`--test-threads=1` 抓不到）⇒ 这里钉成确定性断言。
 
 - [ ] **Step 3: 变异取证（承重，不许只跑绿）**
