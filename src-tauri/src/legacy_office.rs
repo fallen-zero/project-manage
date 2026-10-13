@@ -9,8 +9,8 @@
 //! # 关于本文件里的 `dead_code` 豁免（T3 收账）
 //! T1 铺纯核时本模块尚未接线，曾逐项挂过豁免；T2 落 `legacy_text`；T3 已把它接进 `extract_text`
 //! 的两个新分派臂（`DocKind::LegacyWord`/`LegacySlides`），转换件那 12 条豁免随之全部可达，
-//! 按「谁接线谁删」的口径在本任务删净。**终态只剩 5 条，全部归后续任务**：T4 的降级门 1 条
-//! （`soffice_available`）、T5 的 `start_install` 4 条（`WINGET_PACKAGE_ID`/`winget_path`/
+//! 按「谁接线谁删」的口径在本任务删净。T4 接扫描门时删掉了 `soffice_available` 那一条，
+//! **当前只剩 4 条，全部归 T5 的 `start_install`**（`WINGET_PACKAGE_ID`/`winget_path`/
 //! `winget_args`/`InstallOutcome`）。处理方式与 `db::open_in_memory`（`db.rs:30`）和 M6 的 ocr.rs
 //! 首提交同款：**逐项显式放行，绝不模块级/全局关掉**（模块级豁免会连以后新写的没接线代码一起吞掉）。
 //! 后续任务接线落地时**必须顺手删掉对应豁免**；T5 的收口结构门（在全仓源码里 grep 本属性的字面量）
@@ -74,7 +74,8 @@ pub fn soffice_path() -> Option<PathBuf> {
     .find(|p| p.is_file())
 }
 
-#[allow(dead_code)] // T4 接线（index_scan 降级门）后删
+/// `soffice_path()` 的存在性判定。接线点在 `index_job` 的 worker：每轮现探一次后填进
+/// `ScanOptions.soffice_available`；降级判据本身长在 `index_scan` 的扫描门（D6，全仓只有那一处）。
 pub fn soffice_available() -> bool {
     soffice_path().is_some()
 }

@@ -20,6 +20,10 @@ pub struct ScanOptions {
     /// 本机 Windows OCR 是否可用（M6 D4）。`load` 只给保守默认 true，真实探测值由
     /// `index_job` 的 worker 在 `ocr::ocr_available()` 填进来；false 时图片在扫描门视同未支持类型。
     pub ocr_available: bool,
+    /// 本机有没有 LibreOffice 可用（M7 D6）。`load` 只给保守默认 true，真实探测值由
+    /// `index_job` 的 worker 每轮现探后填进来（D5：**不记忆化**，换来「一键装完不用重启」）；
+    /// false 时 `.doc`/`.ppt` 在扫描门视同未支持类型。
+    pub soffice_available: bool,
 }
 
 impl ScanOptions {
@@ -49,7 +53,11 @@ impl ScanOptions {
             max_files_per_project: cap.parse().unwrap_or(50_000),
             // 默认「可用」：load 拿不到探测值（不该为此依赖 ocr 模块）；生产里真实值由 `index_job`
             // 的 worker 线程体在调 `run_pass` 之前用 `ocr::ocr_available()` 覆盖（run_pass 只吃 &ScanOptions、不 load）。
+            // M7：`soffice_available` 同一形状（默认 true 是惰性兜底，worker 每轮现探覆盖）。这两个默认值
+            // 由 `load_defaults_both_capability_flags_to_true` 一条钉住 —— 谁改成 false 必须有测试变红。
             ocr_available: true,
+            // 探测函数在 `legacy_office`，这里不依赖它（同上：load 只做保守默认）。
+            soffice_available: true,
         })
     }
 }
@@ -125,9 +133,12 @@ pub fn scan_root(root: &Path, opts: &ScanOptions) -> ScanOutcome {
                 };
                 match kind_of(&scanned.ext) {
                     None => continue, // 未支持类型不建行，也不占配额，见测试里的说明
-                    // D4：无 OCR 时图片同未支持 —— 不建行不占配额，与上面那支完全同路（降级门在
-                    // 这一处而非 run_pass，见账本 Task 4 Ruling：这里才是「未支持不建行」的单一落点）。
+                    // D4：无 OCR 时图片同未支持 —— 不建行不占配额（降级门在这一处而非 run_pass）。
                     Some(crate::extract::DocKind::Image) if !opts.ocr_available => continue,
+                    // M7 D6：无 LibreOffice 时旧格式同未支持。**全仓只有这一处**该判据（spec §五.3），
+                    // 出现第二处就会造出「UI 说支持、扫描又挡一遍」的双口径。
+                    Some(crate::extract::DocKind::LegacyWord) | Some(crate::extract::DocKind::LegacySlides)
+                        if !opts.soffice_available => continue,
                     _ => {}
                 }
                 // 配额必须打在「分大小两桶之前」：超限文件同样会各落一行 skipped，同样撑表。
@@ -161,6 +172,7 @@ mod tests {
             max_file_bytes: MAX,
             max_files_per_project: 50000,
             ocr_available: true,
+            soffice_available: true,
         }
     }
 
@@ -277,6 +289,43 @@ mod tests {
         let out = scan_root(dir.path(), &o);
         assert!(out.files.iter().any(|f| f.ext == "png"), "可用时 png 应放行建行：{:?}",
             out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
+    }
+
+    /// D6：探不到 LibreOffice 时，`.doc`/`.ppt` 与今天的未支持类型**完全同路**——
+    /// 不建行、不进 `over_size`、不占单项目配额。降级门只有这一处落点。
+    #[test]
+    fn legacy_docs_are_not_scanned_when_soffice_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("旧报告.doc"), b"x").unwrap();
+        std::fs::write(dir.path().join("旧片子.ppt"), b"x").unwrap();
+        std::fs::write(dir.path().join("新说明.txt"), b"hello").unwrap();
+        let mut o = opts(&[]);
+        o.soffice_available = false;
+        let out = scan_root(dir.path(), &o);
+        assert!(out.files.iter().all(|f| f.ext != "doc" && f.ext != "ppt"),
+            "无 LibreOffice 时旧格式不该进清单：{:?}", out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
+        assert!(out.over_size.iter().all(|f| f.ext != "doc"), "也不该进超限桶（不占配额）");
+        assert!(out.files.iter().any(|f| f.ext == "txt"), "纯文本不受影响");
+    }
+
+    /// 对照臂：可用时放行建行（扫描层只放行，真转换在抽取阶段，别在这里跑子进程）。
+    #[test]
+    fn legacy_docs_are_scanned_when_soffice_is_available() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("旧报告.doc"), b"x").unwrap();
+        let out = scan_root(dir.path(), &opts(&[])); // 测试用 opts() 默认 soffice_available=true
+        assert!(out.files.iter().any(|f| f.ext == "doc"), "可用时 .doc 应放行：{:?}", out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
+    }
+
+    /// 兑 M6 终审 Minor-6 的同形账：`load` 的两个能力默认值**必须有测试钉住**。
+    /// 默认 true 是惰性兜底（生产由 worker 覆盖成活探测值），两条消费路径从不喂给 scan_root；
+    /// 没有这一条，谁把默认改成 false 也不会有任何测试变红。
+    #[test]
+    fn load_defaults_both_capability_flags_to_true() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let o = ScanOptions::load(&conn).unwrap();
+        assert!(o.ocr_available, "load 的 OCR 默认值（生产会被 worker 覆盖）");
+        assert!(o.soffice_available, "load 的 LibreOffice 默认值（同上）");
     }
 
     /// 根目录自己的名字命中排除清单时不许剪掉整棵树：少掉 `entry.depth() > 0` 会得到

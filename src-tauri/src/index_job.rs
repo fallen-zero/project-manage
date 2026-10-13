@@ -475,6 +475,10 @@ pub fn start(
             };
             // M6 D4：load 的默认 true 只是兜底，降级判据必须用真实探测值（ocr_available 进程内记忆化）。
             opts.ocr_available = crate::ocr::ocr_available();
+            // M7 D5：LibreOffice 的探测**刻意不记忆化**（三次 is_file()，现探免费），每轮一次覆盖进来。
+            // 收益是「/index 一键装完不用重启应用，下一轮就开始索引 .doc/.ppt」；
+            // 一轮只探一次（不是每文件一次），所以降级判据不会在一轮中间翻转。
+            opts.soffice_available = crate::legacy_office::soffice_available();
             match run_pass(&conn, &opts, project_id.as_deref(), rebuild, &worker.cancel, &mut emit) {
                 // state 由 run_pass 自己定（它末尾已经按 cancel 判过一次），这里不再重算第二遍。
                 // 注意是 `Ok(s)` 而不是 `Ok(mut s)`：少了「外面再算一遍 state」之后没人改它，
@@ -524,7 +528,7 @@ mod tests {
     const MAX: u64 = 20 * 1024 * 1024;
 
     fn opts() -> ScanOptions {
-        ScanOptions { exclude_dirs: vec!["node_modules".to_owned()], max_file_bytes: MAX, max_files_per_project: 50000, ocr_available: true }
+        ScanOptions { exclude_dirs: vec!["node_modules".to_owned()], max_file_bytes: MAX, max_files_per_project: 50000, ocr_available: true, soffice_available: true }
     }
 
     fn seeded_project(conn: &Connection, id: &str, root: &Path) {
