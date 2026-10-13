@@ -773,7 +773,7 @@ Expected: 两条 exit=0、0 warning。
 
 - [ ] **Step 4: 变异取证 + 单一落点门**
 
-① 删掉那条 `Some(LegacyWord)|Some(LegacySlides) if !opts.soffice_available => continue` ⇒ `legacy_docs_are_not_scanned_when_soffice_is_unavailable` 红。② 把 `index_job.rs` 里那句 worker 覆盖删掉 ⇒ 现有 186 条**不会红**（本机装了 LibreOffice ⇒ 探测值与默认值都是 true，形态与 M6 的 set-but-never-read 完全同形）；所以这一格只能靠**结构门 grep** 守，跑：
+① 删掉那条 `Some(LegacyWord)|Some(LegacySlides) if !opts.soffice_available => continue` ⇒ `legacy_docs_are_not_scanned_when_soffice_is_unavailable` 红。② 把 `index_job.rs` 里那句 worker 覆盖删掉 ⇒ 现有 **187** 条**不会红**（T4 实跑校正：本任务终态 187，原写 186 是笔误）（本机装了 LibreOffice ⇒ 探测值与默认值都是 true，形态与 M6 的 set-but-never-read 完全同形）；所以这一格只能靠**结构门 grep** 守，跑：
 Run: `cd src-tauri && grep -rn "soffice_available" src/ | grep -v "^src/legacy_office.rs" `
 Expected 命中恰好三处：`index_scan.rs` 的字段声明 + 那条降级臂（含 `load` 的默认值行与注释各一次，按实际输出如实登记）、`index_job.rs` worker 那一句。若 `index_job.rs` 那一处不见了 ⇒ 接线被删，报出来。
 ③ 全仓再搜第二落点：`grep -rn "soffice_available" src/ | grep -v index_scan.rs | grep -v index_job.rs | grep -v legacy_office.rs` 必须 **exit=1**（`lib.rs` 的 `index_overview` 读的是 `soffice_available()` 活探测**函数**、不是这个字段，T6 落地时按此核对；若 T6 之后这一条命中了 `lib.rs` 里的 `opts.soffice_available`，说明 UI 读到了惰性默认，判为缺陷）。
