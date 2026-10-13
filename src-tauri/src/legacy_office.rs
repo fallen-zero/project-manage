@@ -15,6 +15,13 @@
 //! **逐项显式放行，绝不模块级/全局关掉**（模块级豁免会连 T2 以后新写的没接线代码一起吞掉）。
 //! 后续任务接线落地时**必须顺手删掉对应豁免**；T5 的收口结构门（在全仓源码里 grep 本属性的字面量）
 //! 要求终态只剩 `db.rs:30` 一处，本文件届时要一条不剩。
+//!
+//! # T2 追加的两格（`legacy_text`、`CONVERT_GATE`，注释里都写明由 T3 删）
+//! T2 实测过一件事（`cargo check -j 1 --lib`，非 test cfg）：把 T1 标注 T2 的那 12 格逐项放行摘掉后，
+//! 纯核项**一条 `dead_code` 都不报**——放行只压住它自己那一格，调用边照样把下游传成活代码，所以
+//! `legacy_text` 一存在，`win_slash`/`convert_args`/`Scratch` 那批就跟着活了；真正还报 never used 的只有
+//! `legacy_text` 与它新配的 `CONVERT_GATE` 两个。按上面「谁接线谁删」的口径这 12 格本可当场清掉，
+//! 但控制方在派发时裁定「T2 不碰其余豁免，归 T3/T4/T5/T6 各自收」，故此处只把账记下、不擅自删。
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -196,6 +203,57 @@ pub fn run_bounded(program: &Path, args: &[String], budget: Duration) -> AppResu
     }
 }
 
+/// 同一进程内把 soffice 调用排成**单飞**。
+/// 为什么必须有：`profile_dir()` 是按 pid 复用的（实测每次新建 profile 多花 ≈0.78 s/份，spec §三.3），
+/// 而 LibreOffice **不允许两个实例共用同一个 `UserInstallation`**。并发探针（2026-10-13，
+/// `.superpowers/sdd/2026-10-13-m7-legacy-office/probe6-concurrency.sh`，读数同目录 `probe6-readings.txt`）
+/// 四格：同 profile + 不同源并行 ⇒ 败者 `exit 1` 且不产出；同 profile + 同源并行 ⇒ 同一形状；
+/// **不同 profile** + 同源并行 ⇒ 双双 `exit 0` 出产物；同 profile **串行** ⇒ 全绿。
+/// 「复用 profile」与「允许并发」只能留一个，这里留复用（性能是实测定的），把调用排成串行。
+/// 生产上两条通路真会撞：`extract_text` 既被索引 worker 调（`index_job.rs:268`），也被预览的 tokio
+/// worker 调（`doc_preview.rs:117`），索引轮里点开了 `.doc` 预览就是两个进程同一 profile。
+#[allow(dead_code)] // T3 接线（extract_text 两臂 → legacy_text）落地后删本行豁免
+static CONVERT_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 把 `.doc` / `.ppt` 转成 docx/pptx 再抽出正文。**在抽取阶段（写锁外）被调用**（D1）——
+/// 一份 ≈1.2 s 的进程冷启动只拖长这一轮，不进任何单笔写锁。
+/// 产物只当管道：落到 `Scratch`（每文件一个目录，避开同名覆盖）→ 交给既有 `office_text` 抽正文
+/// → 目录随 `Scratch` 析构删掉，库里只留正文（D2，零新表零新体积账）。
+#[allow(dead_code)] // T3 接线（extract_text 两臂）落地后删本行豁免
+pub fn legacy_text(path: &Path, slides: bool) -> AppResult<String> {
+    let target = if slides { "pptx" } else { "docx" };
+    let soffice = soffice_path().ok_or_else(|| AppError::new(
+        "extract_failed",
+        &format!("未找到 LibreOffice，无法读取旧格式（{}）", path.display()),
+        Some("在「全文索引」页的支持类型卡片里点「安装 LibreOffice」；装完不用重启，下一轮自动开始索引"),
+    ))?;
+    let scratch = Scratch::new(target)?;
+    let args = convert_args(
+        target,
+        &win_slash(scratch.dir()),
+        &win_slash(path),
+        &profile_url(&profile_dir()),
+    );
+    // 闸门只圈「起进程」这一段（`CONVERT_GATE` 的注释给了实测理由）；抽正文是纯本地读 zip，
+    // 不该被排进队尾。panic 展开也照旧放行：`into_inner` 取回数据，绝不让闸门永久卡死
+    // （与 `doc_preview` 的 `PreviewShared` 同一口径——`panic` 后必须把闸门放掉）。
+    let status = {
+        let _one_at_a_time = CONVERT_GATE.lock().unwrap_or_else(|p| p.into_inner());
+        run_bounded(&soffice, &args, CONVERT_TIMEOUT)?
+    };
+    // **不信退出码**（spec §三.6：垃圾字节冒充 .doc 也是 exit 0）。唯一的成功判据是产物真的落盘。
+    let produced = product_path(scratch.dir(), path, target);
+    if !produced.is_file() {
+        return Err(AppError::new(
+            "extract_failed",
+            &format!("LibreOffice 退出码 {} 但没产出 .{target}（{}）", status.code().unwrap_or(-1), path.display()),
+            Some("文件可能损坏、受密码保护，或不是真正的 97-2003 二进制格式"),
+        ));
+    }
+    // 既有抽取链一行不改：docx 走 word/document.xml + <w:t>，pptx 走 ppt/slides/slideN.xml + <a:t>。
+    crate::extract::office_text(&produced, slides)
+}
+
 /// winget 的所在（`WindowsApps` 在 PATH 里，所以复用 PATH 扫描；不硬编码版本号路径）。
 #[allow(dead_code)] // T5 接线（start_install）后删
 pub fn winget_path() -> Option<PathBuf> {
@@ -371,5 +429,60 @@ mod tests {
             "包 ID 必须硬编码进参数：{a:?}");
         assert_eq!(WINGET_PACKAGE_ID, "TheDocumentFoundation.LibreOffice",
             "换 ID 要连 spec §四 那条「不给前端任意命令执行」一起重新过：{WINGET_PACKAGE_ID}");
+    }
+
+    /// 条件跑：本机装了 LibreOffice 就真转换两枚夹具；没装则显式 SKIP（不假装通过，M6 T2 同形制）。
+    /// 哨兵串**必须是纯中文**——实测含拉丁字母的串会被 LibreOffice 按文种切成多个 <w:t>，整串搜不到
+    /// （spec §三.13）；失败信息只回长度，绝不回显正文（红线④）。
+    #[test]
+    fn legacy_text_reads_known_chinese_from_doc_and_ppt() {
+        if !soffice_available() {
+            eprintln!("SKIP: 本机无 LibreOffice，旧格式转换本体未在真机跑（降级路径由扫描门测守护）");
+            return;
+        }
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        for (file, slides) in [("sample-cn.doc", false), ("sample-cn.ppt", true)] {
+            let t = legacy_text(&dir.join(file), slides).unwrap_or_else(|e| panic!("{file} 应能转换：[{}] {}", e.code, e.message));
+            assert!(t.contains("合同验收哨兵串"), "{file} 抽出的正文应含已知词（长度 {}）", t.chars().count());
+            assert!(t.contains("付款条件与响应时间"), "{file} 第二段也该在（长度 {}）", t.chars().count());
+        }
+    }
+
+    /// 红线①的自动化版：转换是只读操作——夹具的 size+mtime 逐字不变，且**同目录不许多出任何文件**。
+    #[test]
+    fn legacy_text_leaves_the_source_directory_untouched() {
+        if !soffice_available() {
+            eprintln!("SKIP: 本机无 LibreOffice");
+            return;
+        }
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-cn.doc");
+        let before = std::fs::metadata(&fixture).unwrap();
+        let siblings = std::fs::read_dir(fixture.parent().unwrap()).unwrap().count();
+        let _ = legacy_text(&fixture, false).unwrap();
+        let after = std::fs::metadata(&fixture).unwrap();
+        assert_eq!((after.len(), after.modified().ok()), (before.len(), before.modified().ok()),
+            "转换绝不能写被索引的源文件");
+        assert_eq!(std::fs::read_dir(fixture.parent().unwrap()).unwrap().count(), siblings,
+            "源目录不能多出任何文件（实测无 .~lock 残留，spec §三.5）");
+    }
+
+    /// 转换失败要落 Err 而不是 panic：不存在的输入路径。
+    /// （注意**反方向**已被实测证过：垃圾字节冒充 .doc 会 exit 0 并产出正文非空的 docx，
+    /// 所以这里不能写成「垃圾文件必错」，那条留到 T7 的端到端里按 `ok`/`skipped` 的现状照实断言。）
+    #[test]
+    fn legacy_text_reports_a_clean_error_for_a_missing_file() {
+        let r = legacy_text(Path::new("C:/definitely/not/here.doc"), false);
+        match soffice_path() {
+            None => {
+                // 没装 LibreOffice 的机器：这一格必须仍然给出可行动的错误，而不是 panic 或空串。
+                let e = r.expect_err("没装 LibreOffice 时也要 Err");
+                assert_eq!(e.code, "extract_failed");
+                assert!(e.hint.is_some(), "要告诉人怎么修");
+            }
+            Some(_) => {
+                let e = r.expect_err("文件不存在该报错");
+                assert_eq!(e.code, "extract_failed", "实得：{} {}", e.code, e.message);
+            }
+        }
     }
 }
