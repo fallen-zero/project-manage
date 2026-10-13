@@ -39,7 +39,8 @@
 | D7 | `IndexOverview` 加**一个** `soffice_available: bool`（camelCase 出 `sofficeAvailable`） | 与 M6 的 D6 同一判据：降级提示要上屏才回答得了「这文件为什么不在结果里」，所以线格式**只加这一个**。`SearchBundle` 七键、`DocPreview` 六键两条断言照旧不许动（旧格式正文进的是既有 FTS 正文列）。 |
 | D8 | **一键安装引导**：新命令 `libreoffice_install()`（零参数）用 `CREATE_NEW_CONSOLE` 起 `winget install --id TheDocumentFoundation.LibreOffice -e --accept-package-agreements` 并**立刻返回**（fire-and-forget）；探不到 winget 时返回 `startedViaWinget=false`，由前端调 `openUrl` 打开官网下载页 | 需求方 2026-10-13 明确要求「真一键」，并当次批准 **`generate_handler!` 41→42** 这条结构门的代价（M4/M5/M5.5/M6 四个里程碑都把它当字面不变量验过，spec §四 点名理由）。被否与替代：① 只开下载页（零新 IPC，但不是「一键安装」，已作为 winget 缺失时的退路保留）；② 引 `tauri-plugin-shell` 做带 scope 的命令白名单（审计面更漂亮，代价是多一个插件依赖 + 一段 capability 配置，为一个按钮不成比例）。`openUrl` 那条退路零改动：`capabilities/default.json` 已有 `opener:default`，而 vendored `tauri-plugin-opener-2.7.0/permissions/default.toml` + `allow-default-urls.toml` 里 `opener:default` = `allow-open-url` + `allow-reveal-item-in-dir` + scope `https://*`（本轮实读，非记忆）。 |
 | D9 | 失败口径：**转换超时/产物缺失/抽取报错 ⇒ `failed` + `error_msg`；抽出空正文 ⇒ `skipped(empty_text)`；没装 LibreOffice ⇒ 不建行不占配额**。`index_status` 与 `skip_reason` 两个值域**一字不扩** | 复用 `run_pass` 既有四 arm（`Ok(empty)`/`Ok(body)`/`extract_unsupported`/其它 `Err`），一条都不新增。§三.6 实测到一条反直觉事实：**垃圾字节冒充的 `.doc` 会以 exit 0 成功转出 docx**（LibreOffice 按纯文本把它读进去），所以「成功」的判据只能是「产物存在且能抽出内容」，不是退出码、不是 stderr 为空（§三.7：正常成功的调用里 stderr 也带 `Could not find platform independent libraries <prefix>` 这行噪音）。 |
-| D10 | 命令行形态钉死四件：可执行文件用 **`soffice.com`**（不是 `soffice.exe`）、`--outdir` **空格分隔**（不接受 `--outdir=` 等号形）、`-env:UserInstallation` 必须是**全正斜杠的 `file:///` URL**、**每个源文件一个独立 outdir**（profile 目录每进程一个、复用） | 四条全部来自 §三.2/3/4/8/10 的实测，不是风格选择：`.exe` 同一活儿 6.65 s 对 `.com` 1.27 s；`--outdir=X` 直接被拒并回吐整页 usage；混合反斜杠的 URL 失败得又慢又静默（13.8–45 s）；不带独立 profile 会往 `%APPDATA%\Roaming\LibreOffice` 落用户配置（§三.10）并与用户自己开的实例抢锁；两份同名不同目录的源进同一 outdir 会**互相覆盖**只留一份产物（§三.8）。 |
+| D10 | 命令行形态钉死四件：可执行文件用 **`soffice.com`**（不是 `soffice.exe`）、`--outdir` **空格分隔**（不接受 `--outdir=` 等号形）、`-env:UserInstallation` 必须是**全正斜杠的 `file:///` URL**、**每个源文件一个独立 outdir + 一个独立 profile**（两者装在同一个一次性目录里；初选「profile 每进程复用」**已被 §三.16 翻转**） | 四条全部来自 §三.2/3/4/8/10 的实测，不是风格选择：`.exe` 同一活儿 6.65 s 对 `.com` 1.27 s；`--outdir=X` 直接被拒并回吐整页 usage；混合反斜杠的 URL 失败得又慢又静默（13.8–45 s）；不带独立 profile 会往 `%APPDATA%\Roaming\LibreOffice` 落用户配置（§三.10）并与用户自己开的实例抢锁；两份同名不同目录的源进同一 outdir 会**互相覆盖**只留一份产物（§三.8）。
+被否的初选「profile 每进程一个、复用」：省的是 ≈0.78 s/份（§三.3），但 §三.16 实测**两个实例共用同一个 UserInstallation 时抢输的一方直接 exit 1 且不产出文件**，而本项目里索引 worker 与预览通路会真并发、`cargo test` 默认更是多线程跑测试——省那 0.78 s 换来的是「随机假失败 + 弹窗把进程卡到超时」，不划算。 |
 
 ## 三、实测核形（阶段 0 探针，LibreOffice 26.8.1.1，本机 2026-10-13）
 
@@ -47,7 +48,7 @@
 
 1. **两个启动器的分工**：`soffice.exe --version` → exit 0 **且零字节输出**（GUI 启动器不回控制台，探测不能靠跑 `--version`）；`soffice.com --version` → `LibreOffice 26.8.1.1 bf6ef266...`。
 2. **墙钟**：`.com` 单份 `doc→docx` 稳态 **1.03 / 1.10 / 1.08 s**（连测三次），首次带新建 profile 1.27 s；同一活儿 `.exe` **6.65 s**（慢 5 倍）。→ D10 用 `.com`；D1 的「秒级、锁外」由此有了基数。
-3. **profile 复用比每次新建便宜**：复用 1.14/1.18 s vs 每次 `rm -rf` 后重建 **1.92 s**（差 ≈0.78 s/份）。profile 落盘 359 KB。→ 每进程一个、复用。
+3. **profile 复用比每次新建便宜**：复用 1.14/1.18 s vs 每次 `rm -rf` 后重建 **1.92 s**（差 ≈0.78 s/份）。profile 落盘 359 KB。→ **当时结论：每进程一个、复用**（已被 §三.16 翻转，复用只省常数、却引入并发假失败）。
 4. **`--outdir=<目录>` 是错的**：报 `Error in option: --outdir=...` 并回吐整页 usage、exit 1；`--outdir <目录>`（空格）才生效。另：MSYS 形 `/c/...` 路径原生程序不认，要 `C:/...`。
 5. **源目录零残留（红线实测）**：转换后源目录文件数仍为 1、无任何 `.*` / `*~lock*` 残留、源文件 `size+mtime` 与转换前逐字相同。⇒ 不需要「复制源文件到临时目录再转」的预案。
 6. **退出码不可信（承重）**：内容为 `this is definitely not a Compound File Binary payload` 的 `bad.doc` → **exit 0 且产出 `bad.docx`**，其 `word/document.xml` 里有 1 个 `<w:t>`、首段 65 字节（垃圾被当纯文本读进来了）。不存在的输入 → exit 1、无产物、stderr `Error: source file could not be loaded`（0.58 s 快失败）。⇒ D9 的「产物存在 + 抽出非空」才是成功判据。
@@ -60,6 +61,8 @@
 13. **run 按文种切（对断言有直接影响）**：含拉丁字母的 `合同验收M7哨兵串` 在 docx 里被切成三个 `<w:t>`（`合同验收` / `M7` / `哨兵串`），整串出现 0 次；改成纯中文 `合同验收哨兵串` → 整段一个 `<w:t>`、出现 1 次。→ 夹具与断言一律用**纯中文哨兵串**（M6 那条 `sample-cn-ocr.png` 用了「合同验收OCR」，形状不同，别照抄）。
 14. **旧格式夹具的造法（可复现）**：`.doc` ← `soffice --convert-to doc` 吃一个 UTF-8 txt（9,216 B）；`.ppt` ← 用 Python stdlib `zipfile` 手搓一个最小 pptx（2,021 B，含 `<a:t>` 中文）再 `--convert-to ppt`（**606,208 B**）。两条都不需要 Word/WPS。
 15. **安装**：`winget install --id TheDocumentFoundation.LibreOffice -e` 走通（拉 374,870,016 B 的 MSI，依赖 `Microsoft.VCRedist.2015+.x64`，末尾提示「重启电脑以完成安装」但 `soffice.com` 当场可用）。winget 本机版本 v1.29.380。
+16. **共用 profile 会假失败（T2 执行期实测，`probe6-readings.txt`，四格对照）**：同一 `UserInstallation` 下两个实例**并行** ⇒ 胜者 exit 0 有产物、**败者 exit 1 且零产物**（同 profile 并行 2/2 组里各输一次；同源并行同样输）；**换两个不同 profile 并行 ⇒ 两个都 exit 0**；同 profile **串行 ⇒ 都成功**。
+    另附一条现场教训：LibreOffice 在这种「profile 起不来」的场景下，Windows 上会弹**模态对话框**（文案是把人往 `programootstrap.ini 已损坏` 上带的误导话——那个文件实测 112 B、内容是出厂模板、没坏），而模态框没人点就等于子进程不退出 ⇒ 我们的 60 s 预算只能兜住它、不能免掉它。**根因消除靠的是「每笔转换自带独立 profile」，不是靠加超时或加锁。** ⇒ D10 翻转为每文件一个 profile。
 
 ## 四、状态口径与契约
 
@@ -89,7 +92,7 @@
 3. **降级门只有一处**（D6）：`index_scan.rs` 里除了那个 `match`，全仓不得再出现第二处「因为 soffice 不可用而跳过旧格式」的分支；`grep -rn "soffice" src-tauri/src/` 的命中清单要在 §六 落点表里逐条对得上。
 4. **探测的候选与优先级**：`%ProgramFiles%\LibreOffice\program\soffice.com` → `%ProgramFiles(x86)%\...` → PATH 各段下的 `soffice.com`，第一个 `is_file()` 命中即用。**探的是 `.com` 不是 `.exe`**（§三.1/2）。探测不跑子进程（§三.1 实测 `.exe` 零输出，跑了也白跑）。
 5. **参数拼法是纯函数**：`legacy_office` 把「argv 怎么拼」做成可单测的纯函数（含 `--outdir <目录>` 空格形、`-env:UserInstallation=file:///<全正斜杠>`、`--headless --norestore --nolockcheck --nodefault` 四件），断言拼出来的参数向量形状；§三.4 与 §三.11 的教训不许靠注释传下去。
-6. **临时目录生命周期**：转换输出目录**每文件一个**（§三.8 覆盖风险）、成功与失败路径都删（Drop guard，6 行）；profile 目录每进程一个、**故意不删**（§三.3 复用更便宜），代价记在 §十一 风险 6。
+6. **临时目录生命周期**：**每笔转换一个一次性目录，里面装着这一笔的 outdir 与 profile**（`<scratch>/out`、`<scratch>/profile`），成功与失败路径都随 Drop 整棵删掉（6 行 guard）。理由：§三.8 的产物覆盖风险 + §三.16 的并发假失败都由「共用目录」引起，一次目录一起删最省事。代价照实翻转：不再 `%TEMP%` 累积 profile（原风险 6 作废），改成每份多付 ≈0.78 s 的 profile 初始化。
 7. **成本可控性（不粉饰）**：D1/D3 的成本账 = 几十份 × ≈1.2 s ⇒ 首轮多几十秒，只在「首次遇到该文件」那一轮付（`current_rowid` 的 size+mtime 增量门在后，§三.2 的转换耗时不进写锁）。既有三件兜底（增量、取消、熔断/root 不可达）都在，本批**不新增限速或配额**。
 8. **取消语义照实**：正在等子进程时 `cancel` 不生效，最坏等这一次（超时上限 60 s）返回；与 M6 终审 Minor-3 的口径同形，别写成「cancel 立即生效」。
 
@@ -175,9 +178,10 @@
 3. **垃圾文件被当正文索引**（§三.6 实测）：伪装成 `.doc` 的任意字节会以 `ok` 落库、正文是那串垃圾文本，不是 `failed`。后果是搜索噪音而非数据损坏；要改成「必须像 Compound File 才转」要在扫描侧加文件头判据，本批不做、如实登记。
 4. **中英混排整词可能搜不到**（§三.13 实测 run 按文种切）：`合同验收M7哨兵串` 抽出后是「合同验收\nM7\n哨兵串」，整串查不中，子词「合同验收」查得中。与既有 docx 通路同形（不是 M7 引入的新缺陷），但要在 §九 的读数里用纯中文哨兵，别拿这条测出假失败。
 5. **新命令的能力面**：`libreoffice_install` 是本仓第一条「会启动外部安装器」的命令。缓解已写进 §四（零参数、包 ID 硬编码、两条守护测试）；残余风险是**任何前端代码路径都能调它**（app 自有命令不吃 capability 条目，这是 Tauri 的默认形态）——真出问题只能靠删这条命令。要在终审里点名问一遍。
-6. **profile 目录留在 `%TEMP%`**（§三.3，每进程 359 KB）：故意不清理（复用便宜），代价是临时目录累积。若嫌脏，加固是「进程启动时清理 `pfm-m7-*` 老目录」，本批不做。
+6. ~~profile 目录留在 `%TEMP%`~~ —— **本条已随 §三.16 的翻转作废**：profile 现在长在每笔转换的一次性目录里，随 `Scratch` 一起删。执行期留证：翻转前 `%TEMP%\pfm-m7\` 累积过 15 个 `profile-<pid>`（各 ~363 KB），正是原设计「故意不删」的账。
 7. **606 KB 二进制夹具进仓**：`.ppt` 那枚因 LibreOffice 的 PPT 导出自带母版而大（`.doc` 9 KB）。远端仓库已含业务名与测试夹具（M4 那笔公开账），再加两枚二进制不改变「已公开」的性质，但体积账要在终审提一句。
 8. **子进程在单测里真跑**：第二/三档合计约 5–8 s（每份 ≈1.2 s 转换 + 起进程），比 M6 的 0.4–0.5 s e2e 更慢，`cargo test --lib` 总时长要重新看基数；16 G 机上照旧 `-j 1`（HANDOFF 坑 3）。
+10. **LibreOffice 弹模态对话框会把一笔转换卡到超时**（§三.16 现场）：触发条件是它自己起不来（profile 被别的实例占着、或 `-env` URL 畸形），而 headless 模式并不保证不弹。**缓解已落在形状里**：每笔转换自带独立 profile（占不到别人的锁）+ URL 只由 `profile_url()` 从我们自己造的目录拼（不给外部输入）；残余风险是别的软件把安装目录搞坏，那时最坏就是 `failed` 一行，不是一轮卡死。真机 T8 起 dev 前先看一眼有没有窗口残留。
 9. **等子进程时不响应取消**（§五.8）：常态 1.2 s、上限 60 s；`running` 单飞期间所有旧格式都在这一把锁里排队。不是缺陷，但界面文案别说「随时可停」。
 
 ## 十二、要回写与要更正的文档

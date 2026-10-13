@@ -21,6 +21,7 @@
 - 红线（每派发词带全）：① **绝不动被索引的源文件**——只读、只往自己的临时目录写；spec §三.5 已实测「转换不会在源目录留下 `.~lock` 或任何新文件」，谁改这条写法要重新实测。② 真实数据目录 `%APPDATA%\dev.zero.pfm\` 只读；真机一律一次性 identifier `dev.zero.pfm.m7test`、跑完删净，绝不为验证改 `src-tauri/tauri.conf.json`。③ **子代理一律不跑 `tauri dev`/`npm run dev`**；「UI 实际渲染未验证」如实写进「没能自动验证」。④ **错误信息与测试失败信息绝不回显抽出的正文**，只回路径/退出码/条数/长度。⑤ 输出中文（错误码、SQL、JSON key、命令行参数除外）。⑥ **同一 worktree 只允许一个会提交的实现者**，只读评审可并行。
 - **`allow(dead_code)` 豁免是阶段中间态，接线任务负责清零**：`mod legacy_office;` 不是 `pub mod`，未被接线的项在 crate 根不可达、`clippy --lib -D warnings` 会逐项报 `dead_code`。T1 因此在模块内暂挂豁免（每项注释写明由哪个任务删除）。**规则：谁接线谁删豁免** —— T2 用掉哪些纯核项就删哪些，T3 接 `extract_text`、T4 接扫描门与 worker、T5 接 `start_install`、T6 接 `index_overview`，各自删自己那一格用上的豁免；**T6 结束时 `legacy_office.rs` 内不许再残留任何 `allow(dead_code)`**，全仓终态仍只剩 `db.rs:30` 一处（M6 的 `ocr.rs` 就是这么收口的：先暂挂、后逐格清空）。
 - **入库/查询同词器红线**：`legacy_text` 抽出的文本经 `write_doc`→`index_text`（jieba `cut_for_search`）入库，与查询侧 `tokenize::query_terms` 同源；M7 一行不改分词链。
+- **profile 与 outdir 都是「每笔转换一个」**，一起装在同一个一次性目录里（`<scratch>/out`、`<scratch>/profile`）。初选「profile 每进程一个、复用」**已翻转**：spec §三.16 实测两个实例共用同一个 `UserInstallation` 时抢输的一方 `exit 1` 且零产物，还会弹模态框把这笔卡到超时；索引 worker 与预览会真并发、`cargo test` 默认多线程 ⇒ 随机假失败的代价远大于每份省下的 ≈0.78 s。**因此本批不许再加进程内互斥闸门**：并发靠目录隔离消解，不靠排队。
 - **关于 LibreOffice 的写法一律按 spec §三 的实测，不许凭记忆改回去**：可执行文件是 **`soffice.com`**（不是 `.exe`，同一活儿 6.65 s vs 1.27 s，且 `.exe --version` 零输出）；`--outdir` **必须空格分隔**（等号形被直接拒绝）；`-env:UserInstallation` 必须是**全正斜杠的 `file:///` URL**（混合反斜杠是 14–45 s 的**慢**失败）；**退出码不可信**（垃圾字节冒充 `.doc` 会 exit 0 并产出正文非空的 docx），成功判据只能是「产物存在 + 抽得出内容」；`--convert-to docx`/`pptx` **不写 filter 名**（实测自动选对目标 filter）；转换产物名 = 源 stem + 目标扩展名，**两份同名文件进同一 outdir 会互相覆盖** ⇒ 每个源文件一个独立目录；**夹具与断言用纯中文哨兵串**（含拉丁字母的串会被按文种切成多个 `<w:t>`，整串永远搜不到）。
 - **LibreOffice 已在本机装好**（26.8.1.1，`C:\Program Files\LibreOffice\program\soffice.com`）。本批测试会**真起子进程**（每份 ≈1.2 s），所以：跑门禁前确认没有 `tauri dev` 占着 `target/`；不要为「让 CI 更快」把条件测改成无条件跳过。
 
@@ -163,20 +164,11 @@ pub fn convert_args(target: &str, out_dir: &str, src: &str, profile_url: &str) -
 /// 每个源文件配**独立**的 `out_dir` 正是为了避开「两份同名文件进同一目录互相覆盖」（spec §三.8）。
 pub fn product_path(out_dir: &Path, src: &Path, target: &str) -> PathBuf {
     let stem = src.file_stem().unwrap_or_else(|| OsStr::new("doc"));
-    // 用 format! 而不是 `with_extension`：后者以「最后一个点」为界替换扩展名，于是源名里带点
+    // 用纯拼接而不是 `with_extension`：后者以「最后一个点」为界替换扩展名，于是源名里带点
+    // （`stem` 是 `&OsStr`、没有 Display，所以拼接要走 `to_string_lossy()`，直接 format! 内插编不过 E0277）
     // （中文项目里极常见：`合同2024.03验收.doc` 的 stem 是 `合同2024.03验收`）会被它当成扩展名剥掉，
     // 算出 `合同2024.docx` —— 而 LibreOffice 的真产物是 `合同2024.03验收.docx`，T2 会「产物不存在」假落 failed。
-    out_dir.join(format!("{stem}.{target}"))
-}
-
-/// 独立用户配置目录（每进程一个，**故意不删**：实测每次新建 profile 多花 ≈0.78 s/份，spec §三.3；
-/// 代价记在 spec §十一.6——`%TEMP%\pfm-m7\` 下会留约 359 KB）。
-pub fn profile_dir() -> PathBuf {
-    let dir = std::env::temp_dir()
-        .join("pfm-m7")
-        .join(format!("profile-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).ok();
-    dir
+    out_dir.join(format!("{}.{}", stem.to_string_lossy(), target))
 }
 
 /// 一次性输出目录（每文件一个），Drop 时整棵删掉——成功与失败路径都清（spec §五.6）。
@@ -431,7 +423,7 @@ Expected: **180 passed**（基线 167 + 本任务 13）。数不出来就停下�
 
 - [ ] **Step 4: 变异取证（三条都要真红）**
 
-① 把 `soffice_candidates` 里的 `"soffice.com"` 改成 `"soffice.exe"` ⇒ `soffice_candidates_never_offer_the_gui_launcher` 红。② 把 `convert_args` 里那两项合成 `"--outdir=<dir>"` 一项 ⇒ `convert_args_uses_space_form_outdir_and_no_filter_name` 红。③ 把 `Scratch` 的 `Drop` 体清空 ⇒ `scratch_dir_disappears_when_it_is_dropped` 红。④ 把 `run_bounded` 超时分支里的 `child.kill()` 与 `child.wait()` 删掉、只留 `return Err` ⇒ 同一条测试被新加的 `elapsed < 5 s` 断言打红（子进程留在后台跑完 ping，约 19 s）。⑤ 把 `product_path` 换回 `with_extension` ⇒ `product_path_keeps_every_dot_inside_the_source_stem` 红。逐条还原。
+① 把 `soffice_candidates` 里的 `"soffice.com"` 改成 `"soffice.exe"` ⇒ `soffice_candidates_never_offer_the_gui_launcher` 红。② 把 `convert_args` 里那两项合成 `"--outdir=<dir>"` 一项 ⇒ `convert_args_uses_space_form_outdir_and_no_filter_name` 红。③ 把 `Scratch` 的 `Drop` 体清空 ⇒ `scratch_dir_disappears_when_it_is_dropped` 红。④ **只删**超时分支里的 `child.kill()`、保留 `child.wait()` ⇒ `elapsed < 5 s` 断言打红（实测实得 19.3 s，等 ping 自己跑完）。**并把 kill 与 wait 一起删掉则测不出**（Windows 上 `Child` 析构不等子进程，函数照样 800 ms 回 Err）——这一档是已知覆盖缺口，登记在账本，将来要真守「子进程一定被杀」得让 `run_bounded` 交出 pid 或改 `wait_bounded(child)` 形态，本批不为它加形状（T2 之后进程泄漏的实际后果是 60 s 预算内白等一个已完成的孩子进程，不是内存爆）。⑤ 把 `product_path` 换回 `with_extension` ⇒ `product_path_keeps_every_dot_inside_the_source_stem` 红。逐条还原。
 
 - [ ] **Step 5: 两条 clippy + 结构门**
 
@@ -457,7 +449,7 @@ git commit -m "feat(m7): legacy_office 纯核（探 soffice.com / argv 实测形
 - Test: `legacy_office.rs` 的 `mod tests`
 
 **Interfaces:**
-- Consumes: T1 的 `soffice_path`/`convert_args`/`product_path`/`run_bounded`/`profile_dir`/`profile_url`/`win_slash`/`Scratch`/`CONVERT_TIMEOUT`；`crate::extract::office_text(path: &Path, slides: bool) -> AppResult<String>`（既有）。
+- Consumes: T1 的 `soffice_path`/`convert_args`/`product_path`/`run_bounded`/`profile_url`/`win_slash`/`Scratch`/`CONVERT_TIMEOUT`；`crate::extract::office_text(path: &Path, slides: bool) -> AppResult<String>`（既有）。
 - Produces: `pub fn legacy_text(path: &Path, slides: bool) -> AppResult<String>`（T3 的 `extract_text` 两臂调它）。
 
 - [ ] **Step 1: 把控制方已造好的夹具复制进仓（造法可复现，见 spec §三.14）**
@@ -546,16 +538,22 @@ pub fn legacy_text(path: &Path, slides: bool) -> AppResult<String> {
         &format!("未找到 LibreOffice，无法读取旧格式（{}）", path.display()),
         Some("在「全文索引」页的支持类型卡片里点「安装 LibreOffice」；装完不用重启，下一轮自动开始索引"),
     ))?;
+    // 一笔转换一个一次性目录，里面分 `out` 与 `profile` 两格：**profile 必须每笔独立**
+    // （spec §三.16 实测：两个实例共用同一个 UserInstallation 时，抢输的一方 exit 1 且零产物，
+    // 还会弹模态框把这笔卡到超时；而索引 worker 与预览通路会真并发，`cargo test` 默认多线程）。
+    // 代价是每份多 ≈0.78 s 的 profile 初始化（§三.3）；换来并发互不干扰 + 随 Scratch 一起删净。
     let scratch = Scratch::new(target)?;
+    let out = scratch.dir().join("out");
+    std::fs::create_dir_all(&out).map_err(|e| AppError::io(&out, &e))?;
     let args = convert_args(
         target,
-        &win_slash(scratch.dir()),
+        &win_slash(&out),
         &win_slash(path),
-        &profile_url(&profile_dir()),
+        &profile_url(&scratch.dir().join("profile")),
     );
     let status = run_bounded(&soffice, &args, CONVERT_TIMEOUT)?;
     // **不信退出码**（spec §三.6：垃圾字节冒充 .doc 也是 exit 0）。唯一的成功判据是产物真的落盘。
-    let produced = product_path(scratch.dir(), path, target);
+    let produced = product_path(&out, path, target);
     if !produced.is_file() {
         return Err(AppError::new(
             "extract_failed",
@@ -573,7 +571,7 @@ pub fn legacy_text(path: &Path, slides: bool) -> AppResult<String> {
 Run: `cd src-tauri && cargo test -j 1 --lib legacy_office:: > /tmp/t2.log 2>&1; echo "exit=$?"; grep -E "^test legacy_office|test result" /tmp/t2.log`
 Expected: 三条新测试 PASS（本机装有 LibreOffice ⇒ 不 SKIP）。
 
-变异取证三条：① 把 `if !produced.is_file()` 整块删掉 ⇒ `legacy_text_reports_a_clean_error_for_a_missing_file` 在有 LibreOffice 的分支红（缺文件时产物也不存在，会一路走到 `office_text` 拿到另一个码）。② 把 `convert_args(...)` 里传的 `&profile_url(&profile_dir())` 换成直接塞 `profile_dir().display().to_string()`（即带反斜杠、无 `file:///`）⇒ `legacy_text_reads_known_chinese_from_doc_and_ppt` 红，且**慢**（spec §三.4 实测混合分隔符是 14–45 s 的慢失败，这条变异会让测试时长明显跳起来——那个跳起来本身就是证据）。③ 把 `Slides` 判据写反（`let target = if slides { "docx" } else { "pptx" };`）⇒ 同一条件测试的 `.ppt` 那一圈红（pptx 里找 `word/document.xml` 必失败）。逐条还原。
+变异取证三条：① 把 `if !produced.is_file()` 整块删掉 ⇒ `legacy_text_reports_a_clean_error_for_a_missing_file` 在有 LibreOffice 的分支红（缺文件时产物也不存在，会一路走到 `office_text` 拿到另一个码）。② 把 `convert_args(...)` 里传的 `&profile_url(&scratch.dir().join("profile"))` 换成直接塞 `scratch.dir().join("profile").display().to_string()`（即带反斜杠、无 `file:///`）⇒ `legacy_text_reads_known_chinese_from_doc_and_ppt` 红，且**慢**（spec §三.4 实测混合分隔符是 14–45 s 的慢失败，这条变异会让测试时长明显跳起来——那个跳起来本身就是证据）。③ 把 `Slides` 判据写反（`let target = if slides { "docx" } else { "pptx" };`）⇒ 同一条件测试的 `.ppt` 那一圈红（pptx 里找 `word/document.xml` 必失败）。逐条还原。
 > **不在变异清单里的（如实说）**：把源路径的 `win_slash(path)` 换成 `path.to_string_lossy()`（带反斜杠、可能带 `\\?\`）**预期会红但本计划不列为取证项**——因为「LibreOffice 收不收反斜杠源路径」我**没测过**（探针全程只喂正斜杠形式）。实现者若想知道，跑一次单独看结果并写进账本，别把它当已证的守护。
 
 Run: `cd src-tauri && cargo test -j 1 --lib > /tmp/t2a.log 2>&1; echo "exit=$?"; grep "test result" /tmp/t2a.log | tail -1`
