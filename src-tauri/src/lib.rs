@@ -1,3 +1,4 @@
+mod backup;
 mod db;
 mod doc_preview;
 mod error;
