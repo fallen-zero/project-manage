@@ -248,7 +248,7 @@ pub fn winget_args() -> Vec<String> {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallOutcome {
-    /// true = 已在自己的控制台窗口里起起 `winget install`（UAC 与进度都在那个窗口，本命令不等它结束）；
+    /// true = 已在自己的控制台窗口里起 `winget install`（UAC 与进度都在那个窗口，本命令不等它结束）；
     /// false = 本机探不到 winget，**由前端 `openUrl` 打开官网下载页**。
     pub started_via_winget: bool,
 }
@@ -422,8 +422,10 @@ mod tests {
         const _: fn() -> AppResult<InstallOutcome> = start_install;
     }
 
+    /// 名字只声明它实际检查的东西：它看的是 `winget_args()` 这张 argv 表（Task 5 复审的口径）——
+    /// 换成别的被执行程序它照样绿，所以「不会直接起 soffice 子进程」这句话不该写在测试名上。
     #[test]
-    fn install_never_launches_a_soffice_child_directly() {
+    fn install_args_are_never_conversion_args() {
         // 安装走的是 winget，不是 soffice：argv 表里不许混进转换参数，也不许拼前端来的字符串。
         let a = winget_args();
         assert_eq!(a.first().unwrap(), "install");

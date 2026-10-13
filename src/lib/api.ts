@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { Project, ProjectInput } from "@/types/project";
@@ -113,3 +113,16 @@ export const searchDocs = (query: string, limit?: number) =>
 // 两侧都是字面量、没有共享常量，拼错事件名 tsc 抓不到，只能由真机点验确认连通。
 export const onIndexProgress = (handler: (p: IndexProgress) => void) =>
   listen<IndexProgress>("index://progress", (e) => handler(e.payload));
+
+export interface LibreOfficeInstallOutcome {
+  startedViaWinget: boolean;
+}
+
+/** 一键安装 LibreOffice（无参数：包 ID 硬编码在 Rust 侧）。true = 已弹出 winget 窗口，进度与 UAC 都在
+ *  那个窗口里，本调用不等安装结束；false = 本机没有 winget，调用方要退到打开官网下载页。 */
+export const installLibreOffice = () =>
+  invoke<LibreOfficeInstallOutcome>("libreoffice_install");
+
+/** winget 不在时的退路：用系统默认浏览器打开 LibreOffice 下载页（opener:default 已含 https://* scope）。 */
+export const openLibreOfficeDownloadPage = () =>
+  openUrl("https://www.libreoffice.org/download/download-libreoffice/");

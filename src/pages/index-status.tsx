@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { indexDocs, searchDocs } from "@/lib/api";
+import { indexDocs, installLibreOffice, openLibreOfficeDownloadPage, searchDocs } from "@/lib/api";
 import { toAppError, type AppErrorShape } from "@/lib/ipc";
 import { isTerminal, useIndexJobStore } from "@/stores/index-job";
 import type { DocHit, DocRow, IndexProgress } from "@/types/index";
@@ -71,6 +71,14 @@ export function IndexStatusPage() {
   const [docsBusy, setDocsBusy] = useState(false);
   const [docsError, setDocsError] = useState<AppErrorShape | null>(null);
   const [docsReload, setDocsReload] = useState(0);
+
+  // 一键安装 LibreOffice 的两格本地 state。刻意不复用索引作业 store 的 `error`：`load()` 的成功路径写的是
+  // `set({ overview, error: null })`（src/stores/index-job.ts:24，下面两处 start 的长注释正是为这个写的），
+  // 一个总览往返就把安装提示擦成 null，而这条提示必须活过那一趟。
+  // `installBusy` 只跟着这一次 IPC：命令 fire-and-forget，返回 true 仅代表「winget 窗口已弹出」，
+  // 装没装完界面并不知道 ⇒ 按钮按下去时置忙（防连点起 N 个安装窗口），回来即复位，绝不写「安装成功」。
+  const [installBusy, setInstallBusy] = useState(false);
+  const [installError, setInstallError] = useState<AppErrorShape | null>(null);
 
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<DocHit[]>([]);
@@ -385,12 +393,50 @@ export function IndexStatusPage() {
             ))}
           </div>
           <p className="text-muted-foreground">
-            清单之外的类型（.doc/.ppt、压缩包）不会建行：.doc/.ppt 归 M7。图片的支持情况见下条 OCR 状态。
+            清单之外的类型（压缩包等）不会建行。旧版 Office 与图片的支持情况见下面两条状态。
           </p>
           {overview?.ocrAvailable ? (
             <p className="text-xs text-muted-foreground">图片（png/jpg/jpeg/webp/bmp）已启用本机 OCR。</p>
           ) : (
             <p className="text-xs text-muted-foreground">图片 OCR 未启用：本机未安装可用的 Windows 文字识别语言包，图片暂不索引。</p>
+          )}
+          {overview?.sofficeAvailable ? (
+            <p className="text-xs text-muted-foreground">旧版 Office（.doc/.ppt）已启用本机 LibreOffice 转换。</p>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="text-xs text-muted-foreground">
+                未检测到 LibreOffice：.doc/.ppt 暂不索引。装一次即可，装完不用重启，下一轮自动开始建行。
+              </p>
+              <Button size="sm" variant="outline" disabled={installBusy} onClick={() => {
+                setInstallBusy(true);
+                // 与本页 docsError / searchError 同一惯例：新一轮尝试先把上一条失败擦掉。
+                // 不擦就会留下「上一条失败提示 + 这一次其实已经弹了 winget 窗口」同屏，那句提示变成谎话。
+                setInstallError(null);
+                // 这一条必须自己带 finally：命令是 fire-and-forget，返回 true 只代表「窗口已弹出」，
+                // 装完没装完界面不知道，所以按钮复位只跟着这一次 IPC，不假装反映安装进度。
+                void installLibreOffice()
+                  .then((r) => {
+                    if (!r.startedViaWinget) {
+                      void openLibreOfficeDownloadPage().catch(() =>
+                        setInstallError({ code: "unknown", message: "已探到本机没有 winget，也没能打开下载页，请手动访问 libreoffice.org", hint: null }),
+                      );
+                    }
+                  })
+                  .catch((e) => setInstallError(toAppError(e)))
+                  .finally(() => setInstallBusy(false));
+              }}>
+                {installBusy ? "正在启动…" : "安装 LibreOffice"}
+              </Button>
+            </div>
+          )}
+          {installError && (
+            <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              <div className="font-medium">启动安装失败</div>
+              <div className="mt-0.5 break-all" title={`${installError.message}${installError.hint ? `（${installError.hint}）` : ""}`}>
+                {installError.message}
+                {installError.hint ? `（${installError.hint}）` : ""}
+              </div>
+            </div>
           )}
           <div className="flex flex-wrap gap-x-4 gap-y-1">
             <span>

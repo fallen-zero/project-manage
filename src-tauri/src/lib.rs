@@ -466,6 +466,10 @@ struct IndexOverview {
     /// 不透出 `ScanOptions::load` 的 `opts.ocr_available`——那是 load 的惰性默认 `true`，
     /// 在这条路径上从不喂给 `scan_root`，set-but-never-read；UI 必须看到真实探测。
     ocr_available: bool,
+    /// 本机有没有 LibreOffice 可用（`legacy_office::soffice_available()` 的**活探测**值）。
+    /// 与 `ocr_available` 同一措辞理由：不透出 `ScanOptions::load` 的惰性默认 —— 那两条消费路径
+    /// 从不喂给 `scan_root`，set-but-never-read；UI 必须看到真实探测，否则「装完不用重启」这句承诺会假。
+    soffice_available: bool,
 }
 
 #[tauri::command]
@@ -526,6 +530,7 @@ fn index_overview(state: State<'_, AppState>) -> AppResult<IndexOverview> {
         max_files_per_project: opts.max_files_per_project,
         supported_exts: extract::supported_exts().to_vec(),
         ocr_available: crate::ocr::ocr_available(),
+        soffice_available: crate::legacy_office::soffice_available(),
     })
 }
 
