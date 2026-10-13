@@ -61,6 +61,8 @@
 13. **run 按文种切（对断言有直接影响）**：含拉丁字母的 `合同验收M7哨兵串` 在 docx 里被切成三个 `<w:t>`（`合同验收` / `M7` / `哨兵串`），整串出现 0 次；改成纯中文 `合同验收哨兵串` → 整段一个 `<w:t>`、出现 1 次。→ 夹具与断言一律用**纯中文哨兵串**（M6 那条 `sample-cn-ocr.png` 用了「合同验收OCR」，形状不同，别照抄）。
 14. **旧格式夹具的造法（可复现）**：`.doc` ← `soffice --convert-to doc` 吃一个 UTF-8 txt（9,216 B）；`.ppt` ← 用 Python stdlib `zipfile` 手搓一个最小 pptx（2,021 B，含 `<a:t>` 中文）再 `--convert-to ppt`（**606,208 B**）。两条都不需要 Word/WPS。
 15. **安装**：`winget install --id TheDocumentFoundation.LibreOffice -e` 走通（拉 374,870,016 B 的 MSI，依赖 `Microsoft.VCRedist.2015+.x64`，末尾提示「重启电脑以完成安装」但 `soffice.com` 当场可用）。winget 本机版本 v1.29.380。
+17. **带空格的用户名会 100% 打断转换（整分支终审新增，走产品 Rust 代码路径实测）**：把 `%TEMP%` 指到含空格的根（= 用户名带空格那类机器的完整形态）三格同测——**源路径带空格没事**（argv 侧由 `CreateProcess` 自己带引号），而 `-env:UserInstallation=file:///.../pfm m7 space/...` 那一格 **4.21 s 快失败、退出码 -1073740791、零产物** ⇒ 该形态下每一份 `.doc/.ppt` 都会落 `failed`。本仓开发机用户名无空格，故 §三.1–16 全程没暴露它。URL 里的空格写成 `%20` ⇒ 1.81 s 成功、产物在。**修复 = `profile_url` 只编空格**（argv 侧的 outdir/源路径不动），并留一条常驻回归测试（无 LibreOffice 的机器上编码那一半仍 0.00 s 打红）。残余未测：路径含 `%`/`#` 的形态（编码前后字节相同，属既有歧义面，不是本修复引入）。
+18. **30 份 `.doc` 首轮墙钟（控制方一次性插桩实测、跑完按字节还原，194 全绿复证）**：首轮 **63.73 s**、单份均值 **2.12 s**、`ok=30`；第二趟 **0.001 s**、`unchanged=30`、`ok=0` ⇒ D1/§五.7 的成本账与「增量只在改动那一轮重付」拿到真机级读数（临时测试名 `tmp_measure_30_legacy_docs_wall_clock`，不进仓）。
 16. **共用 profile 会假失败（T2 执行期实测，`probe6-readings.txt`，四格对照）**：同一 `UserInstallation` 下两个实例**并行** ⇒ 胜者 exit 0 有产物、**败者 exit 1 且零产物**（同 profile 并行 2/2 组里各输一次；同源并行同样输）；**换两个不同 profile 并行 ⇒ 两个都 exit 0**；同 profile **串行 ⇒ 都成功**。
     另附一条现场教训：LibreOffice 在这种「profile 起不来」的场景下，Windows 上会弹**模态对话框**（文案是把人往 `programootstrap.ini 已损坏` 上带的误导话——那个文件实测 112 B、内容是出厂模板、没坏），而模态框没人点就等于子进程不退出 ⇒ 我们的 60 s 预算只能兜住它、不能免掉它。**根因消除靠的是「每笔转换自带独立 profile」，不是靠加超时或加锁。** ⇒ D10 翻转为每文件一个 profile。
 
@@ -113,7 +115,7 @@
 
 ## 七、错误处理
 
-- **超时**（60 s 预算，§三.2 稳态 1.03–1.19 s／每笔独立 profile 后 ≈2.0 s 作基数）：`kill` 子进程 → `Err(extract_failed)`，`error_msg` 写「LibreOffice 未在 60 秒内返回」⇒ 该文件 `failed`，一轮继续。这条路径**本机可证伪**：注入一条必然慢的命令（`ping -n 30`）就能打红，不需要一个真会卡死 LibreOffice 的坏文件。
+- **超时**（60 s 预算，§三.2/§三.18 实测单份 ≈2.12 s 作基数）：`kill` 子进程 → `Err(extract_failed)`，`error_msg` 写「LibreOffice 未在 60 秒内返回」⇒ 该文件 `failed`，一轮继续。这条路径**本机可证伪**：注入一条必然慢的命令（`ping -n 30`）就能打红，不需要一个真会卡死 LibreOffice 的坏文件。
 - **产物缺失或零字节**（即便 exit 0，§三.6）：`Err(extract_failed)`，message 带 exit 码与产物名，**不带 stderr 全文**（§三.7 那行噪音会误导人）。
 - **抽出为空**：走既有 `DocOutcome::Empty` → `skipped(empty_text)`，与扫描件 PDF、无字图片同口径。
 - **子进程起不来**（路径探到但执行失败/被杀软拦）：`Err(extract_failed)` + hint 指「可用 /index 那一行的安装按钮，或用浏览器访问官方下载页」。
