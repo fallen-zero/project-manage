@@ -6,6 +6,7 @@ mod index_job;
 mod index_scan;
 mod index_store;
 mod ledger;
+mod legacy_office;
 mod ocr;
 mod project;
 mod search;
