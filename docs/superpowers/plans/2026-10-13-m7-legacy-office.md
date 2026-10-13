@@ -18,6 +18,7 @@
 - **文档里的行号只当取数命令用**（`grep -n` 现取），本计划给的 `file:line` 是 2026-10-13 的读数，动过就漂。
 - **本批有意破一条门：`generate_handler!` 41 → 42**（新增 `libreoffice_install`，需求方 2026-10-13 当次批准）。其余照守：**零新依赖**、**零新迁移**（`TARGET_VERSION` 仍 4，不写任何 `settings` 新键）、**不扩码表**（旧格式失败一律 `extract_failed`，预览三成因仍共用 `preview_unavailable`）、**不扩 `index_status` / `skip_reason` 值域**、**线格式只加一个字段**（`IndexOverview.soffice_available` → `sofficeAvailable`；`SearchBundle` 七键、`DocPreview` 六键两条既有断言**字节不动且必须继续绿**）。
 - 红线（每派发词带全）：① **绝不动被索引的源文件**——只读、只往自己的临时目录写；spec §三.5 已实测「转换不会在源目录留下 `.~lock` 或任何新文件」，谁改这条写法要重新实测。② 真实数据目录 `%APPDATA%\dev.zero.pfm\` 只读；真机一律一次性 identifier `dev.zero.pfm.m7test`、跑完删净，绝不为验证改 `src-tauri/tauri.conf.json`。③ **子代理一律不跑 `tauri dev`/`npm run dev`**；「UI 实际渲染未验证」如实写进「没能自动验证」。④ **错误信息与测试失败信息绝不回显抽出的正文**，只回路径/退出码/条数/长度。⑤ 输出中文（错误码、SQL、JSON key、命令行参数除外）。⑥ **同一 worktree 只允许一个会提交的实现者**，只读评审可并行。
+- **`allow(dead_code)` 豁免是阶段中间态，接线任务负责清零**：`mod legacy_office;` 不是 `pub mod`，未被接线的项在 crate 根不可达、`clippy --lib -D warnings` 会逐项报 `dead_code`。T1 因此在模块内暂挂豁免（每项注释写明由哪个任务删除）。**规则：谁接线谁删豁免** —— T2 用掉哪些纯核项就删哪些，T3 接 `extract_text`、T4 接扫描门与 worker、T5 接 `start_install`、T6 接 `index_overview`，各自删自己那一格用上的豁免；**T6 结束时 `legacy_office.rs` 内不许再残留任何 `allow(dead_code)`**，全仓终态仍只剩 `db.rs:30` 一处（M6 的 `ocr.rs` 就是这么收口的：先暂挂、后逐格清空）。
 - **入库/查询同词器红线**：`legacy_text` 抽出的文本经 `write_doc`→`index_text`（jieba `cut_for_search`）入库，与查询侧 `tokenize::query_terms` 同源；M7 一行不改分词链。
 - **关于 LibreOffice 的写法一律按 spec §三 的实测，不许凭记忆改回去**：可执行文件是 **`soffice.com`**（不是 `.exe`，同一活儿 6.65 s vs 1.27 s，且 `.exe --version` 零输出）；`--outdir` **必须空格分隔**（等号形被直接拒绝）；`-env:UserInstallation` 必须是**全正斜杠的 `file:///` URL**（混合反斜杠是 14–45 s 的**慢**失败）；**退出码不可信**（垃圾字节冒充 `.doc` 会 exit 0 并产出正文非空的 docx），成功判据只能是「产物存在 + 抽得出内容」；`--convert-to docx`/`pptx` **不写 filter 名**（实测自动选对目标 filter）；转换产物名 = 源 stem + 目标扩展名，**两份同名文件进同一 outdir 会互相覆盖** ⇒ 每个源文件一个独立目录；**夹具与断言用纯中文哨兵串**（含拉丁字母的串会被按文种切成多个 `<w:t>`，整串永远搜不到）。
 - **LibreOffice 已在本机装好**（26.8.1.1，`C:\Program Files\LibreOffice\program\soffice.com`）。本批测试会**真起子进程**（每份 ≈1.2 s），所以：跑门禁前确认没有 `tauri dev` 占着 `target/`；不要为「让 CI 更快」把条件测改成无条件跳过。
@@ -416,7 +417,8 @@ Expected: **179 passed**（基线 167 + 本任务 12）。数不出来就停下�
 
 Run: `cd src-tauri && cargo clippy -j 1 --lib -- -D warnings > /tmp/t1c.log 2>&1; echo "clippy_lib=$?"; grep -c "warning" /tmp/t1c.log; cargo clippy -j 1 --lib --all-targets -- -D warnings > /tmp/t1d.log 2>&1; echo "clippy_all=$?"; grep -c "warning" /tmp/t1d.log`
 Expected: 两条 exit=0、warning 计数 0。
-注意：`InstallOutcome` 此刻**还没有生产构造点**，`--all-targets` 那条会报 `dead_code`。**处理方式**：给 `InstallOutcome` 加 `#[allow(dead_code)]` 并在注释里点名「T5 起由 `libreoffice_install` 构造，届时删除豁免」——同时记进账本，T5 收口时必须把这条豁免删掉（M6 就是这么收的：终态 `allow(dead_code)` 只剩 `db.rs:30`）。
+注意：`InstallOutcome` 此刻**还没有生产构造点**，`--all-targets` 那条会报 `dead_code`。**处理方式**：给还没被接线的项目挂 `#[allow(dead_code)]`，并在注释里点名「由第几号任务删除豁免」——同时记进账本，**接线任务落地时必须把本文件的豁免全部清空**。
+> **计划文本订正（控制方 2026-10-13，T1 落地时发现）**：本步骤原先只提 `InstallOutcome` 一处，实测 `clippy --lib -- -D warnings` 对**整个未接线模块**都报 `dead_code`（T1 的纯核是 16 项）——因为 `mod legacy_office;` 还不是 `pub mod`，未被接线的项在 crate 根不可达。这不是实现者自创的规避，M6 的 `ocr.rs` 第一格提交（`555b8ae`）就是同款暂挂、后续任务逐格收口。所以规则改写成两句：**T1 可以在 `legacy_office.rs` 内暂挂豁免（每项一个注释写明归属任务）**，**T5 与 T6 收口时本文件豁免必须清零**，终态仍是「全仓 `allow(dead_code)` 只剩 `db.rs:30`」。
 
 - [ ] **Step 6: 提交**
 
@@ -873,7 +875,8 @@ Run（本批唯一破例那条门，正则**必须让逗号可选**，要求尾�
 Expected: **42**（M0–M6 是 41）。
 
 Run: `cd src-tauri && grep -rn "allow(dead_code)" src/`
-Expected: 只剩 `src/db.rs:30` 一处 —— T1 那条豁免必须已删。若 `legacy_office.rs` 还在，判为本任务未完成。
+Expected: 只剩 `src/db.rs:30` 加上 **T6 尚未接线的那一项**（`IndexOverview.soffice_available` 若还没被 `index_overview` 用上的话，实际不应存在，因为 T6 在同一格接完）。
+按任务顺序的口径：**T5 结束时 `legacy_office.rs` 里只允许还剩「T6 才会用到的项」的豁免**；若 `start_install`/`InstallOutcome`/`winget_*` 的豁免还在，判为本任务未完成。T6 收口时 `legacy_office.rs` 必须完全干净。
 
 Run: `cd src-tauri && cargo clippy -j 1 --lib -- -D warnings > /tmp/t5c.log 2>&1; echo "c1=$?"; cargo clippy -j 1 --lib --all-targets -- -D warnings > /tmp/t5d.log 2>&1; echo "c2=$?"; grep -c warning /tmp/t5c.log /tmp/t5d.log`
 Expected: 两条 exit=0、0 warning。
