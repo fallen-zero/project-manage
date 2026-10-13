@@ -43,23 +43,10 @@ pub fn open_in_memory() -> AppResult<Connection> {
 /// 只有内存库允许没有 WAL：它不承载任何用户数据。
 fn after_open(conn: &Connection, durable: bool) -> AppResult<()> {
     if durable {
+        // 请求 WAL 之后必须读回来判（pragma_update 的 Ok 不代表真落到 WAL）。拆出去的那半段
+        // 见 assert_wal —— 本行的 side effect 留在 after_open，判据留在 assert_wal，M8 只调判据。
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
-        let mode: String = conn
-            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
-            .map_err(|e| {
-                AppError::new(
-                    "db_pragma_failed",
-                    &format!("读取 journal_mode 失败：{e}"),
-                    Some("确认数据目录可写、ledger.db 未损坏（必要时从备份恢复），或把数据目录换到本地磁盘"),
-                )
-            })?;
-        if !mode.eq_ignore_ascii_case("wal") {
-            return Err(AppError::new(
-                "db_pragma_failed",
-                &format!("无法把数据库切换为 WAL 模式（当前为 {mode}）"),
-                Some("数据库所在路径不支持 WAL（网络盘或被安全软件拦截常见），请把数据目录换到本地磁盘"),
-            ));
-        }
+        assert_wal(conn)?;
     } else {
         // 内存库的 journal_mode 只能是 MEMORY/OFF，这次请求会被 SQLite 直接忽略，拿不到 WAL 是无害的。
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
@@ -69,6 +56,31 @@ fn after_open(conn: &Connection, durable: bool) -> AppResult<()> {
     pragma(conn, "foreign_keys", "ON")?;
     pragma(conn, "busy_timeout", "5000")?;
     migrate(conn)
+}
+
+/// 现读 `PRAGMA journal_mode` 并断它等于 wal。M0 那条「不信 `pragma_update` 的 Ok、必须读回」
+/// 硬门的读回半段；从 `after_open` 拆出来是给 M8 导入收尾复用的 —— `Connection::restore` 灌的是
+/// **已打开**的连接，根本不经过 `after_open`，不现读一次就留下「库内容整库换过、WAL 从没在这份
+/// 内容上被断过」的状态（spec §七 那条判据）。错误码与措辞一字不改，`durable_open_really_runs_in_wal`
+/// 与 `side_file_unopenable_pins_the_readback_invariant` 钉的就是这两条错误的形状。
+pub fn assert_wal(conn: &Connection) -> AppResult<()> {
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .map_err(|e| {
+            AppError::new(
+                "db_pragma_failed",
+                &format!("读取 journal_mode 失败：{e}"),
+                Some("确认数据目录可写、ledger.db 未损坏（必要时从备份恢复），或把数据目录换到本地磁盘"),
+            )
+        })?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(AppError::new(
+            "db_pragma_failed",
+            &format!("无法把数据库切换为 WAL 模式（当前为 {mode}）"),
+            Some("数据库所在路径不支持 WAL（网络盘或被安全软件拦截常见），请把数据目录换到本地磁盘"),
+        ));
+    }
+    Ok(())
 }
 
 fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
@@ -84,7 +96,8 @@ fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
 /// 线性版本迁移：一个版本一段 DDL，只追加不改历史，便于备份包跨版本恢复。
 const TARGET_VERSION: i64 = 4;
 
-fn migrate(conn: &Connection) -> AppResult<()> {
+/// `pub(crate)` 是 M8 加的：`backup_import` 灌完包内库要能重放迁移（包里可能是旧版本）。
+pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_meta (
              version    INTEGER NOT NULL,
@@ -315,6 +328,9 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 测试体按简报走 `db::` 全路径调用（与 M8 `backup_import` 实际调用 `db::assert_wal` 的形状一致），
+    // 而 edition 2021 下模块自身不进入子模块作用域，故显式把 `crate::db` 引进来。
+    use crate::db;
     use rusqlite::params;
 
     /// index_docs.project_id 有 REFERENCES projects(id) 外键，而 after_open 里
@@ -501,6 +517,29 @@ mod tests {
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
         assert_eq!(mode.to_lowercase(), "memory");
+    }
+
+    /// 拆分前后同红同绿：`assert_wal` 只对**读回**负责。这里刻意不用 `open` 那条路径（它自己会
+    /// 先 `pragma_update`），而是把一份已 WAL 的文件库改回 DELETE 模式再喂给 `assert_wal` ——
+    /// 于是这条测试钉的是「读回不是 wal 就必须红」，而不是「open 之后一般是 wal」。
+    /// M8 的 `backup_import` 在 `restore` 之后现读它（`restore` 绕过 `after_open`，spec §七），
+    /// 这条门没有测试就等于 spec §十一.8 那条风险没人守。
+    #[test]
+    fn assert_wal_rejects_a_db_that_fell_out_of_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::open(dir.path()).unwrap();
+        // 先证正对照：刚 open 完必须过（否则下一条断言可能是恒红）。
+        db::assert_wal(&conn).expect("open 之后 assert_wal 必须过");
+        conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
+        let err = db::assert_wal(&conn).expect_err("掉回 DELETE 必须红，否则 M8 的导入收尾门什么都没钉住");
+        assert_eq!(err.code, "db_pragma_failed");
+        // 读回的模式是 SQLite 原样给的（本机实测为小写 delete），所以这里大小写不敏感地断「错误里
+        // 念出了实际读到的模式」—— 与 assert_wal 用 eq_ignore_ascii_case 同一个理由，别改成硬编码小写。
+        assert!(
+            err.message.to_uppercase().contains("DELETE"),
+            "错误里要念出实际读到的模式：{}",
+            err.message
+        );
     }
 
     #[test]
