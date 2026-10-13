@@ -17,6 +17,7 @@
 - 命令显式锚目录（cwd 残留会让 cargo exit=101、让 `node --test` 读到 0 条）；退出码一律 `cmd > /tmp/x.log 2>&1; echo "exit=$?"; grep … /tmp/x.log`，**绝不** `cmd | tail; echo $?`（管道里 `$?` 是 `tail` 的）；16 G 机上 cargo 一律 `-j 1` 或 `-j 2`，偶报 `0xc0000409` / `os error 1455` **先重跑一次再判**（坑 3）。
 - **文档里的行号只当取数命令用**（`grep -n` 现取），本计划给的 `file:line` 是 2026-10-13 的读数，动过就漂。
 - **本批有意破一条门：`generate_handler!` 41 → 42**（新增 `libreoffice_install`，需求方 2026-10-13 当次批准）。其余照守：**零新依赖**、**零新迁移**（`TARGET_VERSION` 仍 4，不写任何 `settings` 新键）、**不扩码表**（旧格式失败一律 `extract_failed`，预览三成因仍共用 `preview_unavailable`）、**不扩 `index_status` / `skip_reason` 值域**、**线格式只加一个字段**（`IndexOverview.soffice_available` → `sofficeAvailable`；`SearchBundle` 七键、`DocPreview` 六键两条既有断言**字节不动且必须继续绿**）。
+- **收口门要 grep 的字面量不许出现在注释散文里**（本轮又被咬一次）：`dead_code` 豁免的清零门是 `grep -rn "allow(dead_code)" src/`，所以文档注释与代码注释里都**不许原样写出这个 token**（要提就写成「`dead_code` 豁免」这种不会被匹配到的说法），否则豁免全清之后门仍会命中散文行，制造假阳性并诱导误删文档。
 - 红线（每派发词带全）：① **绝不动被索引的源文件**——只读、只往自己的临时目录写；spec §三.5 已实测「转换不会在源目录留下 `.~lock` 或任何新文件」，谁改这条写法要重新实测。② 真实数据目录 `%APPDATA%\dev.zero.pfm\` 只读；真机一律一次性 identifier `dev.zero.pfm.m7test`、跑完删净，绝不为验证改 `src-tauri/tauri.conf.json`。③ **子代理一律不跑 `tauri dev`/`npm run dev`**；「UI 实际渲染未验证」如实写进「没能自动验证」。④ **错误信息与测试失败信息绝不回显抽出的正文**，只回路径/退出码/条数/长度。⑤ 输出中文（错误码、SQL、JSON key、命令行参数除外）。⑥ **同一 worktree 只允许一个会提交的实现者**，只读评审可并行。
 - **`allow(dead_code)` 豁免是阶段中间态，接线任务负责清零**：`mod legacy_office;` 不是 `pub mod`，未被接线的项在 crate 根不可达、`clippy --lib -D warnings` 会逐项报 `dead_code`。T1 因此在模块内暂挂豁免（每项注释写明由哪个任务删除）。**规则：谁接线谁删豁免** —— T2 用掉哪些纯核项就删哪些，T3 接 `extract_text`、T4 接扫描门与 worker、T5 接 `start_install`、T6 接 `index_overview`，各自删自己那一格用上的豁免；**T6 结束时 `legacy_office.rs` 内不许再残留任何 `allow(dead_code)`**，全仓终态仍只剩 `db.rs:30` 一处（M6 的 `ocr.rs` 就是这么收口的：先暂挂、后逐格清空）。
 - **入库/查询同词器红线**：`legacy_text` 抽出的文本经 `write_doc`→`index_text`（jieba `cut_for_search`）入库，与查询侧 `tokenize::query_terms` 同源；M7 一行不改分词链。
@@ -161,8 +162,11 @@ pub fn convert_args(target: &str, out_dir: &str, src: &str, profile_url: &str) -
 /// LibreOffice 的产物落点：`<out_dir>/<源文件 stem>.<target>`（实测：名字跟着源 stem 走）。
 /// 每个源文件配**独立**的 `out_dir` 正是为了避开「两份同名文件进同一目录互相覆盖」（spec §三.8）。
 pub fn product_path(out_dir: &Path, src: &Path, target: &str) -> PathBuf {
-    let stem = src.file_stem().unwrap_or(OsStr::new("doc"));
-    out_dir.join(stem).with_extension(target)
+    let stem = src.file_stem().unwrap_or_else(|| OsStr::new("doc"));
+    // 用 format! 而不是 `with_extension`：后者以「最后一个点」为界替换扩展名，于是源名里带点
+    // （中文项目里极常见：`合同2024.03验收.doc` 的 stem 是 `合同2024.03验收`）会被它当成扩展名剥掉，
+    // 算出 `合同2024.docx` —— 而 LibreOffice 的真产物是 `合同2024.03验收.docx`，T2 会「产物不存在」假落 failed。
+    out_dir.join(format!("{stem}.{target}"))
 }
 
 /// 独立用户配置目录（每进程一个，**故意不删**：实测每次新建 profile 多花 ≈0.78 s/份，spec §三.3；
@@ -320,6 +324,16 @@ mod tests {
         assert_eq!(p, PathBuf::from("C:/out/合同 验收.docx"));
     }
 
+    /// 源名里带点（日期/版本号）时产物名必须**整段 stem** 保留。
+    /// 这条是 T1 评审 Important-1 补的：`with_extension` 会把 `.03验收` 当扩展剥掉，
+    /// 算出 `合同2024.docx` 而真产物是 `合同2024.03验收.docx` ⇒ T2 假落 failed。
+    /// 变异取证：把实现换回 `out_dir.join(stem).with_extension(target)` ⇒ 本条当场红。
+    #[test]
+    fn product_path_keeps_every_dot_inside_the_source_stem() {
+        let p = product_path(Path::new("C:/out"), Path::new("C:/src/合同2024.03验收.doc"), "docx");
+        assert_eq!(p, PathBuf::from("C:/out/合同2024.03验收.docx"), "带点号的 stem 一个字符都不许丢：{p:?}");
+    }
+
     #[test]
     fn win_slash_flips_separators_and_strips_the_extended_length_prefix() {
         assert_eq!(win_slash(Path::new(r"C:\x\y")), "C:/x/y");
@@ -354,6 +368,7 @@ mod tests {
     fn run_bounded_kills_a_child_that_overruns_the_budget() {
         // 不需要「真会卡死 LibreOffice 的坏 .doc」就能证伪超时分支：注入一条必然慢的命令即可。
         let cmd = std::env::var_os("COMSPEC").map(PathBuf::from).expect("Windows 上必有 cmd.exe");
+        let t0 = std::time::Instant::now();
         let r = run_bounded(
             &cmd,
             &[
@@ -364,8 +379,11 @@ mod tests {
         );
         let e = r.expect_err("慢命令必须被超时打断，否则 60 s 预算只是个装饰");
         assert_eq!(e.code, "extract_failed", "超时沿用既有码，不扩码表：{}", e.message);
-        assert!(e.message.contains("未在 0 秒内返回") || e.message.contains("秒内返回"),
-            "错误要说清是超时：{}", e.message);
+        assert!(e.message.contains("秒内返回"), "错误要说清是超时：{}", e.message);
+        // 光断 Err 测不到「真的把子进程杀了」：ping -n 20 自然跑完要 ≈19 s，
+        // 所以 elapsed 必须贴着预算（800 ms）而不是跟着 ping 走 —— 少这一句，删掉 kill 也测不出差别。
+        let el = t0.elapsed();
+        assert!(el < Duration::from_secs(5), "超时要真的 kill，而不是等子进程自己跑完（实得 {el:?}）");
     }
 
     #[test]
@@ -378,8 +396,10 @@ mod tests {
 
     #[test]
     fn probe_returns_a_bool_without_panicking() {
-        // 与 M6 的 `probe_returns_a_bool_without_panicking` 同形：只断「不 panic、返回 bool」。
-        assert!(matches!(soffice_available(), true | false));
+        // 这一条测的是「调用不 panic」——panic 本身就会让测试失败，与断言无关。
+        // T1 评审（Important-2，plan-mandated）指出原先的 `assert!(matches!(.., true | false))` 恒真、
+        // 零守护，故按本仓「测试必须可证伪」的口径改成显式 `let _`，把意图写在注释里而不是假装在断言。
+        let _ = soffice_available();
         // winget 那一条要能红：探到了就必须是 winget.exe（把候选名写成别的文件名这条就红），
         // 光断 `matches!(x.is_some(), true|false)` 是恒真、零守护（本仓「简报里的测试必须可证伪」那条）。
         assert!(
@@ -404,14 +424,14 @@ mod tests {
 - [ ] **Step 3: 跑测试确认全绿**
 
 Run: `cd src-tauri && cargo test -j 1 --lib legacy_office:: > /tmp/t1.log 2>&1; echo "exit=$?"; grep "test result" /tmp/t1.log | tail -1`
-Expected: exit=0，12 条 legacy_office 测试全 PASS（上面实列 12 个 `#[test]`：`soffice_candidates_order…`、`…_never_offer_the_gui_launcher`、`convert_args_uses_space_form…`、`product_path_reuses…`、`win_slash_flips…`、`win_slash_on_unc…`、`profile_url_is_forward…`、`scratch_dir_disappears…`、`run_bounded_kills…`、`run_bounded_passes…`、`probe_returns_a_bool…`、`winget_args_hardcode…`）。
+Expected: exit=0，13 条 legacy_office 测试全 PASS（上面实列 13 个 `#[test]`：`soffice_candidates_order…`、`…_never_offer_the_gui_launcher`、`convert_args_uses_space_form…`、`product_path_reuses…`、`product_path_keeps_every_dot…`、`win_slash_flips…`、`win_slash_on_unc…`、`profile_url_is_forward…`、`scratch_dir_disappears…`、`run_bounded_kills…`、`run_bounded_passes…`、`probe_returns_a_bool…`、`winget_args_hardcode…`）。
 
 Run: `cd src-tauri && cargo test -j 1 --lib > /tmp/t1a.log 2>&1; echo "exit=$?"; grep "test result" /tmp/t1a.log | tail -1`
-Expected: **179 passed**（基线 167 + 本任务 12）。数不出来就停下报控制方，别改测试凑数。
+Expected: **180 passed**（基线 167 + 本任务 13）。数不出来就停下报控制方，别改测试凑数。
 
 - [ ] **Step 4: 变异取证（三条都要真红）**
 
-① 把 `soffice_candidates` 里的 `"soffice.com"` 改成 `"soffice.exe"` ⇒ `soffice_candidates_never_offer_the_gui_launcher` 红。② 把 `convert_args` 里那两项合成 `"--outdir=<dir>"` 一项 ⇒ `convert_args_uses_space_form_outdir_and_no_filter_name` 红。③ 把 `Scratch` 的 `Drop` 体清空 ⇒ `scratch_dir_disappears_when_it_is_dropped` 红。④ 把 `run_bounded` 的超时 `return Err` 改成 `continue` ⇒ `run_bounded_kills_a_child_that_overruns_the_budget` 红（且会慢到 ping 结束，正是要防的形态）。逐条还原。
+① 把 `soffice_candidates` 里的 `"soffice.com"` 改成 `"soffice.exe"` ⇒ `soffice_candidates_never_offer_the_gui_launcher` 红。② 把 `convert_args` 里那两项合成 `"--outdir=<dir>"` 一项 ⇒ `convert_args_uses_space_form_outdir_and_no_filter_name` 红。③ 把 `Scratch` 的 `Drop` 体清空 ⇒ `scratch_dir_disappears_when_it_is_dropped` 红。④ 把 `run_bounded` 超时分支里的 `child.kill()` 与 `child.wait()` 删掉、只留 `return Err` ⇒ 同一条测试被新加的 `elapsed < 5 s` 断言打红（子进程留在后台跑完 ping，约 19 s）。⑤ 把 `product_path` 换回 `with_extension` ⇒ `product_path_keeps_every_dot_inside_the_source_stem` 红。逐条还原。
 
 - [ ] **Step 5: 两条 clippy + 结构门**
 
@@ -557,7 +577,7 @@ Expected: 三条新测试 PASS（本机装有 LibreOffice ⇒ 不 SKIP）。
 > **不在变异清单里的（如实说）**：把源路径的 `win_slash(path)` 换成 `path.to_string_lossy()`（带反斜杠、可能带 `\\?\`）**预期会红但本计划不列为取证项**——因为「LibreOffice 收不收反斜杠源路径」我**没测过**（探针全程只喂正斜杠形式）。实现者若想知道，跑一次单独看结果并写进账本，别把它当已证的守护。
 
 Run: `cd src-tauri && cargo test -j 1 --lib > /tmp/t2a.log 2>&1; echo "exit=$?"; grep "test result" /tmp/t2a.log | tail -1`
-Expected: **182 passed**（179 + 3）。
+Expected: **183 passed**（180 + 3）。
 
 - [ ] **Step 5: clippy + 提交**
 
@@ -639,7 +659,7 @@ Run: `cd src-tauri && cargo test -j 1 --lib extract:: > /tmp/t3.log 2>&1; echo "
 Expected: `supported_exts_list_matches_the_dispatch_table`（既有，双向查）与新那条都 PASS。
 
 Run: `cd src-tauri && cargo test -j 1 --lib > /tmp/t3a.log 2>&1; echo "exit=$?"; grep "test result" /tmp/t3a.log | tail -1`
-Expected: **183 passed**（182 + 1）。
+Expected: **184 passed**（183 + 1）。
 **注意可能的连带红**（控制方 2026-10-13 已 grep 预判为「无」）：全仓既有测试里没有任何 `.doc`/`.ppt` 夹具、也没有任何断言清单条数为 27 的用例，所以本任务预期**不需要**改任何既有测试期望——若实跑出现别的用例红（例如有人新增了含 `.doc` 的「未支持不建行」夹具），按 M6 T3 的先例**只改测试期望/夹具、不碰逻辑**，并把改动写进账本。
 
 Run: `cd src-tauri && cargo clippy -j 1 --lib --all-targets -- -D warnings > /tmp/t3c.log 2>&1; echo "clippy=$?"; grep -c "warning" /tmp/t3c.log`
@@ -748,7 +768,7 @@ Expected: 编译错误 `struct ScanOptions has no field named soffice_available`
 - [ ] **Step 3: 跑绿 + 全量 + clippy**
 
 Run: `cd src-tauri && cargo test -j 1 --lib > /tmp/t4.log 2>&1; echo "exit=$?"; grep "test result" /tmp/t4.log | tail -1`
-Expected: **186 passed**（183 + 3），且既有 `unsupported_extensions_produce_no_rows`、`per_project_cap…`、`over_size` 相关用例**不回归**。
+Expected: **187 passed**（184 + 3），且既有 `unsupported_extensions_produce_no_rows`、`per_project_cap…`、`over_size` 相关用例**不回归**。
 
 Run: `cd src-tauri && cargo clippy -j 1 --lib -- -D warnings > /tmp/t4c.log 2>&1; echo "c1=$?"; cargo clippy -j 1 --lib --all-targets -- -D warnings > /tmp/t4d.log 2>&1; echo "c2=$?"; grep -c warning /tmp/t4c.log /tmp/t4d.log`
 Expected: 两条 exit=0、0 warning。
@@ -868,7 +888,7 @@ fn libreoffice_install() -> AppResult<legacy_office::InstallOutcome> {
 - [ ] **Step 4: 全量 + 结构门**
 
 Run: `cd src-tauri && cargo test -j 1 --lib > /tmp/t5.log 2>&1; echo "exit=$?"; grep "test result" /tmp/t5.log | tail -1`
-Expected: **189 passed**（186 + 3：`start_install_takes_no_arguments`、`install_never_launches…`、`libreoffice_install_command_takes_no_arguments`）。
+Expected: **190 passed**（187 + 3：`start_install_takes_no_arguments`、`install_never_launches…`、`libreoffice_install_command_takes_no_arguments`）。
 
 Run（本批唯一破例那条门，正则**必须让逗号可选**，要求尾逗号那版恒读 40）：
 `cd src-tauri && grep -A60 "generate_handler!" src/lib.rs | grep -cE "^ +[a-z_]+,?$"`
@@ -1127,7 +1147,7 @@ Run: `cd src-tauri && cargo test -j 1 --lib index_job::tests::legacy_ > /tmp/t7.
 Expected: 两条 PASS、`finished in N s`。把 N 如实报给控制方（本批**真起子进程**的测试，M6 的 e2e 是 0.4–0.5 s，本批预期 2–5 s/条）——这是 spec §十一.8 那条基数。
 
 Run: `cd src-tauri && cargo test -j 1 --lib > /tmp/t7a.log 2>&1; echo "exit=$?"; grep "test result" /tmp/t7a.log | tail -1`
-Expected: **191 passed**（189 + 2）。
+Expected: **192 passed**（190 + 2）。
 
 - [ ] **Step 3: 变异取证（承重，不许只跑绿）**
 
@@ -1137,7 +1157,7 @@ Expected: **191 passed**（189 + 2）。
 
 ```bash
 git add src-tauri/src/index_job.rs
-git commit -m "test(m7): 旧格式端到端 headless（真 LibreOffice 走 run_pass→FTS→doc_preview→第二趟不重转），167→191"
+git commit -m "test(m7): 旧格式端到端 headless（真 LibreOffice 走 run_pass→FTS→doc_preview→第二趟不重转），167→192"
 ```
 
 ---
@@ -1184,4 +1204,4 @@ git push origin feat/m7-legacy-office
 1. **Spec 覆盖**：D1→T2/T7（转换在 `extract_text` 分派、写锁外，e2e 证不压锁）；D2→T2（`Scratch` Drop 即删、零新表）；D3→T3（只 `doc`/`ppt`）；D4→T4（无开关）；D5→T4（worker 每轮现探、不记忆化）；D6→T4（单一落点 + 第二落点 grep 门）；D7→T6（一个线字段）；D8→T5 + T6（命令 + 按钮 + `openUrl` 退路）；D9→T2/T4（`failed`/`skipped(empty_text)`/不建行三态，复用既有 arm）；D10→T1（argv/路径/超时四件）；判据 §五 八条→T1 纯核测试 + T3 三处同源 + T4 单一落点 grep + T7 承重变异；§八 三档→T1（恒绿 12 条）/T2（条件 3 条）/T7（端到端 2 条）；§九 真机→T8；§十二 回写→T8 Step 3；§十一 风险 3（垃圾文件被当正文）在 T2 Step 2 的注释里点名不许写成「垃圾必错」，风险 4（run 切分）落在夹具用纯中文哨兵 + T2 断言形状。
 2. **占位符**：无 TBD/TODO。唯一「留到下一任务」的是 `start_install`（T1 只建 `InstallOutcome` 与 `winget_*`，`start_install` 在 T5 落地），并用**显式的 `#[allow(dead_code)]` + 「T5 删除豁免」注释**处理，且 T5 Step 4 有一条结构门强制它被删掉——与 M6 处理 T1/T2 豁免的同款收口。
 3. **类型一致**：`soffice_candidates(Option<&OsStr>,Option<&OsStr>,Option<&OsStr>)->Vec<PathBuf>`、`soffice_path()->Option<PathBuf>`、`soffice_available()->bool`、`win_slash(&Path)->String`、`profile_url(&Path)->String`、`convert_args(&str,&str,&str,&str)->Vec<String>`、`product_path(&Path,&Path,&str)->PathBuf`、`Scratch::new(&str)->AppResult<Scratch>`、`run_bounded(&Path,&[String],Duration)->AppResult<ExitStatus>`、`legacy_text(&Path,bool)->AppResult<String>`、`winget_args()->Vec<String>`、`InstallOutcome{started_via_winget:bool}`（出 `startedViaWinget`）、`ScanOptions.soffice_available: bool`、`IndexOverview.soffice_available`（出 `sofficeAvailable`）跨任务一致；`extract_text` 两臂传的 `slides` 布尔与 `office_text(path, slides)` 的形参名同源。
-4. **测试期望数（控制方按本计划逐条数出，非累加印象）**：T1 +12 ⇒ 179、T2 +3 ⇒ 182、T3 +1 ⇒ 183、T4 +3 ⇒ 186、T5 +3 ⇒ 189、T6 +0 ⇒ 189、T7 +2 ⇒ **191**；`node --test` 全程 8/8（零新前端测试）。派发每格时实现者须实跑回报，与本表不符即停。
+4. **测试期望数（控制方按本计划逐条数出，非累加印象）**：T1 +13 ⇒ 180、T2 +3 ⇒ 183、T3 +1 ⇒ 184、T4 +3 ⇒ 187、T5 +3 ⇒ 190、T6 +0 ⇒ 190、T7 +2 ⇒ **192**；`node --test` 全程 8/8（零新前端测试）。派发每格时实现者须实跑回报，与本表不符即停。
