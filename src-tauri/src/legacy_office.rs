@@ -6,22 +6,15 @@
 //! 下面每一条关于 soffice 行为的论断都指向 spec §三 的实测读数，改动前先重跑
 //! `.superpowers/sdd/2026-10-13-m7-legacy-office/probe5.sh`，别把脚本 bug 读成 LibreOffice 的行为。
 //!
-//! # 关于本文件里的 `dead_code` 豁免（T1 记账）
-//! 本任务只铺纯核，生产调用点全在本批后续任务：转换件（`CONVERT_TIMEOUT`、`win_slash`、`profile_url`、
-//! `convert_args`、`product_path`、`Scratch`、`run_bounded`）由 T2 的 `legacy_text` 用、
-//! T3 经 `extract_text` 调到；`soffice_candidates`/`soffice_path`/`soffice_available`/`LIBREOFFICE_SUBDIR`
-//! 由 T2 与 T4 的降级门用；`WINGET_PACKAGE_ID`/`winget_path`/`winget_args`/`InstallOutcome` 由 T5 的
-//! `start_install` 用。处理方式与 `db::open_in_memory`（`db.rs:30`）和 M6 的 ocr.rs 首提交同款：
-//! **逐项显式放行，绝不模块级/全局关掉**（模块级豁免会连 T2 以后新写的没接线代码一起吞掉）。
+//! # 关于本文件里的 `dead_code` 豁免（T3 收账）
+//! T1 铺纯核时本模块尚未接线，曾逐项挂过豁免；T2 落 `legacy_text`；T3 已把它接进 `extract_text`
+//! 的两个新分派臂（`DocKind::LegacyWord`/`LegacySlides`），转换件那 12 条豁免随之全部可达，
+//! 按「谁接线谁删」的口径在本任务删净。**终态只剩 5 条，全部归后续任务**：T4 的降级门 1 条
+//! （`soffice_available`）、T5 的 `start_install` 4 条（`WINGET_PACKAGE_ID`/`winget_path`/
+//! `winget_args`/`InstallOutcome`）。处理方式与 `db::open_in_memory`（`db.rs:30`）和 M6 的 ocr.rs
+//! 首提交同款：**逐项显式放行，绝不模块级/全局关掉**（模块级豁免会连以后新写的没接线代码一起吞掉）。
 //! 后续任务接线落地时**必须顺手删掉对应豁免**；T5 的收口结构门（在全仓源码里 grep 本属性的字面量）
 //! 要求终态只剩 `db.rs:30` 一处，本文件届时要一条不剩。
-//!
-//! # T2 追加的一格（`legacy_text`，注释写明由 T3 删）
-//! T2 实测过一件事（`cargo check -j 1 --lib`，非 test cfg）：把 T1 标注 T2 的那 11 格逐项放行摘掉后，
-//! 纯核项**一条 `dead_code` 都不报**——放行只压住它自己那一格，调用边照样把下游传成活代码，所以
-//! `legacy_text` 一存在，`win_slash`/`convert_args`/`Scratch` 那批就跟着活了；真正还报 never used 的
-//! 只剩 `legacy_text` 自己。按上面「谁接线谁删」的口径这 11 格本可当场清掉，但控制方在派发时裁定
-//! 「T2 不碰其余豁免，归 T3/T4/T5/T6 各自收」，故此处只把账记下、不擅自删。
 //!
 //! # 并发形状：目录隔离，不是排队（spec §三.16 / §五.6 / §十.10 的裁定）
 //! **一笔转换一个一次性目录**，里面 `<scratch>/out` 与 `<scratch>/profile` 两格，成功与失败都随
@@ -42,19 +35,16 @@ use crate::error::{AppError, AppResult};
 
 /// 单份文件的转换预算。实测稳态 1.03–1.19 s/份（spec §三.2），60 s 是「真卡死」与「慢盘」的分界。
 /// 之所以必须有这一道：`run_pass` 只在**文件之间**查 cancel，子进程不返回就停不下来。
-#[allow(dead_code)] // T2 接线（legacy_text）后删
 pub const CONVERT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 安装用的包 ID：**硬编码在本机 Rust 侧，绝不取自任何入参**（spec §四 那条「不给前端任意命令执行」）。
 #[allow(dead_code)] // T5 接线（start_install → winget_args）后删
 pub const WINGET_PACKAGE_ID: &str = "TheDocumentFoundation.LibreOffice";
-#[allow(dead_code)] // T2/T4 接线（LIBREOFFICE_SUBDIR 进生产）后删
 const LIBREOFFICE_SUBDIR: &str = "LibreOffice";
 
 /// 三个候选位：`ProgramFiles` → `ProgramFiles(x86)` → PATH 各段。**探的是 `soffice.com`**：
 /// 实测同一活儿 `.exe` 6.65 s、`.com` 1.27 s，且 `.exe --version` 一个字都不往控制台写（spec §三.1）。
 /// 做成吃 `Option<&OsStr>` 的纯函数，是为了让「顺序」与「`.com` 这个文件名」能被单测打红。
-#[allow(dead_code)] // T2/T4 接线（soffice_candidates 进生产）后删
 pub fn soffice_candidates(
     program_files: Option<&OsStr>,
     program_files_x86: Option<&OsStr>,
@@ -74,7 +64,6 @@ pub fn soffice_candidates(
 
 /// 活探测：第一个真实存在的候选。调用方每轮一次（D5，**不记忆化**——三次 `is_file()` 便宜到可以现探，
 /// 换来「一键装完不用重启应用」）。
-#[allow(dead_code)] // T2/T4 接线后删
 pub fn soffice_path() -> Option<PathBuf> {
     soffice_candidates(
         std::env::var_os("ProgramFiles").as_deref(),
@@ -93,7 +82,6 @@ pub fn soffice_available() -> bool {
 /// Windows 路径 → **全正斜杠**形式，并剥掉 `\\?\` 那个扩展长度前缀（M6 在 WinRT 上吃过同一课，坑 13）。
 /// 已知残缺与 M6 一致：`\\?\UNC\server\share` 剥完变成 `UNC/server/share`，那条路径会转换失败并优雅落
 /// `failed`（不 panic）。见测试 `win_slash_on_unc_is_known_broken_like_m6`，别把它悄悄"修"成没测过的样子。
-#[allow(dead_code)] // T2 接线（经 profile_url 进 convert_args 生产链）后删
 pub fn win_slash(p: &Path) -> String {
     let s = p.to_string_lossy();
     let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
@@ -102,7 +90,6 @@ pub fn win_slash(p: &Path) -> String {
 
 /// `-env:UserInstallation` 要的 URL。**混合反斜杠的写法是慢失败**（实测 13.8–45 s 才报错，spec §三.4），
 /// 所以这里只走 `win_slash`，拼成 `file:///C:/...`。
-#[allow(dead_code)] // T2 接线后删
 pub fn profile_url(profile_dir: &Path) -> String {
     format!("file:///{}", win_slash(profile_dir))
 }
@@ -110,7 +97,6 @@ pub fn profile_url(profile_dir: &Path) -> String {
 /// 一次转换的 argv。**顺序与形态都是实测钉死的**：
 /// `--outdir` 要**空格分隔**（等号形被直接拒、并回吐整页 usage）；`--convert-to` **不写 filter 名**
 /// （实测自动选 `MS Word 2007 XML` / `Impress Office Open XML`）；`-env:` 用等号（那一个是 URL 语法）。
-#[allow(dead_code)] // T2 接线（legacy_text 拼 argv）后删
 pub fn convert_args(target: &str, out_dir: &str, src: &str, profile_url: &str) -> Vec<String> {
     vec![
         "--headless".to_owned(),
@@ -128,7 +114,6 @@ pub fn convert_args(target: &str, out_dir: &str, src: &str, profile_url: &str) -
 
 /// LibreOffice 的产物落点：`<out_dir>/<源文件 stem>.<target>`（实测：名字跟着源 stem 走）。
 /// 每个源文件配**独立**的 `out_dir` 正是为了避开「两份同名文件进同一目录互相覆盖」（spec §三.8）。
-#[allow(dead_code)] // T2 接线（legacy_text 校验产物）后删
 pub fn product_path(out_dir: &Path, src: &Path, target: &str) -> PathBuf {
     // OsStr 没有 Display，所以先转字符串再做纯拼接（绝不能退回 `with_extension`，理由见下）。
     let stem = src.file_stem().unwrap_or_else(|| OsStr::new("doc")).to_string_lossy();
@@ -142,12 +127,10 @@ pub fn product_path(out_dir: &Path, src: &Path, target: &str) -> PathBuf {
 /// Drop 时整棵删掉——成功与失败路径都清（spec §五.6）。**profile 必须长在同一个一次性目录里**
 /// （spec §三.16：共用 `UserInstallation` 的并行实例会抢输、败者零产物还弹模态框卡到超时）。
 /// 不用 `tempfile`：它在 `[dev-dependencies]`，生产代码拿不到。
-#[allow(dead_code)] // T2 接线（legacy_text 的一次性 out_dir）后删
 pub struct Scratch {
     dir: PathBuf,
 }
 
-#[allow(dead_code)] // 同上：new/dir 的首个生产调用点在 T2 的 legacy_text
 impl Scratch {
     pub fn new(tag: &str) -> AppResult<Scratch> {
         static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -171,7 +154,6 @@ impl Drop for Scratch {
 
 /// 起子进程并**带预算地等**：每 200 ms 轮询一次 `try_wait`，超时就 `kill`。
 /// 退出码由调用方判断——**别信它**（spec §三.6：垃圾字节冒充 `.doc` 也是 exit 0）。
-#[allow(dead_code)] // T2 接线（legacy_text 起子进程）后删
 pub fn run_bounded(program: &Path, args: &[String], budget: Duration) -> AppResult<ExitStatus> {
     let mut child = Command::new(program)
         .args(args)
@@ -209,7 +191,6 @@ pub fn run_bounded(program: &Path, args: &[String], budget: Duration) -> AppResu
 /// 一份 ≈1.2 s 的进程冷启动只拖长这一轮，不进任何单笔写锁。
 /// 产物只当管道：落到 `Scratch`（每文件一个目录，避开同名覆盖）→ 交给既有 `office_text` 抽正文
 /// → 目录随 `Scratch` 析构删掉，库里只留正文（D2，零新表零新体积账）。
-#[allow(dead_code)] // T3 接线（extract_text 两臂）落地后删本行豁免
 pub fn legacy_text(path: &Path, slides: bool) -> AppResult<String> {
     let target = if slides { "pptx" } else { "docx" };
     let soffice = soffice_path().ok_or_else(|| AppError::new(
