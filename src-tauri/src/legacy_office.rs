@@ -6,15 +6,15 @@
 //! 下面每一条关于 soffice 行为的论断都指向 spec §三 的实测读数，改动前先重跑
 //! `.superpowers/sdd/2026-10-13-m7-legacy-office/probe5.sh`，别把脚本 bug 读成 LibreOffice 的行为。
 //!
-//! # 关于本文件里的 `#[allow(dead_code)]`（T1 记账）
+//! # 关于本文件里的 `dead_code` 豁免（T1 记账）
 //! 本任务只铺纯核，生产调用点全在本批后续任务：转换件（`CONVERT_TIMEOUT`、`win_slash`、`profile_url`、
 //! `convert_args`、`product_path`、`profile_dir`、`Scratch`、`run_bounded`）由 T2 的 `legacy_text` 用、
 //! T3 经 `extract_text` 调到；`soffice_candidates`/`soffice_path`/`soffice_available`/`LIBREOFFICE_SUBDIR`
 //! 由 T2 与 T4 的降级门用；`WINGET_PACKAGE_ID`/`winget_path`/`winget_args`/`InstallOutcome` 由 T5 的
 //! `start_install` 用。处理方式与 `db::open_in_memory`（`db.rs:30`）和 M6 的 ocr.rs 首提交同款：
 //! **逐项显式放行，绝不模块级/全局关掉**（模块级豁免会连 T2 以后新写的没接线代码一起吞掉）。
-//! 后续任务接线落地时**必须顺手删掉对应豁免**；T5 的收口结构门 `grep -rn "allow(dead_code)" src/`
-//! 要求全仓只剩 `db.rs:30`，本文件届时要一条不剩。
+//! 后续任务接线落地时**必须顺手删掉对应豁免**；T5 的收口结构门（在全仓源码里 grep 本属性的字面量）
+//! 要求终态只剩 `db.rs:30` 一处，本文件届时要一条不剩。
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -30,13 +30,13 @@ pub const CONVERT_TIMEOUT: Duration = Duration::from_secs(60);
 /// 安装用的包 ID：**硬编码在本机 Rust 侧，绝不取自任何入参**（spec §四 那条「不给前端任意命令执行」）。
 #[allow(dead_code)] // T5 接线（start_install → winget_args）后删
 pub const WINGET_PACKAGE_ID: &str = "TheDocumentFoundation.LibreOffice";
-#[allow(dead_code)] // T2/T4 接线（soffice_candidates 进生产）后删
+#[allow(dead_code)] // T2/T4 接线（LIBREOFFICE_SUBDIR 进生产）后删
 const LIBREOFFICE_SUBDIR: &str = "LibreOffice";
 
 /// 三个候选位：`ProgramFiles` → `ProgramFiles(x86)` → PATH 各段。**探的是 `soffice.com`**：
 /// 实测同一活儿 `.exe` 6.65 s、`.com` 1.27 s，且 `.exe --version` 一个字都不往控制台写（spec §三.1）。
 /// 做成吃 `Option<&OsStr>` 的纯函数，是为了让「顺序」与「`.com` 这个文件名」能被单测打红。
-#[allow(dead_code)] // T2/T4 接线（soffice_path 进生产）后删
+#[allow(dead_code)] // T2/T4 接线（soffice_candidates 进生产）后删
 pub fn soffice_candidates(
     program_files: Option<&OsStr>,
     program_files_x86: Option<&OsStr>,
@@ -112,8 +112,12 @@ pub fn convert_args(target: &str, out_dir: &str, src: &str, profile_url: &str) -
 /// 每个源文件配**独立**的 `out_dir` 正是为了避开「两份同名文件进同一目录互相覆盖」（spec §三.8）。
 #[allow(dead_code)] // T2 接线（legacy_text 校验产物）后删
 pub fn product_path(out_dir: &Path, src: &Path, target: &str) -> PathBuf {
-    let stem = src.file_stem().unwrap_or(OsStr::new("doc"));
-    out_dir.join(stem).with_extension(target)
+    // OsStr 没有 Display，所以先转字符串再做纯拼接（绝不能退回 `with_extension`，理由见下）。
+    let stem = src.file_stem().unwrap_or_else(|| OsStr::new("doc")).to_string_lossy();
+    // 用 format! 而不是 `with_extension`：后者以「最后一个点」为界替换扩展名，于是源名里带点
+    // （中文项目里极常见：`合同2024.03验收.doc` 的 stem 是 `合同2024.03验收`）会被它当成扩展名剥掉，
+    // 算出 `合同2024.docx` —— 而 LibreOffice 的真产物是 `合同2024.03验收.docx`，T2 会「产物不存在」假落 failed。
+    out_dir.join(format!("{stem}.{target}"))
 }
 
 /// 独立用户配置目录（每进程一个，**故意不删**：实测每次新建 profile 多花 ≈0.78 s/份，spec §三.3；
@@ -214,7 +218,7 @@ pub fn winget_args() -> Vec<String> {
     ]
 }
 
-/// T5 起由 `start_install`（`libreoffice_install` IPC 命令）构造；**届时删除这条 `allow(dead_code)` 豁免**
+/// T5 起由 `start_install`（`libreoffice_install` IPC 命令）构造；**届时删除这条 `dead_code` 豁免**
 /// （账本已记：T5 收口门要求本属性不残留）。
 #[allow(dead_code)]
 #[derive(serde::Serialize)]
@@ -274,6 +278,16 @@ mod tests {
         assert_eq!(p, PathBuf::from("C:/out/合同 验收.docx"));
     }
 
+    /// 源名里带点（日期/版本号）时产物名必须**整段 stem** 保留。
+    /// 这条是 T1 评审 Important-1 补的：`with_extension` 会把 `.03验收` 当扩展剥掉，
+    /// 算出 `合同2024.docx` 而真产物是 `合同2024.03验收.docx` ⇒ T2 假落 failed。
+    /// 变异取证：把实现换回 `out_dir.join(stem).with_extension(target)` ⇒ 本条当场红。
+    #[test]
+    fn product_path_keeps_every_dot_inside_the_source_stem() {
+        let p = product_path(Path::new("C:/out"), Path::new("C:/src/合同2024.03验收.doc"), "docx");
+        assert_eq!(p, PathBuf::from("C:/out/合同2024.03验收.docx"), "带点号的 stem 一个字符都不许丢：{p:?}");
+    }
+
     #[test]
     fn win_slash_flips_separators_and_strips_the_extended_length_prefix() {
         assert_eq!(win_slash(Path::new(r"C:\x\y")), "C:/x/y");
@@ -308,6 +322,7 @@ mod tests {
     fn run_bounded_kills_a_child_that_overruns_the_budget() {
         // 不需要「真会卡死 LibreOffice 的坏 .doc」就能证伪超时分支：注入一条必然慢的命令即可。
         let cmd = std::env::var_os("COMSPEC").map(PathBuf::from).expect("Windows 上必有 cmd.exe");
+        let t0 = std::time::Instant::now();
         let r = run_bounded(
             &cmd,
             &[
@@ -318,13 +333,16 @@ mod tests {
         );
         let e = r.expect_err("慢命令必须被超时打断，否则 60 s 预算只是个装饰");
         assert_eq!(e.code, "extract_failed", "超时沿用既有码，不扩码表：{}", e.message);
-        assert!(e.message.contains("未在 0 秒内返回") || e.message.contains("秒内返回"),
-            "错误要说清是超时：{}", e.message);
+        assert!(e.message.contains("秒内返回"), "错误要说清是超时：{}", e.message);
+        // 光断 Err 测不到「真的把子进程杀了」：ping -n 20 自然跑完要 ≈19 s，
+        // 所以 elapsed 必须贴着预算（800 ms）而不是跟着 ping 走 —— 少这一句，删掉 kill 也测不出差别。
+        let el = t0.elapsed();
+        assert!(el < Duration::from_secs(5), "超时要真的 kill，而不是等子进程自己跑完（实得 {el:?}）");
     }
 
     #[test]
     fn run_bounded_passes_a_fast_child_through() {
-        let cmd = std::env::var_os("COMSPEC").map(PathBuf::from).unwrap();
+        let cmd = std::env::var_os("COMSPEC").map(PathBuf::from).expect("Windows 上必有 cmd.exe");
         let st = run_bounded(&cmd, &["/c".to_owned(), "exit 0".to_owned()], Duration::from_secs(5))
             .expect("快命令不该被判超时");
         assert!(st.success(), "退出状态要原样交回调用方（它还不信呢）");
@@ -332,8 +350,10 @@ mod tests {
 
     #[test]
     fn probe_returns_a_bool_without_panicking() {
-        // 与 M6 的 `probe_returns_a_bool_without_panicking` 同形：只断「不 panic、返回 bool」。
-        assert!(matches!(soffice_available(), true | false));
+        // 这一条测的是「调用不 panic」——panic 本身就会让测试失败，与断言无关。
+        // T1 评审（Important-2，plan-mandated）指出原先的 `assert!(matches!(.., true | false))` 恒真、
+        // 零守护，故按本仓「测试必须可证伪」的口径改成显式 `let _`，把意图写在注释里而不是假装在断言。
+        let _ = soffice_available();
         // winget 那一条要能红：探到了就必须是 winget.exe（把候选名写成别的文件名这条就红），
         // 光断 `matches!(x.is_some(), true|false)` 是恒真、零守护（本仓「简报里的测试必须可证伪」那条）。
         assert!(
