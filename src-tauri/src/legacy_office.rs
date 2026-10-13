@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::{AppError, AppResult};
 
-/// 单份文件的转换预算。实测稳态 1.03–1.19 s/份（spec §三.2），60 s 是「真卡死」与「慢盘」的分界。
+/// 单份文件的转换预算。实测稳态 ≈2.0 s/份（0c007eb 订正后的基数：每笔独立 profile，spec §三.2），60 s 是「真卡死」与「慢盘」的分界。
 /// 之所以必须有这一道：`run_pass` 只在**文件之间**查 cancel，子进程不返回就停不下来。
 pub const CONVERT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -189,7 +189,7 @@ pub fn run_bounded(program: &Path, args: &[String], budget: Duration) -> AppResu
 }
 
 /// 把 `.doc` / `.ppt` 转成 docx/pptx 再抽出正文。**在抽取阶段（写锁外）被调用**（D1）——
-/// 一份 ≈1.2 s 的进程冷启动只拖长这一轮，不进任何单笔写锁。
+/// 一份 ≈2.0 s 的进程冷启动（每笔独立 profile 的实测基数）只拖长这一轮，不进任何单笔写锁。
 /// 产物只当管道：落到 `Scratch`（每文件一个目录，避开同名覆盖）→ 交给既有 `office_text` 抽正文
 /// → 目录随 `Scratch` 析构删掉，库里只留正文（D2，零新表零新体积账）。
 pub fn legacy_text(path: &Path, slides: bool) -> AppResult<String> {

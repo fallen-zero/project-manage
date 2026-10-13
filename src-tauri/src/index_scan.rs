@@ -293,28 +293,49 @@ mod tests {
 
     /// D6：探不到 LibreOffice 时，`.doc`/`.ppt` 与今天的未支持类型**完全同路**——
     /// 不建行、不进 `over_size`、不占单项目配额。降级门只有这一处落点。
+    /// 四条断言按「变异各打红哪一条」排序，夹具 5 份 = 1 txt + 旧格式 4 份（两份 1 字节、
+    /// 两份 MAX+1 稀疏，`File::create` + `set_len` 造大文件：扫描层只读元数据，不写 21 MB
+    /// 真字节，守 -j 1 机器的内存规矩）：
+    /// ① 超限桶不含 doc/ppt —— 钉「臂必须**先于**超限分桶」：臂被挪到 `if size > max_file_bytes`
+    ///    之后时，两份 21 MB 旧格式会在触顶前落进这一桶打红这里（1 字节夹具永远进不了这桶，
+    ///    光有小文件的断言是非伪造的）；
+    /// ② `!capped` 配 `max_files_per_project = 3` —— 钉「不占配额」：旧格式一旦被计数，
+    ///    第 4 份文件就触顶打红这里；
+    /// ③ `files` 不含 doc/ppt —— 钉「不建行」；④ txt 照常入库。
     #[test]
     fn legacy_docs_are_not_scanned_when_soffice_is_unavailable() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("旧报告.doc"), b"x").unwrap();
         std::fs::write(dir.path().join("旧片子.ppt"), b"x").unwrap();
         std::fs::write(dir.path().join("新说明.txt"), b"hello").unwrap();
+        for name in ["超大旧报告.doc", "超大旧片子.ppt"] {
+            let f = std::fs::File::create(dir.path().join(name)).unwrap();
+            f.set_len(MAX + 1).unwrap();
+        }
         let mut o = opts(&[]);
         o.soffice_available = false;
+        o.max_files_per_project = 3; // 5 份文件里只有 txt 该被计数：旧格式占配额即触顶
         let out = scan_root(dir.path(), &o);
+        assert!(out.over_size.iter().all(|f| f.ext != "doc" && f.ext != "ppt"),
+            "也不该进超限桶（降级臂必须先于超限分桶）：{:?}",
+            out.over_size.iter().map(|f| &f.ext).collect::<Vec<_>>());
+        assert!(!out.capped, "旧格式不该占单项目配额（配额=3，只有 txt 该被计数）：files={} over_size={}",
+            out.files.len(), out.over_size.len());
         assert!(out.files.iter().all(|f| f.ext != "doc" && f.ext != "ppt"),
             "无 LibreOffice 时旧格式不该进清单：{:?}", out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
-        assert!(out.over_size.iter().all(|f| f.ext != "doc"), "也不该进超限桶（不占配额）");
         assert!(out.files.iter().any(|f| f.ext == "txt"), "纯文本不受影响");
     }
 
     /// 对照臂：可用时放行建行（扫描层只放行，真转换在抽取阶段，别在这里跑子进程）。
+    /// doc 与 ppt 都要放行 —— 两条 DocKind 共用同一臂，只断 .doc 的话 ppt 那半被删也不会红。
     #[test]
     fn legacy_docs_are_scanned_when_soffice_is_available() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("旧报告.doc"), b"x").unwrap();
+        std::fs::write(dir.path().join("旧片子.ppt"), b"x").unwrap();
         let out = scan_root(dir.path(), &opts(&[])); // 测试用 opts() 默认 soffice_available=true
-        assert!(out.files.iter().any(|f| f.ext == "doc"), "可用时 .doc 应放行：{:?}", out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
+        assert!(out.files.iter().any(|f| f.ext == "doc") && out.files.iter().any(|f| f.ext == "ppt"),
+            "可用时 .doc/.ppt 都应放行：{:?}", out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
     }
 
     /// 兑 M6 终审 Minor-6 的同形账：`load` 的两个能力默认值**必须有测试钉住**。
