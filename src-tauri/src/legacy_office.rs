@@ -32,6 +32,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::error::{AppError, AppResult};
+use crate::scratch::Scratch;
 
 /// 单份文件的转换预算。实测稳态 ≈2.0 s/份（0c007eb 订正后的基数：每笔独立 profile，spec §三.2），60 s 是「真卡死」与「慢盘」的分界。
 /// 之所以必须有这一道：`run_pass` 只在**文件之间**查 cancel，子进程不返回就停不下来。
@@ -127,43 +128,6 @@ pub fn product_path(out_dir: &Path, src: &Path, target: &str) -> PathBuf {
     out_dir.join(format!("{stem}.{target}"))
 }
 
-/// 一次转换的一次性目录（每笔一个），里面分 `<scratch>/out` 与 `<scratch>/profile` 两格；
-/// Drop 时整棵删掉——成功与失败路径都清（spec §五.6）。**profile 必须长在同一个一次性目录里**
-/// （spec §三.16：共用 `UserInstallation` 的并行实例会抢输、败者零产物还弹模态框卡到超时）。
-/// 不用 `tempfile`：它在 `[dev-dependencies]`，生产代码拿不到。
-pub struct Scratch {
-    dir: PathBuf,
-}
-
-impl Scratch {
-    pub fn new(tag: &str) -> AppResult<Scratch> {
-        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // 名字必须自带「跨进程重启也不撞」的一格：只靠 pid+seq+tag 时，若上一轮 Drop 的 remove_dir_all
-        // 被超时杀掉的 soffice.bin 句柄顶住而静默失败（spec §三.16 的场景），OS 之后复用同一 pid、
-        // 同一序号、同 stem 源文件就会 create_dir_all 直接端走陈旧目录，「产物存在」判据会在旧产物上通过。
-        // epoch 纳秒是 std 里最便宜的唯一性来源（零新依赖）；不需要时钟单调，只要跨进程重启后碰撞不了。
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let dir = std::env::temp_dir()
-            .join("pfm-m7")
-            .join(format!("{}-{}-{}-{}", std::process::id(), n, nanos, tag));
-        std::fs::create_dir_all(&dir).map_err(|e| AppError::io(&dir, &e))?;
-        Ok(Scratch { dir })
-    }
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
 /// 起子进程并**带预算地等**：每 200 ms 轮询一次 `try_wait`，超时就 `kill`。
 /// 退出码由调用方判断——**别信它**（spec §三.6：垃圾字节冒充 `.doc` 也是 exit 0）。
 pub fn run_bounded(program: &Path, args: &[String], budget: Duration) -> AppResult<ExitStatus> {
@@ -214,7 +178,7 @@ pub fn legacy_text(path: &Path, slides: bool) -> AppResult<String> {
     // （spec §三.16 实测：两个实例共用同一个 UserInstallation 时，抢输的一方 exit 1 且零产物，
     // 还会弹模态框把这笔卡到超时；而索引 worker 与预览通路会真并发，`cargo test` 默认多线程）。
     // 代价是每份多 ≈1.0 s 的 profile 初始化（T2 实测订正，旧读数 0.78 s 作废）；换来并发互不干扰 + 随 Scratch 一起删净。
-    let scratch = Scratch::new(target)?;
+    let scratch = Scratch::new("pfm-m7", target)?;
     let out = scratch.dir().join("out");
     std::fs::create_dir_all(&out).map_err(|e| AppError::io(&out, &e))?;
     let args = convert_args(
@@ -367,16 +331,6 @@ mod tests {
         let u = profile_url(Path::new(r"C:\Users\zero\AppData\Local\Temp\pfm-m7\profile-1"));
         assert!(u.starts_with("file:///C:/"), "要三斜杠 + 正斜杠盘符：{u}");
         assert!(!u.contains('\\'), "混合分隔符是 14–45 s 的慢失败（spec §三.4）：{u}");
-    }
-
-    #[test]
-    fn scratch_dir_disappears_when_it_is_dropped() {
-        let s = Scratch::new("t1").unwrap();
-        let dir = s.dir().to_path_buf();
-        std::fs::write(dir.join("x.txt"), b"y").unwrap();
-        assert!(dir.is_dir(), "new 之后目录必须在");
-        drop(s);
-        assert!(!dir.exists(), "Drop 必须把临时目录整棵删掉（失败路径也走这一条）");
     }
 
     #[test]

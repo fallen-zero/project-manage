@@ -9,6 +9,7 @@ mod ledger;
 mod legacy_office;
 mod ocr;
 mod project;
+mod scratch;
 mod search;
 mod tokenize;
 mod vault;
