@@ -724,6 +724,115 @@ mod tests {
         assert_eq!(img_after.len(), img_before.len(), "被索引副本一字未动");
     }
 
+    /// M7 端到端（headless，需求方选的路线，同 M6 蓝本）：真 LibreOffice 驱动整条链 ——
+    /// 一份含已知中文的 .doc 复制进 tempdir → `run_pass` → `extract_text` → `legacy_office::legacy_text`
+    /// → `office_text`(docx) → `write_doc`(jieba) 入库 → `doc_hits` 搜得到 → `render_preview` 出正文
+    /// → 第二趟 `unchanged` 证「不重转」。覆盖 spec §九 断言 1 与 §八 的 1/3 格，并当场证红线①。
+    /// 没装 LibreOffice 显式 SKIP，不假装通过。
+    #[test]
+    fn legacy_doc_flows_end_to_end_through_index_and_search() {
+        if !crate::legacy_office::soffice_available() {
+            eprintln!("SKIP: 本机无 LibreOffice，旧格式端到端不假装通过（降级由扫描门测守护）");
+            return;
+        }
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-cn.doc");
+        let src_before = std::fs::metadata(&fixture).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("旧合同.doc");
+        std::fs::copy(&fixture, &doc).unwrap();
+        let doc_before = std::fs::metadata(&doc).unwrap();
+        // txt 刻意不含「合同验收」，别让正文段命中被夹具之外的东西稀释。
+        std::fs::write(dir.path().join("台账.txt"), "项目 台账 摘要".as_bytes()).unwrap();
+
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", dir.path());
+
+        // §九.1：一轮后 .doc 行 ok。opts() 默认 soffice_available=true（可用那一支）。
+        let summary = run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(summary.state, "done");
+        let status: String = conn
+            .query_row("SELECT index_status FROM index_docs WHERE path LIKE '%旧合同.doc'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "ok", "真转换应入库 ok（不是 failed/skipped）");
+
+        // 正文段可搜：无空格原词命中（转换抽出的正文经既有 jieba 入库，分词链未动）。
+        let hits = crate::index_store::doc_hits(&conn, "合同验收", 20).unwrap();
+        assert!(hits.iter().any(|h| h.path.ends_with("旧合同.doc")),
+            "旧格式正文应进 FTS 并被原词命中：{:?}", hits.iter().map(|h| &h.path).collect::<Vec<_>>());
+
+        // 预览可开：走同一个 extract_text，于是现转一次。断长度，不回显正文（红线④）。
+        let doc_id: String = conn
+            .query_row("SELECT id FROM index_docs WHERE path LIKE '%旧合同.doc'", [], |r| r.get(0))
+            .unwrap();
+        let row = crate::doc_preview::row_for_preview(&conn, &doc_id).unwrap();
+        let pv = crate::doc_preview::render_preview(&doc_id, &row, "合同验收", crate::index_scan::DEFAULT_MAX_FILE_BYTES)
+            .unwrap();
+        assert!(pv.text.contains("合同验收"), "旧格式预览应能现转并含已知词（长度 {}）", pv.text.chars().count());
+
+        // 增量不重转：size+mtime 未变 ⇒ 第二趟计 unchanged，一个字节都不打开（D1 的成本承诺兑现处）。
+        let second = run_pass(&conn, &opts(), Some("p1"), false, &no_cancel(), &mut |_| {}).unwrap();
+        let r2 = &second.results[0];
+        assert_eq!(r2.ok, 0, "没重读就不该再计 ok：{r2:?}");
+        assert!(r2.unchanged >= 1, ".doc 应计入 unchanged（不重起 LibreOffice）：{r2:?}");
+
+        // 红线①：源夹具与 temp 副本逐字未动。
+        let src_after = std::fs::metadata(&fixture).unwrap();
+        assert_eq!((src_after.len(), src_after.modified().ok()), (src_before.len(), src_before.modified().ok()),
+            "源夹具一字未动");
+        assert_eq!(std::fs::metadata(&doc).unwrap().len(), doc_before.len(), "被索引副本一字未动");
+    }
+
+    /// **两笔转换并发**：把 T2 那一轮的设计翻转钉成**确定性**守护，而不是靠多线程 harness 撞运气。
+    /// 实测（spec §三.16）：两个实例共用同一个 `UserInstallation` 时抢输的一方 `exit 1` 且零产物，
+    /// 而每笔转换自带独立目录后两笔都必须成功。这条断的是「目录隔离真的做到了」。
+    /// 变异取证：把 `legacy_text` 里的 profile 换回按 pid 复用的共享目录 ⇒ 本条要能红
+    ///   （T2 修正轮实测过：装回旧形状后 3/3 次红，且每次红的不是同一条测试 ⇒ 正是「随机假失败」）。
+    #[test]
+    fn two_conversions_in_parallel_do_not_collide() {
+        if !crate::legacy_office::soffice_available() {
+            eprintln!("SKIP: 本机无 LibreOffice");
+            return;
+        }
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-cn.doc");
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("甲.doc");
+        let b = dir.path().join("乙.doc");
+        std::fs::copy(&fixture, &a).unwrap();
+        std::fs::copy(&fixture, &b).unwrap();
+        let handle = std::thread::spawn(move || crate::legacy_office::legacy_text(&a, false).map(|t| t.chars().count()));
+        let right = crate::legacy_office::legacy_text(&b, false).map(|t| t.chars().count());
+        let left = handle.join().expect("子线程不该 panic");
+        assert!(left.is_ok() && right.is_ok(), "两笔并发都必须转换成功：left={:?} right={:?}",
+            left.as_ref().map(|n| *n).map_err(|e| e.code), right.as_ref().map(|n| *n).map_err(|e| e.code));
+        assert_eq!(left.unwrap(), right.unwrap(), "同一份内容的两副本抽出的长度该一致");
+    }
+
+    /// `.ppt` 走的是同一套代码，只有目标扩展名与 `office_text` 的 `slides` 分支不同。
+    /// 单独测一条是因为那条分支的读取入口是 `ppt/slides/slideN.xml`（spec §三.12），
+    /// 与 docx 的 `word/document.xml` 是两个部件 —— 少这一条，ppt 通路就只有注释在守。
+    #[test]
+    fn legacy_ppt_flows_end_to_end_through_index_and_search() {
+        if !crate::legacy_office::soffice_available() {
+            eprintln!("SKIP: 本机无 LibreOffice");
+            return;
+        }
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-cn.ppt");
+        let dir = tempfile::tempdir().unwrap();
+        let ppt = dir.path().join("旧片子.ppt");
+        std::fs::copy(&fixture, &ppt).unwrap();
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", dir.path());
+        let summary = run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(summary.state, "done");
+        let status: String = conn
+            .query_row("SELECT index_status FROM index_docs WHERE path LIKE '%旧片子.ppt'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "ok", "含字的 .ppt 应经真转换入库 ok");
+        let hits = crate::index_store::doc_hits(&conn, "付款条件", 20).unwrap();
+        assert!(hits.iter().any(|h| h.path.ends_with("旧片子.ppt")),
+            "ppt 的第二段中文应可被搜到：{:?}", hits.iter().map(|h| &h.path).collect::<Vec<_>>());
+    }
+
     /// 取消：第一个进度回调就把标志立起来，pass 必须停在中间。
     #[test]
     fn cancel_stops_the_pass_early() {
