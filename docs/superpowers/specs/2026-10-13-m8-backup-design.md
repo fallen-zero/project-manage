@@ -144,7 +144,7 @@ pfm-backup-2026-10-13T2130.zip          ← 用户选的目标路径，界面给
 - **headless 端到端档**：真文件库（`tempfile::tempdir()` 里的 `db::open`）+ 真 `run_pass` 建索引 → 导出 → 改活库（删一条项目）→ 应急包路径断言在数据目录内 → 导入 → 断被删的项目回来了、索引表空、真实夹具源文件 size+mtime 未动。`index.running` 那条闸门可本机证伪（构造一个 running=true 的 `IndexShared` 直接喂命令层表达式）。
 - **`Scratch` 搬移**：以「搬移前后 `cargo test --lib legacy_office::` 的条数与结果完全相同」为验证（**两个数都现跑取，别照抄本文任何一处**）；**不**为搬移新增功能测试，但要新增一条 `new` 的前缀参数测试（`pfm-m7` 与 `pfm-m8` 各生成在预期父目录下）。
 - **不该写**（本仓裁定）：为「`VACUUM` 真把包缩下来」写绝对体积阈值（依赖 SQLite 页填充细节，夹具一小就假绿）。也**不**拿活库的 `ledger.db` 文件大小作对照 —— WAL 下最近改动都在 `-wal` 侧文件里，主库文件可以小到没有比较意义。改成**双臂对照**：同一份夹具、同样 `conn.backup` 到两个临时文件，一臂剥索引 + `VACUUM`、一臂原样 ⇒ 断「剥过的 < 原样的」且**两臂之差大于一个下限页数**（下限由夹具写入的索引正文字节数推出来，不许事后放宽）。若某轮夹具分不出差，如实报「夹具规模不足」重造夹具，不许把断言改成 `<=` 蒙过去。
-- **门禁**：`cargo test --lib` 基线 **194** → 每格 Expected **实跑数出来**（`grep -c '^    fn '` + `test result` 行），不许累加（坑 9）；`node --test` 仍 8（新页面不进测试网）；两条 clippy `-D warnings` 0；`npm run build` exit 0 / `error TS` 0；结构门：`generate_handler!` **45**、`TARGET_VERSION` **4**、`allow(dead_code)` 只剩 `db.rs:30`（搬移 `Scratch` 时若顺手带上豁免，T6 接线完必须删掉 —— 「谁接线谁删」）。
+- **门禁**：`cargo test --lib` 基线 **194** → 每格 Expected **实跑数出来**（`grep -c '^    fn '` + `test result` 行），不许累加（坑 9）；`node --test` 8 → **10**（T8 给 `backupFileName` 加两条：Windows 非法字符与补零后的字典序==时间序，都是本机真会踩的形状；JSX 与薄封装仍不进测试网。原写「仍 8」是因为 spec 阶段没预料到「默认包名」里有一格可证伪逻辑 —— 这条修订由计划阶段带回，见计划 T8 注记。新页面不进测试网）；两条 clippy `-D warnings` 0；`npm run build` exit 0 / `error TS` 0；结构门：`generate_handler!` **45**、`TARGET_VERSION` **4**、`allow(dead_code)` 只剩 `db.rs:30`（搬移 `Scratch` 时若顺手带上豁免，T6 接线完必须删掉 —— 「谁接线谁删」）。
 
 ## 九、真机验收（沙盒 `dev.zero.pfm.m8test`，一次性 identifier，跑完删净；真实目录只读；子代理不跑 dev，控制方执行；CDP 走 `__TAURI_INTERNALS__.invoke`）
 
