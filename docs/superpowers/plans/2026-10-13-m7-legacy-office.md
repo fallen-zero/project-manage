@@ -83,7 +83,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::{AppError, AppResult};
 
-/// 单份文件的转换预算。实测稳态 1.03–1.19 s/份（spec §三.2），60 s 是「真卡死」与「慢盘」的分界。
+/// 单份文件的转换预算。实测稳态 ≈2.0 s/份（每笔独立 profile；复用 profile 时才是 1.03–1.19 s）（spec §三.2），60 s 是「真卡死」与「慢盘」的分界。
 /// 之所以必须有这一道：`run_pass` 只在**文件之间**查 cancel，子进程不返回就停不下来。
 pub const CONVERT_TIMEOUT: Duration = Duration::from_secs(60);
 
