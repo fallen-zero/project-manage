@@ -1112,6 +1112,31 @@ git commit -m "feat(m7): IndexOverview 透出 sofficeAvailable + /index 两态�
         assert_eq!(std::fs::metadata(&doc).unwrap().len(), doc_before.len(), "被索引副本一字未动");
     }
 
+    /// **两笔转换并发**：把 T2 那一轮的设计翻转钉成**确定性**守护，而不是靠多线程 harness 撞运气。
+    /// 实测（spec §三.16）：两个实例共用同一个 `UserInstallation` 时抢输的一方 `exit 1` 且零产物，
+    /// 而每笔转换自带独立目录后两笔都必须成功。这条断的是「目录隔离真的做到了」。
+    /// 变异取证：把 `legacy_text` 里的 profile 换回按 pid 复用的共享目录 ⇒ 本条要能红
+    ///   （T2 修正轮实测过：装回旧形状后 3/3 次红，且每次红的不是同一条测试 ⇒ 正是「随机假失败」）。
+    #[test]
+    fn two_conversions_in_parallel_do_not_collide() {
+        if !crate::legacy_office::soffice_available() {
+            eprintln!("SKIP: 本机无 LibreOffice");
+            return;
+        }
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-cn.doc");
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("甲.doc");
+        let b = dir.path().join("乙.doc");
+        std::fs::copy(&fixture, &a).unwrap();
+        std::fs::copy(&fixture, &b).unwrap();
+        let handle = std::thread::spawn(move || crate::legacy_office::legacy_text(&a, false).map(|t| t.chars().count()));
+        let right = crate::legacy_office::legacy_text(&b, false).map(|t| t.chars().count());
+        let left = handle.join().expect("子线程不该 panic");
+        assert!(left.is_ok() && right.is_ok(), "两笔并发都必须转换成功：left={:?} right={:?}",
+            left.as_ref().map(|n| *n).map_err(|e| e.code), right.as_ref().map(|n| *n).map_err(|e| e.code));
+        assert_eq!(left.unwrap(), right.unwrap(), "同一份内容的两副本抽出的长度该一致");
+    }
+
     /// `.ppt` 走的是同一套代码，只有目标扩展名与 `office_text` 的 `slides` 分支不同。
     /// 单独测一条是因为那条分支的读取入口是 `ppt/slides/slideN.xml`（spec §三.12），
     /// 与 docx 的 `word/document.xml` 是两个部件 —— 少这一条，ppt 通路就只有注释在守。
@@ -1145,7 +1170,8 @@ Run: `cd src-tauri && cargo test -j 1 --lib index_job::tests::legacy_ > /tmp/t7.
 Expected: 两条 PASS、`finished in N s`。把 N 如实报给控制方（本批**真起子进程**的测试，M6 的 e2e 是 0.4–0.5 s，本批预期 2–5 s/条）——这是 spec §十一.8 那条基数。
 
 Run: `cd src-tauri && cargo test -j 1 --lib > /tmp/t7a.log 2>&1; echo "exit=$?"; grep "test result" /tmp/t7a.log | tail -1`
-Expected: **192 passed**（190 + 2）。
+Expected: **193 passed**（190 + 3）。第三条（并发）是本计划在执行期追加的：T2 那一轮的 profile 翻转把并发安全
+交给了「每笔独立目录」，而 T2 的守护只依赖 harness 默认多线程（`--test-threads=1` 抓不到）⇒ 这里钉成确定性断言。
 
 - [ ] **Step 3: 变异取证（承重，不许只跑绿）**
 
@@ -1202,4 +1228,4 @@ git push origin feat/m7-legacy-office
 1. **Spec 覆盖**：D1→T2/T7（转换在 `extract_text` 分派、写锁外，e2e 证不压锁）；D2→T2（`Scratch` Drop 即删、零新表）；D3→T3（只 `doc`/`ppt`）；D4→T4（无开关）；D5→T4（worker 每轮现探、不记忆化）；D6→T4（单一落点 + 第二落点 grep 门）；D7→T6（一个线字段）；D8→T5 + T6（命令 + 按钮 + `openUrl` 退路）；D9→T2/T4（`failed`/`skipped(empty_text)`/不建行三态，复用既有 arm）；D10→T1（argv/路径/超时四件）；判据 §五 八条→T1 纯核测试 + T3 三处同源 + T4 单一落点 grep + T7 承重变异；§八 三档→T1（恒绿 12 条）/T2（条件 3 条）/T7（端到端 2 条）；§九 真机→T8；§十二 回写→T8 Step 3；§十一 风险 3（垃圾文件被当正文）在 T2 Step 2 的注释里点名不许写成「垃圾必错」，风险 4（run 切分）落在夹具用纯中文哨兵 + T2 断言形状。
 2. **占位符**：无 TBD/TODO。唯一「留到下一任务」的是 `start_install`（T1 只建 `InstallOutcome` 与 `winget_*`，`start_install` 在 T5 落地），并用**显式的 `#[allow(dead_code)]` + 「T5 删除豁免」注释**处理，且 T5 Step 4 有一条结构门强制它被删掉——与 M6 处理 T1/T2 豁免的同款收口。
 3. **类型一致**：`soffice_candidates(Option<&OsStr>,Option<&OsStr>,Option<&OsStr>)->Vec<PathBuf>`、`soffice_path()->Option<PathBuf>`、`soffice_available()->bool`、`win_slash(&Path)->String`、`profile_url(&Path)->String`、`convert_args(&str,&str,&str,&str)->Vec<String>`、`product_path(&Path,&Path,&str)->PathBuf`、`Scratch::new(&str)->AppResult<Scratch>`、`run_bounded(&Path,&[String],Duration)->AppResult<ExitStatus>`、`legacy_text(&Path,bool)->AppResult<String>`、`winget_args()->Vec<String>`、`InstallOutcome{started_via_winget:bool}`（出 `startedViaWinget`）、`ScanOptions.soffice_available: bool`、`IndexOverview.soffice_available`（出 `sofficeAvailable`）跨任务一致；`extract_text` 两臂传的 `slides` 布尔与 `office_text(path, slides)` 的形参名同源。
-4. **测试期望数（控制方按本计划逐条数出，非累加印象）**：T1 +13 ⇒ 180、T2 +3 ⇒ 183、T3 +1 ⇒ 184、T4 +3 ⇒ 187、T5 +3 ⇒ 190、T6 +0 ⇒ 190、T7 +2 ⇒ **192**；`node --test` 全程 8/8（零新前端测试）。派发每格时实现者须实跑回报，与本表不符即停。
+4. **测试期望数（控制方按本计划逐条数出，非累加印象）**：T1 +13 ⇒ 180、T2 +3 ⇒ 183、T3 +1 ⇒ 184、T4 +3 ⇒ 187、T5 +3 ⇒ 190、T6 +0 ⇒ 190、T7 +3 ⇒ **193**（T7 的第三条是执行期追加，见该任务 Step 1）；`node --test` 全程 8/8（零新前端测试）。派发每格时实现者须实跑回报，与本表不符即停。
