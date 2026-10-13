@@ -587,6 +587,14 @@ fn doc_preview(
     doc_preview::render_preview(&doc_id, &row, &query, max_file_bytes)
 }
 
+/// 一键安装 LibreOffice（M7 D8）。**零参数**：包 ID 与全部 argv 都硬编码在 `legacy_office`。
+/// 返回 `startedViaWinget=false` 表示本机没有 winget，前端要退到「打开官网下载页」。
+/// 这是全仓第 42 条命令，也是唯一一条会启动外部安装器的命令 —— spec §四 单列了理由与两条守护测试。
+#[tauri::command]
+fn libreoffice_install() -> AppResult<legacy_office::InstallOutcome> {
+    legacy_office::start_install()
+}
+
 /// 建库并在**指定目录**打开（M5.5 D8）。把「开库 + WAL 读回」从 setup 里拆出来，是为了能喂 tempdir
 /// 单测它——`index_job::start` 要 AppHandle、本批不开 tauri::test，所以可测切分只能到这一步；
 /// 取默认数据目录的路径与起轮仍留在 setup。`db::open` 内部已做 `create_dir_all` 与 WAL 读回断言
@@ -684,7 +692,8 @@ pub fn run() {
             index_docs,
             search_docs,
             search_all,
-            doc_preview
+            doc_preview,
+            libreoffice_install
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
@@ -708,5 +717,12 @@ mod tests {
         // db::TARGET_VERSION 是 db.rs 私有 const（lib.rs 够不着），这里写字面 4；
         // 若哪天加迁移改了 TARGET_VERSION，这条会红 → 提醒同步改这里（与 spec「零新迁移」一致）。
         assert_eq!(ver, 4, "= db.rs 的 TARGET_VERSION，M5.5 不加迁移");
+    }
+
+    /// 第 42 条命令必须是**零参数**的（spec §四：这条命令能启动外部安装器，
+    /// 任何入参都是任意命令执行的入口）。签名一变，这一行编不过。
+    #[test]
+    fn libreoffice_install_command_takes_no_arguments() {
+        const _: fn() -> crate::error::AppResult<crate::legacy_office::InstallOutcome> = libreoffice_install;
     }
 }

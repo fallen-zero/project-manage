@@ -6,15 +6,15 @@
 //! 下面每一条关于 soffice 行为的论断都指向 spec §三 的实测读数，改动前先重跑
 //! `.superpowers/sdd/2026-10-13-m7-legacy-office/probe5.sh`，别把脚本 bug 读成 LibreOffice 的行为。
 //!
-//! # 关于本文件里的 `dead_code` 豁免（T3 收账）
+//! # 关于本文件里的 `dead_code` 豁免（T5 收账）
 //! T1 铺纯核时本模块尚未接线，曾逐项挂过豁免；T2 落 `legacy_text`；T3 已把它接进 `extract_text`
 //! 的两个新分派臂（`DocKind::LegacyWord`/`LegacySlides`），转换件那 12 条豁免随之全部可达，
 //! 按「谁接线谁删」的口径在本任务删净。T4 接扫描门时删掉了 `soffice_available` 那一条，
-//! **当前只剩 4 条，全部归 T5 的 `start_install`**（`WINGET_PACKAGE_ID`/`winget_path`/
-//! `winget_args`/`InstallOutcome`）。处理方式与 `db::open_in_memory`（`db.rs:30`）和 M6 的 ocr.rs
+//! T5 把 `start_install` → `libreoffice_install` 那条 IPC 命令接上后，最后 4 条
+//! （`WINGET_PACKAGE_ID`/`winget_path`/`winget_args`/`InstallOutcome`）全部可达，**本文件一条不剩**。
+//! 全仓源码里该属性的终态只有 `db::open_in_memory`（`db.rs:30`）一处。处理方式与 M6 的 ocr.rs
 //! 首提交同款：**逐项显式放行，绝不模块级/全局关掉**（模块级豁免会连以后新写的没接线代码一起吞掉）。
-//! 后续任务接线落地时**必须顺手删掉对应豁免**；T5 的收口结构门（在全仓源码里 grep 本属性的字面量）
-//! 要求终态只剩 `db.rs:30` 一处，本文件届时要一条不剩。
+//! 后续任务在本文件新增未接线的项时，按同一口径挂单项豁免、接线时顺手删掉。
 //!
 //! # 并发形状：目录隔离，不是排队（spec §三.16 / §五.6 / §十.10 的裁定）
 //! **一笔转换一个一次性目录**，里面 `<scratch>/out` 与 `<scratch>/profile` 两格，成功与失败都随
@@ -38,7 +38,6 @@ use crate::error::{AppError, AppResult};
 pub const CONVERT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 安装用的包 ID：**硬编码在本机 Rust 侧，绝不取自任何入参**（spec §四 那条「不给前端任意命令执行」）。
-#[allow(dead_code)] // T5 接线（start_install → winget_args）后删
 pub const WINGET_PACKAGE_ID: &str = "TheDocumentFoundation.LibreOffice";
 const LIBREOFFICE_SUBDIR: &str = "LibreOffice";
 
@@ -227,7 +226,6 @@ pub fn legacy_text(path: &Path, slides: bool) -> AppResult<String> {
 }
 
 /// winget 的所在（`WindowsApps` 在 PATH 里，所以复用 PATH 扫描；不硬编码版本号路径）。
-#[allow(dead_code)] // T5 接线（start_install）后删
 pub fn winget_path() -> Option<PathBuf> {
     std::env::var_os("PATH")
         .as_deref()
@@ -236,7 +234,6 @@ pub fn winget_path() -> Option<PathBuf> {
 }
 
 /// 安装命令的参数。**包 ID 从这里硬编码**，`libreoffice_install` 那条 IPC 命令不吃任何前端入参。
-#[allow(dead_code)] // T5 接线（start_install）后删
 pub fn winget_args() -> Vec<String> {
     vec![
         "install".to_owned(),
@@ -248,15 +245,37 @@ pub fn winget_args() -> Vec<String> {
     ]
 }
 
-/// T5 起由 `start_install`（`libreoffice_install` IPC 命令）构造；**届时删除这条 `dead_code` 豁免**
-/// （账本已记：T5 收口门要求本属性不残留）。
-#[allow(dead_code)]
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstallOutcome {
     /// true = 已在自己的控制台窗口里起起 `winget install`（UAC 与进度都在那个窗口，本命令不等它结束）；
     /// false = 本机探不到 winget，**由前端 `openUrl` 打开官网下载页**。
     pub started_via_winget: bool,
+}
+
+/// 一键安装：探到 winget 就在**自己的控制台窗口**里起安装，本函数不等它结束（fire-and-forget）。
+/// 为什么不等：等就得让这条 sync 命令睡住消息泵几分钟（M5 finding 1 的机制），而 UAC 与下载进度
+/// 本来就在 winget 自己的窗口里，用户看得见。探不到 winget（LTSC/组策略机）返回 false，
+/// 由前端 `openUrl` 官网页 —— 退路不占第二条 IPC，也不把插件的 Rust API 拉进命令层。
+///
+/// **零参数 + 包 ID 硬编码**是这条命令的红线形状，由 `start_install_takes_no_arguments` 与
+/// `winget_args_hardcode_the_package_id` 两条钉住。`CREATE_NEW_CONSOLE` = 0x00000010。
+pub fn start_install() -> AppResult<InstallOutcome> {
+    let Some(winget) = winget_path() else {
+        return Ok(InstallOutcome { started_via_winget: false });
+    };
+    use std::os::windows::process::CommandExt as _;
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    Command::new(&winget)
+        .args(winget_args())
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .spawn()
+        .map_err(|e| AppError::new(
+            "fs_failed",
+            &format!("启动 winget 安装失败：{e}"),
+            Some("也可以用浏览器打开 LibreOffice 官网下载页手动安装（文档基金会，免费）"),
+        ))?;
+    Ok(InstallOutcome { started_via_winget: true })
 }
 
 #[cfg(test)]
@@ -392,6 +411,24 @@ mod tests {
                 .unwrap_or(true),
             "winget 探测要么没有、要么必须指向 winget.exe"
         );
+    }
+
+    /// 「不给前端任意命令执行」这条红线的**形状**守护：安装命令的参数表里只能出现硬编码字符串，
+    /// 且包 ID 是常量（spec §四）。把 WINGET_PACKAGE_ID 改成吃入参的话，这条与下一条一起红。
+    #[test]
+    fn start_install_takes_no_arguments() {
+        // 编译期形状断言：签名必须是 `fn() -> AppResult<InstallOutcome>`。
+        // 给 start_install 加任何一个入参，这一行就编不过 —— 这就是它的守护，不需要跑起来。
+        const _: fn() -> AppResult<InstallOutcome> = start_install;
+    }
+
+    #[test]
+    fn install_never_launches_a_soffice_child_directly() {
+        // 安装走的是 winget，不是 soffice：argv 表里不许混进转换参数，也不许拼前端来的字符串。
+        let a = winget_args();
+        assert_eq!(a.first().unwrap(), "install");
+        assert!(a.iter().all(|x| !x.starts_with("--convert-to") && !x.contains("file:///")),
+            "安装参数与转换参数必须是两套：{a:?}");
     }
 
     #[test]
