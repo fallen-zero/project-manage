@@ -721,7 +721,12 @@ mod tests {
             "源 png 一字未动"
         );
         let img_after = std::fs::metadata(&img).unwrap();
-        assert_eq!(img_after.len(), img_before.len(), "被索引副本一字未动");
+        // 整分支终审 F5：原先只查 size —— 同尺寸改写会溜过去。补齐 modified()，与 M7 副本侧同判据。
+        assert_eq!(
+            (img_after.len(), img_after.modified().ok()),
+            (img_before.len(), img_before.modified().ok()),
+            "被索引副本一字未动"
+        );
     }
 
     /// M7 端到端（headless，需求方选的路线，同 M6 蓝本）：真 LibreOffice 驱动整条链 ——

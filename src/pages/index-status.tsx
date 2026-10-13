@@ -135,6 +135,13 @@ export function IndexStatusPage() {
     }
   }, [progress]);
 
+  // 终审 F1：sofficeAvailable 一旦转真，装失败的红字就当场失效 —— 错误框渲染在状态条件之外，
+  // 不清就会留下「已启用本机 LibreOffice 转换」与「启动安装失败」同屏，后者成了屏幕上的谎话。
+  // 与本页惯例一致：只清这一格本地 state，不碰索引作业 store 的 error（那条有它自己的擦除路径）。
+  useEffect(() => {
+    if (overview?.sofficeAvailable) setInstallError(null);
+  }, [overview?.sofficeAvailable]);
+
   // 选中项目后取文件行；status 走参数（Rust 侧不拼 SQL）。
   useEffect(() => {
     if (!selectedId) return;
@@ -413,11 +420,13 @@ export function IndexStatusPage() {
                 // 不擦就会留下「上一条失败提示 + 这一次其实已经弹了 winget 窗口」同屏，那句提示变成谎话。
                 setInstallError(null);
                 // 这一条必须自己带 finally：命令是 fire-and-forget，返回 true 只代表「窗口已弹出」，
-                // 装完没装完界面不知道，所以按钮复位只跟着这一次 IPC，不假装反映安装进度。
+                // 装完没装完界面不知道，所以按钮复位只跟着这一次 IPC 的**整条链**，不假装反映安装进度。
+                // 终审 F1：退路那一路必须 return 进链 —— 不接链时 finally 跟着第一条 IPC 就复位，
+                // 上一次点击的 openUrl 迟到 reject 会在下一次点击清空错误之后把红字写回来（M4 M-8 同型）。
                 void installLibreOffice()
                   .then((r) => {
                     if (!r.startedViaWinget) {
-                      void openLibreOfficeDownloadPage().catch(() =>
+                      return openLibreOfficeDownloadPage().catch(() =>
                         setInstallError({ code: "unknown", message: "已探到本机没有 winget，也没能打开下载页，请手动访问 libreoffice.org", hint: null }),
                       );
                     }

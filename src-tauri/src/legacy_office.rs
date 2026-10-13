@@ -24,7 +24,7 @@
 //! 一句把锅甩给 `program\bootstrap.ini`「已损坏」的模态框（文件实测没坏），子进程不退出 ⇒ 那一笔烧满
 //! 60 s 超时。`cargo test` 默认多线程、生产上索引 worker 与预览通路也真会并发，所以复用 profile 换来的
 //! 是随机假失败。**并发靠目录隔离消解，本模块绝不再加进程内的锁/信号量/队列。**
-//! 代价照实记：每份多 ≈0.78 s 的 profile 初始化（spec §三.3），30 份的首轮约多 25 s；
+//! 代价照实记：每份多 ≈1.0 s 的 profile 初始化（T2 实测订正，spec §三.3 的 0.78 s 是复用基线上的旧读数），30 份的首轮约多 30 s；
 //! 换来的是 `%TEMP%\pfm-m7\` 不再累积 `profile-<pid>`（spec §十一.6 的旧账作废）。
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -90,8 +90,12 @@ pub fn win_slash(p: &Path) -> String {
 
 /// `-env:UserInstallation` 要的 URL。**混合反斜杠的写法是慢失败**（实测 13.8–45 s 才报错，spec §三.4），
 /// 所以这里只走 `win_slash`，拼成 `file:///C:/...`。
+/// **空格必须写成 `%20`**（终审 F2 实测，spec §三 补记）：URL 里带字面空格的 profile 会让这一笔
+/// 约 4 s 就死掉（退出码 -1073740791、零产物）⇒ 用户名带空格的机器上每一份旧格式都整档失败；
+/// 同一格改成 `%20` 后 ≈1.8 s 转换成功、产物在。只编空格这一种字符是因为只有它被证伪过；
+/// `--outdir` 与源路径走 argv、是普通参数不是 URL，**不**跟着编。
 pub fn profile_url(profile_dir: &Path) -> String {
-    format!("file:///{}", win_slash(profile_dir))
+    format!("file:///{}", win_slash(profile_dir)).replace(' ', "%20")
 }
 
 /// 一次转换的 argv。**顺序与形态都是实测钉死的**：
@@ -135,9 +139,17 @@ impl Scratch {
     pub fn new(tag: &str) -> AppResult<Scratch> {
         static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // 名字必须自带「跨进程重启也不撞」的一格：只靠 pid+seq+tag 时，若上一轮 Drop 的 remove_dir_all
+        // 被超时杀掉的 soffice.bin 句柄顶住而静默失败（spec §三.16 的场景），OS 之后复用同一 pid、
+        // 同一序号、同 stem 源文件就会 create_dir_all 直接端走陈旧目录，「产物存在」判据会在旧产物上通过。
+        // epoch 纳秒是 std 里最便宜的唯一性来源（零新依赖）；不需要时钟单调，只要跨进程重启后碰撞不了。
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         let dir = std::env::temp_dir()
             .join("pfm-m7")
-            .join(format!("{}-{}-{}", std::process::id(), n, tag));
+            .join(format!("{}-{}-{}-{}", std::process::id(), n, nanos, tag));
         std::fs::create_dir_all(&dir).map_err(|e| AppError::io(&dir, &e))?;
         Ok(Scratch { dir })
     }
@@ -201,7 +213,7 @@ pub fn legacy_text(path: &Path, slides: bool) -> AppResult<String> {
     // 一笔转换一个一次性目录，里面分 `out` 与 `profile` 两格：**profile 必须每笔独立**
     // （spec §三.16 实测：两个实例共用同一个 UserInstallation 时，抢输的一方 exit 1 且零产物，
     // 还会弹模态框把这笔卡到超时；而索引 worker 与预览通路会真并发，`cargo test` 默认多线程）。
-    // 代价是每份多 ≈0.78 s 的 profile 初始化（§三.3）；换来并发互不干扰 + 随 Scratch 一起删净。
+    // 代价是每份多 ≈1.0 s 的 profile 初始化（T2 实测订正，旧读数 0.78 s 作废）；换来并发互不干扰 + 随 Scratch 一起删净。
     let scratch = Scratch::new(target)?;
     let out = scratch.dir().join("out");
     std::fs::create_dir_all(&out).map_err(|e| AppError::io(&out, &e))?;
@@ -495,5 +507,48 @@ mod tests {
                 assert_eq!(e.code, "extract_failed", "实得：{} {}", e.code, e.message);
             }
         }
+    }
+
+    /// 带空格的用户名 ⇒ `%TEMP%` 整体带空格 ⇒ profile URL 里会出现空格。终审 F2 实测钉死的方向：
+    /// URL 里带**字面空格**的 profile 这一笔约 4 s 就死（退出码 -1073740791、零产物），同一格改 `%20`
+    /// 后 ≈1.8 s 转换成功。修复前的组合只能靠注入 TMP 去撞 `legacy_text`，常驻测试不改进程环境
+    /// （`cargo test` 默认多线程会污染别的用例），所以这里用 `legacy_text` 自己拼 argv 的那组纯函数
+    /// （`profile_url`/`win_slash`/`convert_args`）+ 真 `run_bounded` 走一次真转换来钉这个事实。
+    /// **可证伪**：删掉 `profile_url` 末尾的 `.replace(' ', "%20")` ⇒ 第一条 URL 形状断言在没有
+    /// LibreOffice 的机器上也会当场红；本机（装了）则两条一起红。
+    #[test]
+    fn spaced_profile_url_is_percent20_and_still_converts() {
+        // 形状这一半无条件跑：它是「%20 编码不许被重构丢掉」的常驻守卫。
+        let u = profile_url(Path::new(r"C:\Users\John Smith\AppData\Local\Temp\pfm-m7\profile"));
+        assert!(u.starts_with("file:///C:/Users/John%20Smith/"), "profile URL 里的空格必须写成 %20：{u}");
+        assert!(!u.contains(' '), "字面空格在 URL 语法里非法（实测 ≈4 s 崩、零产物）：{u}");
+
+        if !soffice_available() {
+            eprintln!("SKIP: 本机无 LibreOffice，真转换那一半不假装通过");
+            return;
+        }
+        // 真转换那一半：源路径、outdir、profile 全带空格，就是「用户名带空格」机器上 legacy_text 的实际形态。
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-cn.doc");
+        let spaced_root = std::env::temp_dir().join("pfm m7 space-test");
+        let _ = std::fs::remove_dir_all(&spaced_root);
+        std::fs::create_dir_all(&spaced_root).unwrap();
+        let src = spaced_root.join("旧 合同.doc");
+        std::fs::copy(&fixture, &src).unwrap();
+        let out = spaced_root.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let args = convert_args(
+            "docx",
+            &win_slash(&out),
+            &win_slash(&src),
+            &profile_url(&spaced_root.join("profile")),
+        );
+        let st = run_bounded(&soffice_path().unwrap(), &args, CONVERT_TIMEOUT).unwrap();
+        let produced = product_path(&out, &src, "docx");
+        assert!(produced.is_file(), "退出码 {} 下产物必须在（带空格全套路径）", st.code().unwrap_or(-1));
+        let text = crate::extract::office_text(&produced, false).unwrap();
+        assert!(text.contains("合同验收哨兵串"), "带空格路径转换的正文要照常抽到（长度 {}）", text.chars().count());
+        // 尽力清（与 Scratch::Drop 同一口径：soffice.bin 退出后可能还短暂握着句柄，硬 unwrap 会偶发假红）。
+        // 下一次运行的开头还有一道 best-effort 重清，本机实测跑完整目录即消失。
+        let _ = std::fs::remove_dir_all(&spaced_root);
     }
 }
