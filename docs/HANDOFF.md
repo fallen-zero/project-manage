@@ -4,7 +4,7 @@
 
 ## 0. 先读这一段
 
-这是一个 Tauri 桌面工具的持续开发项目，按里程碑推进。**M0–M6 已完成并合入 `master`；M7（旧格式 `.doc`/`.ppt` 经本机 LibreOffice 无头转换）代码全完、真机六格验到、整分支终审修完，停在功能分支 `feat/m7-legacy-office` 等一次合并批准**。下一个里程碑是 **M8（备份包导出/导入）**。
+这是一个 Tauri 桌面工具的持续开发项目，按里程碑推进。**M0–M7 都已完成并合入 `master`**（M7 于 2026-10-13 fast-forward 合入，合并点 `da140a4`；本文这条收口提交之后 master 只比功能分支多这一条文档提交，M6 同形；全历史零合并提交的惯例保持），下一个里程碑是 **M8（备份包导出/导入：SQLite Backup API 快照 + `manifest.json` + SHA-256 校验，索引不进包）**。
 
 三份必读文档按重要性：
 
@@ -54,11 +54,11 @@
 
 ## 3. 当前卡在哪
 
-**代码面没有卡点**。M7 八格代码全完、门禁全绿、整分支终审 With fixes 的三条 Important 全修完并复审通过。唯一挡着的是**流程闸**：合 `master` 需要需求方当次批准（见 §4）。M7 停在 `feat/m7-legacy-office`（HEAD 见 `git log --oneline -1`），`master` 仍指 M6 收口点。
+**代码面没有卡点**。M7 八格代码全完、门禁全绿、整分支终审 With fixes 的三条 Important 全修完并复审通过，**并已按惯例 fast-forward 合入 `master` 且推送 origin**（需求方当次批准）。`master` 与 `feat/m7-legacy-office` 在合并那一刻同指一个提交（本文这条收口提交落在 `master` 之后，功能分支就只差它一条；两者现指 `git for-each-ref --format='%(refname:short) %(objectname:short)' refs/heads/master refs/heads/feat/m7-legacy-office` 现取，别照抄这里）。
 
 ## 4. 下一步计划
 
-先做**收口动作**：M7 的 `feat/m7-legacy-office` 按惯例 fast-forward 合入 `master`（合前核 `git rev-list --merges --count --all` = 0 与 `git merge-base --is-ancestor master feat/m7-legacy-office`，合后在 master 树上复跑 `cargo test -j 1 --lib` **194** / 两 clippy / `node --test` / `npm run build`，两条分支都推 origin）——**需要需求方当次批准**。之后二选一：
+M7 已于 2026-10-13 合入 `master`（合后在 master 树上复跑 194 / 两 clippy / node 8-8 / build 全绿）。下面二选一：
 
 - **A（默认方向）：开 M8（备份包导出/导入）**——走完整流程：`superpowers:brainstorming` 收口（SQLite Backup API 快照 + `manifest.json` + SHA-256 校验 + 附件一并打包 + 导入前校验失败怎么告知 + 索引不进包）→ spec → writing-plans → SDD → 整分支终审 → 合 master（**需当次批准**）。技术方案 §6.2 已把口径定完，M8 主要是执行。
 - **A′（先清历史账）**：M6 遗留 5 条有名 Minor + M7 新增的 deferred（见下）适合合成一个清账批。最该修的是 M6 **Minor-4**（`ocr_available()` 探「任一识别器语言」而 `image_text` 只用 `TryCreateFromUserProfileLanguages` ⇒ 「profile 语言无包、其它语言有包」的机器上探测 true、每图空指针、整目录刷屏 `failed`；spec §五.2 已给现成一行加固）。M7 顺带欠的两条同类：路径含 `%`/`#` 的 profile URL 形态未测（编码前后字节相同，属既有歧义面）、`--convert-to` 省略 filter 名依赖 LibreOffice 的默认导出 filter（别的版本若变，加固写法是写全 `docx:MS Word 2007 XML` / `pptx:Impress MS PowerPoint 2007 XML`）。
