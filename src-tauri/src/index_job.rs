@@ -779,7 +779,10 @@ mod tests {
         let src_after = std::fs::metadata(&fixture).unwrap();
         assert_eq!((src_after.len(), src_after.modified().ok()), (src_before.len(), src_before.modified().ok()),
             "源夹具一字未动");
-        assert_eq!(std::fs::metadata(&doc).unwrap().len(), doc_before.len(), "被索引副本一字未动");
+        // T7 评审 Minor 补：副本这侧原先只查 size —— 同尺寸改写会溜过去，补 modified() 与夹具侧同判据。
+        let doc_after = std::fs::metadata(&doc).unwrap();
+        assert_eq!((doc_after.len(), doc_after.modified().ok()), (doc_before.len(), doc_before.modified().ok()),
+            "被索引副本一字未动");
     }
 
     /// **两笔转换并发**：把 T2 那一轮的设计翻转钉成**确定性**守护，而不是靠多线程 harness 撞运气。
@@ -794,6 +797,10 @@ mod tests {
             return;
         }
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-cn.doc");
+        // 红线①的另一半：转换一笔都不许往**夹具目录**里写东西（T7 评审 Important-2 补）。
+        let fix_dir = fixture.parent().unwrap().to_path_buf();
+        let fix_before = std::fs::read_dir(&fix_dir).unwrap().count();
+        let fx_meta_before = std::fs::metadata(&fixture).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("甲.doc");
         let b = dir.path().join("乙.doc");
@@ -804,7 +811,14 @@ mod tests {
         let left = handle.join().expect("子线程不该 panic");
         assert!(left.is_ok() && right.is_ok(), "两笔并发都必须转换成功：left={:?} right={:?}",
             left.as_ref().map(|n| *n).map_err(|e| e.code), right.as_ref().map(|n| *n).map_err(|e| e.code));
-        assert_eq!(left.unwrap(), right.unwrap(), "同一份内容的两副本抽出的长度该一致");
+        let (ln, rn) = (left.unwrap(), right.unwrap());
+        // T7 评审 Minor 补：两笔都 `Ok(0)` 时「相等」会空过 ⇒ 必须断真抽到东西（长度，不回显正文）。
+        assert!(ln > 0 && rn > 0, "两笔都必须抽出非空正文（否则相等断言是空的）：left={ln} right={rn}");
+        assert_eq!(ln, rn, "同一份内容的两副本抽出的长度该一致");
+        assert_eq!(std::fs::read_dir(&fix_dir).unwrap().count(), fix_before, "夹具目录不许多出任何文件");
+        let fx_meta_after = std::fs::metadata(&fixture).unwrap();
+        assert_eq!((fx_meta_after.len(), fx_meta_after.modified().ok()),
+            (fx_meta_before.len(), fx_meta_before.modified().ok()), "夹具源文件一字未动");
     }
 
     /// `.ppt` 走的是同一套代码，只有目标扩展名与 `office_text` 的 `slides` 分支不同。
@@ -817,6 +831,8 @@ mod tests {
             return;
         }
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-cn.ppt");
+        // 红线①：doc 那条已经断过，ppt 走的是同一条 `legacy_text` ⇒ 同样必须断（T7 评审 Important-1 补）。
+        let fx_before = std::fs::metadata(&fixture).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let ppt = dir.path().join("旧片子.ppt");
         std::fs::copy(&fixture, &ppt).unwrap();
@@ -831,6 +847,9 @@ mod tests {
         let hits = crate::index_store::doc_hits(&conn, "付款条件", 20).unwrap();
         assert!(hits.iter().any(|h| h.path.ends_with("旧片子.ppt")),
             "ppt 的第二段中文应可被搜到：{:?}", hits.iter().map(|h| &h.path).collect::<Vec<_>>());
+        let fx_after = std::fs::metadata(&fixture).unwrap();
+        assert_eq!((fx_after.len(), fx_after.modified().ok()), (fx_before.len(), fx_before.modified().ok()),
+            "ppt 夹具一字未动（同一只读红线的另一条通路）");
     }
 
     /// 取消：第一个进度回调就把标志立起来，pass 必须停在中间。
