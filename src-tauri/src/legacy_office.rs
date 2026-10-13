@@ -8,7 +8,7 @@
 //!
 //! # 关于本文件里的 `dead_code` 豁免（T1 记账）
 //! 本任务只铺纯核，生产调用点全在本批后续任务：转换件（`CONVERT_TIMEOUT`、`win_slash`、`profile_url`、
-//! `convert_args`、`product_path`、`profile_dir`、`Scratch`、`run_bounded`）由 T2 的 `legacy_text` 用、
+//! `convert_args`、`product_path`、`Scratch`、`run_bounded`）由 T2 的 `legacy_text` 用、
 //! T3 经 `extract_text` 调到；`soffice_candidates`/`soffice_path`/`soffice_available`/`LIBREOFFICE_SUBDIR`
 //! 由 T2 与 T4 的降级门用；`WINGET_PACKAGE_ID`/`winget_path`/`winget_args`/`InstallOutcome` 由 T5 的
 //! `start_install` 用。处理方式与 `db::open_in_memory`（`db.rs:30`）和 M6 的 ocr.rs 首提交同款：
@@ -16,12 +16,23 @@
 //! 后续任务接线落地时**必须顺手删掉对应豁免**；T5 的收口结构门（在全仓源码里 grep 本属性的字面量）
 //! 要求终态只剩 `db.rs:30` 一处，本文件届时要一条不剩。
 //!
-//! # T2 追加的两格（`legacy_text`、`CONVERT_GATE`，注释里都写明由 T3 删）
-//! T2 实测过一件事（`cargo check -j 1 --lib`，非 test cfg）：把 T1 标注 T2 的那 12 格逐项放行摘掉后，
+//! # T2 追加的一格（`legacy_text`，注释写明由 T3 删）
+//! T2 实测过一件事（`cargo check -j 1 --lib`，非 test cfg）：把 T1 标注 T2 的那 11 格逐项放行摘掉后，
 //! 纯核项**一条 `dead_code` 都不报**——放行只压住它自己那一格，调用边照样把下游传成活代码，所以
-//! `legacy_text` 一存在，`win_slash`/`convert_args`/`Scratch` 那批就跟着活了；真正还报 never used 的只有
-//! `legacy_text` 与它新配的 `CONVERT_GATE` 两个。按上面「谁接线谁删」的口径这 12 格本可当场清掉，
-//! 但控制方在派发时裁定「T2 不碰其余豁免，归 T3/T4/T5/T6 各自收」，故此处只把账记下、不擅自删。
+//! `legacy_text` 一存在，`win_slash`/`convert_args`/`Scratch` 那批就跟着活了；真正还报 never used 的
+//! 只剩 `legacy_text` 自己。按上面「谁接线谁删」的口径这 11 格本可当场清掉，但控制方在派发时裁定
+//! 「T2 不碰其余豁免，归 T3/T4/T5/T6 各自收」，故此处只把账记下、不擅自删。
+//!
+//! # 并发形状：目录隔离，不是排队（spec §三.16 / §五.6 / §十.10 的裁定）
+//! **一笔转换一个一次性目录**，里面 `<scratch>/out` 与 `<scratch>/profile` 两格，成功与失败都随
+//! `Scratch` 析构整棵删掉。早先「profile 按进程复用 + 一把进程内 mutex 把调用排成串行」已被实测推翻：
+//! 两个实例共用同一个 `UserInstallation` 时抢输的一方 `exit 1` 且零产物（probe6 四格，
+//! `.superpowers/sdd/2026-10-13-m7-legacy-office/probe6-readings.txt`），而且起不来时 LibreOffice 会弹
+//! 一句把锅甩给 `program\bootstrap.ini`「已损坏」的模态框（文件实测没坏），子进程不退出 ⇒ 那一笔烧满
+//! 60 s 超时。`cargo test` 默认多线程、生产上索引 worker 与预览通路也真会并发，所以复用 profile 换来的
+//! 是随机假失败。**并发靠目录隔离消解，本模块绝不再加进程内的锁/信号量/队列。**
+//! 代价照实记：每份多 ≈0.78 s 的 profile 初始化（spec §三.3），30 份的首轮约多 25 s；
+//! 换来的是 `%TEMP%\pfm-m7\` 不再累积 `profile-<pid>`（spec §十一.6 的旧账作废）。
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -127,18 +138,9 @@ pub fn product_path(out_dir: &Path, src: &Path, target: &str) -> PathBuf {
     out_dir.join(format!("{stem}.{target}"))
 }
 
-/// 独立用户配置目录（每进程一个，**故意不删**：实测每次新建 profile 多花 ≈0.78 s/份，spec §三.3；
-/// 代价记在 spec §十一.6——`%TEMP%\pfm-m7\` 下会留约 359 KB）。
-#[allow(dead_code)] // T2 接线（legacy_text 取 profile）后删
-pub fn profile_dir() -> PathBuf {
-    let dir = std::env::temp_dir()
-        .join("pfm-m7")
-        .join(format!("profile-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).ok();
-    dir
-}
-
-/// 一次性输出目录（每文件一个），Drop 时整棵删掉——成功与失败路径都清（spec §五.6）。
+/// 一次转换的一次性目录（每笔一个），里面分 `<scratch>/out` 与 `<scratch>/profile` 两格；
+/// Drop 时整棵删掉——成功与失败路径都清（spec §五.6）。**profile 必须长在同一个一次性目录里**
+/// （spec §三.16：共用 `UserInstallation` 的并行实例会抢输、败者零产物还弹模态框卡到超时）。
 /// 不用 `tempfile`：它在 `[dev-dependencies]`，生产代码拿不到。
 #[allow(dead_code)] // T2 接线（legacy_text 的一次性 out_dir）后删
 pub struct Scratch {
@@ -203,18 +205,6 @@ pub fn run_bounded(program: &Path, args: &[String], budget: Duration) -> AppResu
     }
 }
 
-/// 同一进程内把 soffice 调用排成**单飞**。
-/// 为什么必须有：`profile_dir()` 是按 pid 复用的（实测每次新建 profile 多花 ≈0.78 s/份，spec §三.3），
-/// 而 LibreOffice **不允许两个实例共用同一个 `UserInstallation`**。并发探针（2026-10-13，
-/// `.superpowers/sdd/2026-10-13-m7-legacy-office/probe6-concurrency.sh`，读数同目录 `probe6-readings.txt`）
-/// 四格：同 profile + 不同源并行 ⇒ 败者 `exit 1` 且不产出；同 profile + 同源并行 ⇒ 同一形状；
-/// **不同 profile** + 同源并行 ⇒ 双双 `exit 0` 出产物；同 profile **串行** ⇒ 全绿。
-/// 「复用 profile」与「允许并发」只能留一个，这里留复用（性能是实测定的），把调用排成串行。
-/// 生产上两条通路真会撞：`extract_text` 既被索引 worker 调（`index_job.rs:268`），也被预览的 tokio
-/// worker 调（`doc_preview.rs:117`），索引轮里点开了 `.doc` 预览就是两个进程同一 profile。
-#[allow(dead_code)] // T3 接线（extract_text 两臂 → legacy_text）落地后删本行豁免
-static CONVERT_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// 把 `.doc` / `.ppt` 转成 docx/pptx 再抽出正文。**在抽取阶段（写锁外）被调用**（D1）——
 /// 一份 ≈1.2 s 的进程冷启动只拖长这一轮，不进任何单笔写锁。
 /// 产物只当管道：落到 `Scratch`（每文件一个目录，避开同名覆盖）→ 交给既有 `office_text` 抽正文
@@ -227,22 +217,22 @@ pub fn legacy_text(path: &Path, slides: bool) -> AppResult<String> {
         &format!("未找到 LibreOffice，无法读取旧格式（{}）", path.display()),
         Some("在「全文索引」页的支持类型卡片里点「安装 LibreOffice」；装完不用重启，下一轮自动开始索引"),
     ))?;
+    // 一笔转换一个一次性目录，里面分 `out` 与 `profile` 两格：**profile 必须每笔独立**
+    // （spec §三.16 实测：两个实例共用同一个 UserInstallation 时，抢输的一方 exit 1 且零产物，
+    // 还会弹模态框把这笔卡到超时；而索引 worker 与预览通路会真并发，`cargo test` 默认多线程）。
+    // 代价是每份多 ≈0.78 s 的 profile 初始化（§三.3）；换来并发互不干扰 + 随 Scratch 一起删净。
     let scratch = Scratch::new(target)?;
+    let out = scratch.dir().join("out");
+    std::fs::create_dir_all(&out).map_err(|e| AppError::io(&out, &e))?;
     let args = convert_args(
         target,
-        &win_slash(scratch.dir()),
+        &win_slash(&out),
         &win_slash(path),
-        &profile_url(&profile_dir()),
+        &profile_url(&scratch.dir().join("profile")),
     );
-    // 闸门只圈「起进程」这一段（`CONVERT_GATE` 的注释给了实测理由）；抽正文是纯本地读 zip，
-    // 不该被排进队尾。panic 展开也照旧放行：`into_inner` 取回数据，绝不让闸门永久卡死
-    // （与 `doc_preview` 的 `PreviewShared` 同一口径——`panic` 后必须把闸门放掉）。
-    let status = {
-        let _one_at_a_time = CONVERT_GATE.lock().unwrap_or_else(|p| p.into_inner());
-        run_bounded(&soffice, &args, CONVERT_TIMEOUT)?
-    };
+    let status = run_bounded(&soffice, &args, CONVERT_TIMEOUT)?;
     // **不信退出码**（spec §三.6：垃圾字节冒充 .doc 也是 exit 0）。唯一的成功判据是产物真的落盘。
-    let produced = product_path(scratch.dir(), path, target);
+    let produced = product_path(&out, path, target);
     if !produced.is_file() {
         return Err(AppError::new(
             "extract_failed",
