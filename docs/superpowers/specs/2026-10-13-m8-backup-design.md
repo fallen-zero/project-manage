@@ -45,7 +45,7 @@
 | D10 | SHA-256 用 `sha2` 提为**直接依赖**，`rusqlite` 只加 `backup` **feature** | 仓库里没有现成的 SHA-256（`aes-gcm`/`argon2` 都不带 sha2；`zip` 8.6.0 只给 CRC32，验不了技术方案 line 175 那句 SHA-256）。关键成本核过：`sha2` **已在 `Cargo.lock`**（0.10.9 由 `lopdf`/`tauri-codegen`/`wry` 拉，0.11.0 由 `lzma-rust2` 拉），两个版本的 `.crate` 与解包源码都在本包缓存里 ⇒ 提为直接依赖**不新增下载、不新增编译单元**，`Cargo.lock` 的期望差异只有本包 `dependencies` 那一行。自己实现哈希是绝对红线（不写 crypto）。替代方案里 `windows` crate 的 CNG/BCrypt 能做但 Windows-only 且要多开 feature，为省一行依赖不值。 |
 | D11 | **三条命令全标 `#[tauri::command(async)]`**（本仓 `command(async)` 从 1 条变 4 条），且函数体**全同步、一个 `await` 都不许有** | 本仓的 sync 命令睡的就是消息泵那一个线程（M4 那次 266,093 ms 慢预览量到的机制，`doc_preview.rs` 头注释记着后果：不回执、前端 `await` 永挂），所以任何秒级命令都必须挪出去——`export` 要跑 `VACUUM`、`inspect` 要对整份 db 字节算哈希、`import` 要灌整库，三者都是几十毫秒到几秒。**不逐条按「这条大概够快」分档**：那条判据靠猜，猜错的表现是界面冻一下没人报错，正是本仓最难事后归因的那类。**async 只当挪线程的开关用**，函数体保持同步：`Connection` 非 `Send`/`Sync`、`MutexGuard` 非 `Send`，一旦有 `await` 点跨住锁，future 就不 `Send`、编译直接拒 —— 这是「零 await」的机制护栏，不是一条风格偏好。**否掉的备选**：`tauri::async_runtime::spawn_blocking` 需要把连接变成 `Arc<Mutex<..>>` 塞进 `'static`，等于把 AppState 的所有权模型掀了重来（§十一 风险 7 钉死不许走）。 |
 | D12 | 导出用**临时自开的第二条连接**（`db::open(&data_dir)`），导入用 `AppState.conn` 那把锁 | 导出若持 `AppState.conn` 的 std Mutex 做 VACUUM，期间界面上每个读写命令都在锁上排队（不报错，纯等），而 `VACUUM` 恰好是最长的一步。仓库本就有第二条连接的生产先例：worker 每轮 `db::open`（`index_job.rs:468`）、watcher 一条常驻（`watch.rs:70`）。**但导入用的应急包那一次导出反其道走 `AppState.conn` 的锁**：它必须抓「即将被覆写的那份库」的此刻状态，且它整段都在同一条写锁内，排队是免费的。 |
-| D13 | `backup_import` 在同一把 `state.conn` 写锁**之内**依次做：查 `index.running` → 解包 → 写应急包 → `restore` → `migrate` | 把「查闸门 + 写应急包 + 覆盖」收进同一把锁，让「应急包失败必定早于覆写」在**结构上**成立而不是靠顺序写对。闸门口径：`index.running` 为真 ⇒ 回 `backup_busy`，提示「先等这一轮结束或点取消」。 |
+| D13 | `backup_import` 在同一把 `state.conn` 写锁**之内**依次做：查 `index.running` → 解包 → 写应急包 → `restore` → `migrate` | 把「查闸门 + 写应急包 + 覆盖」收进同一把锁，让「应急包失败必定早于覆写」在**结构上**成立而不是靠顺序写对。闸门口径：`index.running` 为真 ⇒ 回 `backup_busy`，提示「先等这一轮结束或点取消」。**（2026-10-14 交付时把这条的口径写准：它买到的是「大幅收窄」不是「互斥」）** `index_job::start` 只收 `Arc<IndexShared>` 就 `thread::spawn`（`index_job.rs:455-468`），worker 在 `:468` **自开**连接、全程不碰 `state.conn` ⇒ 把闸门检查挪进锁内**也**关不掉「闸门读到 false → 别的命令起轮 → 本命令 restore」那个微窗口；真闭合要一面 `restore 进行中` 的原子旗由 `index_job::start` 一起读，那要动索引器的启动路径，本轮裁定不做。**后果有界**：那一轮写回来的只有**索引行**（台账与密文列不受影响，下一轮 `reconcile`/重扫自愈），且覆写前那份应急包始终在数据目录里 ⇒ 最坏是「白扫一轮 + 索引行落在新库的路径上」，不是数据丢失。真机读数：索引轮在跑时点导入 ⇒ `backup_busy`，库一字未动。 |
 
 ## 三、失败面（本轮主内容）
 
@@ -148,7 +148,7 @@ pfm-backup-2026-10-13T2130.zip          ← 用户选的目标路径，界面给
 
 ## 九、真机验收（沙盒 `dev.zero.pfm.m8test`，一次性 identifier，跑完删净；真实目录只读；子代理不跑 dev，控制方执行；CDP 走 `__TAURI_INTERNALS__.invoke`）
 
-1. **导出 happy path**：沙盒库种几个项目 + 台账 + 跑一轮索引（让索引表非空，才能证「索引不进包」）→ `invoke("backup_export", {path: %TEMP%\pfm-m8-test\out.zip})` → 断 zip 存在、两条目、`manifest.json` 里 `counts` 与沙盒库现数一致、`backup.db` 大小 < 沙盒 `ledger.db`。
+1. **导出 happy path**：沙盒库种几个项目 + 台账 + 跑一轮索引（让索引表非空，才能证「索引不进包」）→ `invoke("backup_export", {path: %TEMP%\pfm-m8-test\out.zip})` → 断 zip 存在、两条目、`manifest.json` 里 `counts` 与沙盒库现数一致、`backup.db` 大小 < 沙盒 `ledger.db`。**（2026-10-14 交付时订正：最后那半句「包 < 活库主文件」是个错判据，本轮撤除 —— WAL 没 checkpoint 时主库文件可以比包小得多：真机量到沙盒 `ledger.db` 4096 B 而 `-wal` 424 KB，包里的 `backup.db` 反而是完整台账（176 KB）。体积方向在 WAL 下根本不构成证据；「剥了索引」这一判据改由 §七 的双臂对照（`stripped < raw`，同一快照、同样无 `-wal` 在场）与真机第 2 格（包内两张索引表读出来是 0 而行数非 0 的活库存在）承担。）**
 2. **索引确实不进包**：把包里 `backup.db` 解出只读打开 → `SELECT count(*) FROM index_docs` = **0**，而沙盒活库非 0。
 3. **覆写可撤销（主承诺）**：导出后再改沙盒库（删一条台账）→ `invoke("backup_import", {path: 那个包})` → 台账条数回到导出前、`index_docs` 变 0、数据目录出现 `pre-restore-*.zip`，并且**那份应急包自己也能被 `inspect` 读通、它的 `counts` 等于覆写前那一刻活库的现数**（不必真二次导回，那一步与断言 3 前半是同一条代码路径）。同一格还要读到：页脚 `journal_mode=wal` 在导入后仍成立（`db_status` 现取）、界面回到未解锁态（`mk` 已被清，`vault` 那格显示要解锁）。
 4. **包比本机新被拒**：手造 manifest `schemaVersion = 99` → `inspect` 返回 `backup_schema_too_new`，且**库未变**（前后逐字相同）。
@@ -158,7 +158,7 @@ pfm-backup-2026-10-13T2130.zip          ← 用户选的目标路径，界面给
 8. **红线**：真实数据目录 `%APPDATA%\dev.zero.pfm\` 三文件 size+mtime+SHA-256 逐字未动（本轮**只读**它，所有读写都在 `dev.zero.pfm.m8test`）；沙盒与 `%TEMP%` 夹具删净。
 9. **需要人亲手做的两格**（照实记，不假装自动验过）：① 原生「另存为」/「打开」对话框那两下真点一次（CDP 只证命令本身通，不证对话框选路径通）；② 覆盖前那句确认提示在你机器上的实际文案与按钮过一眼。
 
-**没能自动验证（逐条点名）**：`VACUUM` 后包的绝对体积（只断方向）；`restore` 中途真失败的库状态（要构造 SQLite 在页拷到一半断电，本机不可廉价造，只能靠 `pre-restore` 那条撤销路）；网盘/U 盘这类慢或只读的导出目标；跨机器（真的拿到另一台机导入）—— 本机同 identifier 只能证机制，不能证「换机器」那一半。
+**没能自动验证（逐条点名）**：`VACUUM` 后包的绝对体积（**且 2026-10-14 起连方向都不再断 —— 见上面第 1 格的订正**，摘掉 `VACUUM` 没有单条测试会红，登记在 §十一.4 旁边）；`restore` 中途真失败的库状态（要构造 SQLite 在页拷到一半断电，本机不可廉价造，只能靠 `pre-restore` 那条撤销路）；网盘/U 盘这类慢或只读的导出目标；跨机器（真的拿到另一台机导入）—— 本机同 identifier 只能证机制，不能证「换机器」那一半。**（10-14 追加）**：`/backup` 页的三个结果块（导出摘要 / 验包详情 / 导入结果）与覆盖前那个确认框**从未被真点过** —— 入口全是原生文件对话框，CDP 只能直接 `invoke` 命令；页面本体、nav 第四格、页头那句明文告警、页脚 `wal`/`schema` 是真机 DOM 读到的，块内渲染留给人手那一格（spec §九.9）。
 
 ## 十、不在本轮
 
@@ -174,13 +174,13 @@ pfm-backup-2026-10-13T2130.zip          ← 用户选的目标路径，界面给
 ## 十一、风险
 
 1. **备份包是一份明文内网入口清单**（D6 的代价，不粉饰）：`ip`/`bastion`/`url`/`note`/项目名/本地路径都在明文列里。缓解：manifest 带 `plaintextWarning`、`/backup` 页念同一句、技术方案 §6.2 回写这句。真要有硬保证，那是包体加密那一格，本轮明确不做。
-2. **`restore` 无回滚**：四道前置后的失败面（§三）。缓解：应急包在覆写之前已成功落盘；残余风险「半新半旧」记为有名缺口，靠那份包撤销。
+2. **`restore` 无回滚**：四道前置后的失败面（§三）。缓解：应急包在覆写之前已成功落盘；残余风险「半新半旧」记为有名缺口，靠那份包撤销。**（2026-10-14 交付补两条实读）**：① vendored `rusqlite-0.40.2/src/backup.rs:117-131` 里 `perform` 对 `SQLITE_BUSY` **只重试 3 次、每次睡 100 ms** ⇒ 索引轮或 watcher 持写锁时 `backup_restore_failed` 是真会出头的，不是理论（提示文案里带着应急包的完整路径，用户照着导回去就行）；② 更根本的一条：`backup.rs` 全程**没有 rollback / savepoint / BEGIN**，前置全过之后失败就只能靠那份应急包 ⇒ 前置「全过才动库」不是洁癖，是唯一防线。
 3. **`sha2` 提为直接依赖**：`Cargo.lock` 期望只多一行引用；若实测冒出第二个 `[[package]]` 或新的下载，回来报控制方，不许"反正只是个小 crate"。
-4. **`Backup API` 把 WAL 头随页带进快照**：不先关快照连接就打包 ⇒ 得到一个引用不存在 `-wal` 的 db。缓解：§七 那条「先 drop 再读字节」判据 + 一条 `integrity_check` 断言。
-5. **三条命令都收任意路径字符串**：这是 D3 换来的能力（也是 opener 插件从 M1 起就在 `path: "**"` 上做的同类取舍）。守住的两条：只写用户当场选中的那一个路径 + 数据目录里的应急包，**只新增文件、绝不删改既有文件**；`inspect` 不解压落盘到用户可见位置（只落临时目录）。
+4. **`Backup API` 把 WAL 头随页带进快照**：不先关快照连接就打包 ⇒ 得到一个引用不存在 `-wal` 的 db。缓解：§七 那条「先 drop 再读字节」判据 + 一条 `integrity_check` 断言。**（2026-10-14 交付时把这条的取证层级写实）**：这条判据**只在 WAL 文件库上可证伪** —— 单元层全部走 `db::open_in_memory()`（journal 是 MEMORY、没有侧文件），把 `drop(s)` 挪到 `fs::read` 之后那三条单元断言一条都不会红。真做到的是 T9 那条端到端（源库来自 `crate::db::open(tempdir)` = 真 WAL）：变异实测**确实红**，但红点是「包内 `index_docs` 行数 = 3」那条（不关连接读到的字节是**剥索引之前的陈旧一致影像**），而 `integrity_check` 对这种影像返回 **ok**、条目数那条压根动不了 ⇒ **「先 drop」的守卫是 `idx == 0`/`fts == 0` 那两条，不是 `integrity_check`**（计划/代码注释里原先记反了，10-14 一起订正）。副作用：同一条断言同时担 D4「索引不进包」与 §七 两条判据，从失败输出上分不开变异①与变异④ —— 已知并接受，别再为它加假断言。
+5. **三条命令都收任意路径字符串**：这是 D3 换来的能力（也是 opener 插件从 M1 起就在 `path: "**"` 上做的同类取舍）。守住的两条：只写用户当场选中的那一个路径 + 数据目录里的应急包，**只新增文件、绝不删改既有文件**；`inspect` 不解压落盘到用户可见位置（只落临时目录）。**（2026-10-14 终审把这条的残余风险写实）**：`backup_export`/`backup_import` 里**没有任何路径来源校验** —— CDP 直接 `invoke` 与真实「另存为」走的是同一段代码，所以「用户当场选中」只由那个原生对话框保证，不由程序保证（对话框取消返回 `null`，前端三条 handler 各自挡住 `null` 再 invoke）。附带一条本机事实：Windows 文件名段上限 **255 UTF-16 单元**、传统路径总长 **260**（260 这条**未在本机复现验证**，只在 M4 记过 254 字符能过）⇒ 超长/含非法字符的目标会以 `fs_failed` 干净失败并念出路径，不崩、不静默。
 6. **VACUUM 时长**：几百 MB 库（索引没清掉前的活库）上 VACUUM 可能几十秒，期间导出命令占着它自己那条临时连接。缓解：快照里索引已删 ⇒ VACUUM 的对象只含台账，天然小；仍慢就写进 §十 的「回头加进度事件」。
-7. **`command(async)` 从 1 条变 4 条**：如果 `Connection` 非 `Send` 引发编译问题，正确解是「函数体保持同步、零 `await`」（D11 的形制，现仓 `doc_preview` 已是活先例），**不许**改成 `spawn_blocking` + `Arc<Mutex<...>>` 那种把库塞进 `'static` 的形状（会把 AppState 的所有权模型掀了重来）。
-8. **`restore` 之后 WAL 位还在不在，本轮是「读回来」而不是「推理出来」**：Backup API 按页拷贝、页 1 就是 db 头（`sqlite3` 把 journal mode 记在头 18/19 字节），但目标连接已处于 WAL 时 SQLite 的处置我没有读到源码级证据 ⇒ §七 那条「导入后现读 `journal_mode`」的门就是它的替代物。**如果本机读出不是 wal，那是真发现、不是测试噪声**：回来报控制方，加固路是 restore 后显式重设 `journal_mode=WAL` 并再读回（同 `db.rs` M0 那条门的口径）。
+7. **`command(async)` 从 1 条变 4 条**：如果 `Connection` 非 `Send` 引发编译问题，正确解是「函数体保持同步、零 `await`」（D11 的形制，现仓 `doc_preview` 已是活先例），**不许**改成 `spawn_blocking` + `Arc<Mutex<...>>` 那种把库塞进 `'static` 的形状（会把 AppState 的所有权模型掀了重来）。**（2026-10-14 交付读数）**：这条没有触发 —— 三条新命令全走 `#[tauri::command(async)]` + 函数体零 `await`，`grep -c "tauri::command(async)"` = **4**（`doc_preview` 1 → 备份 3），`generate_handler!` **42 → 45**（第二次批准的破例），三条各有编译期形状守护（`const _: for<'a> fn(State<'a, AppState>, String)`）。
+8. **`restore` 之后 WAL 位还在不在，本轮是「读回来」而不是「推理出来」**：Backup API 按页拷贝、页 1 就是 db 头（`sqlite3` 把 journal mode 记在头 18/19 字节），但目标连接已处于 WAL 时 SQLite 的处置我没有读到源码级证据 ⇒ §七 那条「导入后现读 `journal_mode`」的门就是它的替代物。**如果本机读出不是 wal，那是真发现、不是测试噪声**：回来报控制方，加固路是 restore 后显式重设 `journal_mode=WAL` 并再读回（同 `db.rs` M0 那条门的口径）。**（2026-10-14 已量到：单元层与真机各一条 `journal_mode` 读回都是 `wal`，「页 1 把持久模式打回 delete」这个担忧在本机不成立）** ⇒ ⑧ 那道门（`assert_wal` 重读）是**白拿的保险而不是救火件**，保留；本条的口径从「未知」升级为「已量：仍是 wal，机制未读到源码级」。仍挂着的一条：`backup_import` 收尾清 `AppState.mk` 那三行**没有独占断言**（摘掉它现有测试全绿），靠 §九.3 真机「界面回未解锁态」那一格兜。
 
 ## 十二、要回写与要更正的文档
 
@@ -188,3 +188,4 @@ pfm-backup-2026-10-13T2130.zip          ← 用户选的目标路径，界面给
 - **`docs/开发进度.md`**：里程碑表 M8 行 + 新增「M8 验收证据」整节 + 没能自动验证清单 + 缺口归属。
 - **`docs/HANDOFF.md`**：结构门基线改为**每轮现取**并写下本轮读数（42 → 45）；§4 下一格转 M9；新坑按现数追加。
 - **不动**：`.superpowers/sdd/2026-10-10-m5-reconcile/`、`.../2026-10-12-m55-cleanup/`、`.../2026-10-12-m6-ocr/`、`.../2026-10-13-m7-legacy-office/`（被已提交文档按路径引用的证据）。M8 另建自己的 SDD 工作区目录。
+- **（2026-10-14 交付时补，原清单漏的两格）**：① **D12 的实现与本条的并发代价**：`backup_export` 确实按 D12 走 `db::open(&state.data_dir)` 自开第二条连接（**终审一度把这条记成「与 D8 原文不符」，是它读错了行号 —— D8 讲的是入口开哪一页，与连接无关**）。要说漏记的是并发面：导出期间「AppState 那条 + export 自开那条 + watcher 常驻那条」= **三条读事务并存**，而 T6 的 `import_holding_a_second_open_connection_still_succeeds` 钉的是「第二条连接**常驻打开**时 import 仍能拿到 `state.conn` 并走通 restore」这**读侧**一件事，**没有**一条测试钉这个写侧三连并存。② **D13** —— 闸门是 best-effort 而非互斥：`index_job::start` 从不取 `state.conn`（`index_job.rs:455-468` 只收 `Arc<IndexShared>` 后 `thread::spawn`，worker 在 `:468` 自开连接），所以把闸门挪进锁内**也**关不掉那个窗口；闭合它要一面 `restore 进行中` 的原子旗（越出本轮授权面），登记为残余风险。③ **§十一.7 的交付读数** —— `tauri::command(async)` 1 → 4、`generate_handler!` 42 → 45、零 `await` 形制成立（`Connection` 非 `Send` 那个坑没触发）。

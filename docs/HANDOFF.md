@@ -1,10 +1,10 @@
 # 交接文档 —— 项目资料管理（写给一个完全没有上下文的新对话）
 
-**快照时间**：2026-10-13。**当前分支 `master`，HEAD 现取**：`git rev-parse --short master`（本文最后一次提交即这份交接本身，别把 SHA 写死在这里、必漂）。`feat/m6-ocr` 停在其终审合入点（`master` 已含它全部提交，`git merge-base --is-ancestor feat/m6-ocr master` = 真）。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。
+**快照时间**：2026-10-14。**当前分支 `feat/m8-backup`，HEAD 现取**：`git rev-parse --short HEAD`（本文最后一次提交即这份交接本身，别把 SHA 写死在这里、必漂）。`master` 停在 M7 的合并点之后（`git rev-parse --short master` 现取）。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。
 
 ## 0. 先读这一段
 
-这是一个 Tauri 桌面工具的持续开发项目，按里程碑推进。**M0–M7 都已完成并合入 `master`**（M7 于 2026-10-13 fast-forward 合入，合并点 `da140a4`；本文这条收口提交之后 master 只比功能分支多这一条文档提交，M6 同形；全历史零合并提交的惯例保持），下一个里程碑是 **M8（备份包导出/导入：SQLite Backup API 快照 + `manifest.json` + SHA-256 校验，索引不进包）**。
+这是一个 Tauri 桌面工具的持续开发项目，按里程碑推进。**M0–M7 都已完成并合入 `master`**（M7 于 2026-10-13 fast-forward 合入，合并点 `da140a4`）。**M8（备份包导出/导入）本轮已做完代码 + 真机 + 整分支终审（Ready to merge），停在功能分支 `feat/m8-backup` 等需求方当次批准合 `master`** —— 合完之后的下一格是 **M9（待办清单）**，开工前先把 M8.1 那三格小账过一遍（见 §4）。
 
 三份必读文档按重要性：
 
@@ -24,8 +24,9 @@
 - 前端：React 19 + TypeScript + Vite + Tailwind 4 + TanStack Router（**hash history**）+ zustand + shadcn/ui
 - 数据库：`rusqlite 0.40.2 (bundled)` ⇒ SQLite 自带 FTS5；**一把全 crate 唯一的 `Mutex<Connection>`**（`AppState.conn`），后台索引线程自持另一条 `db::open` 连接；WAL + `busy_timeout=5000`
 - 中文分词：`jieba-rs 0.11.0`，入库与查询同词器（`cut_for_search` 与 `query_terms`），**这是这套检索的地基红线**
-- 依赖里程碑新加的：M5.5 引 `notify 8.2.0`（文件系统监听），M6 引 `windows 0.62.2`（`Media_Ocr` 等 7 个 feature），**M7 零新依赖**（`std::process::Command` 起外部 LibreOffice + `std::fs` 自拼一次性目录；`tempfile` 只在 `[dev-dependencies]`，生产代码拿不到）
+- 依赖里程碑新加的：M5.5 引 `notify 8.2.0`（文件系统监听），M6 引 `windows 0.62.2`（`Media_Ocr` 等 7 个 feature），M7 零新依赖（`std::process::Command` 起外部 LibreOffice + `std::fs` 自拼一次性目录；`tempfile` 只在 `[dev-dependencies]`，生产代码拿不到），**M8 也是零新 crate** —— 只动两处既有声明：`rusqlite` features `["bundled"]` → `["bundled", "backup"]`（Backup API 是编译期特性，不开就没有 `Connection::backup`/`restore`）、`sha2 0.11` 从传递依赖**提为直接依赖**（它本来就在 `Cargo.lock` 里，是 `argon2` 拖进来的）。硬门写法：`git diff --stat master..HEAD -- src-tauri/Cargo.lock` = **1 insertion(+) 且 `[[package]]` 数量不变**
 - **M7 引入的是一个「外部运行时依赖」而不是 cargo 依赖**：本机已用 `winget install --id TheDocumentFoundation.LibreOffice -e` 装了 LibreOffice 26.8.1.1（`C:\Program Files\LibreOffice\program\soffice.com`）；换机器没装就是整类不建行 + `/index` 一个安装按钮
+- **M8 起，工具会往磁盘写文件了**（M0–M7 的「只读源文件」红线不变，但红线本身要按白名单表述）：允许落盘的位置只有两处 —— 用户当场在原生对话框里选中的那个包路径，与数据目录里的 `pre-restore-*.zip` 应急包；**只新增文件，绝不删改任何既有文件**。评审/派发词里请按这一条写，别再写「工具不写盘」
 
 **执行方法**：`superpowers:subagent-driven-development`（SDD）—— 每个任务派一个全新实现者子代理 + 一个只读评审（spec 合规 + 代码质量双 verdict）+ 修复轮（≤5）；全部任务完成后做一次整分支终审；终审后走「合 master」（**合并需需求方当次批准**，常驻推送授权只覆盖功能分支）。
 
@@ -52,22 +53,28 @@
 
 **M6 真机口径转换（需求方 2026-10-12 明确批准）**：`tauri dev` GUI 起不来——**本机 16G 机的提交内存吃不下** `project_files_manage_lib` 最终 codegen 要 mmap 的 `windows` 大 rlib，四轮调优（`jobs=1` / `RUST_MIN_STACK=32M,64M` / `debuginfo=0` / 组合）都在同一处报 `os error 1455`「页面文件太小」；`cargo test --lib`（只出 rlib）不受影响 ⇒ 转 **headless 端到端测**：`index_job::tests::ocr_image_flows_end_to_end_through_index_and_search` 用能编过的 `--lib` profile 直驱真代码链（真 `image_text` + `run_pass` + FTS + `doc_preview`），0.4–0.5 s、`--nocapture` 无 SKIP 证本机 `ocr_available()` 为真、走了真 OCR。
 
+**M8（2026-10-14）= 备份包导出 / 验包 / 导入**：新模块 `src-tauri/src/backup.rs` + 一次性目录 guard 搬到 `src-tauri/src/scratch.rs` + `db.rs` 把 WAL 读回硬门拆成 `pub fn assert_wal`（行为零改动）+ `lib.rs` 三条命令 `backup_export`/`backup_inspect`/`backup_import` + 新页 `/backup`（nav 第 4 格）。包 = zip **两条目**（`manifest.json` + `backup.db`），`vault_meta` 跟着库走不另立条目；索引两张表在**快照**里删行留结构再 `VACUUM`，且**先关快照连接再读字节**。导入的形态是本轮最需要读懂的一段：**四道前置全过才动库**（解包读 manifest → `formatVersion` → `schemaVersion` 只拒「包比本机新」→ 大小与 SHA-256），然后**先在数据目录写一份 `pre-restore-<UTC秒>-<pid>-<seq>-<纳秒>.zip` 应急包**，再 `Connection::restore(MAIN_DB, src, None::<fn(Progress)>)` 灌进**已打开的那条连接**（不覆盖在用的 `ledger.db`、不重启），最后补 `migrate` + `assert_wal`。权威口径与全部实现在 `docs/superpowers/specs/2026-10-13-m8-backup-design.md`（D1–D13 + §三 失败面 + §五 包格式 + §九 真机九条），执行期翻掉计划/规格自己的六处与两条错判据都记在 `docs/开发进度.md`「## M8 验收证据」。
+
 ## 3. 当前卡在哪
 
-**代码面没有卡点**。M7 八格代码全完、门禁全绿、整分支终审 With fixes 的三条 Important 全修完并复审通过，**并已按惯例 fast-forward 合入 `master` 且推送 origin**（需求方当次批准）。`master` 与 `feat/m7-legacy-office` 在合并那一刻同指一个提交（本文这条收口提交落在 `master` 之后，功能分支就只差它一条；两者现指 `git for-each-ref --format='%(refname:short) %(objectname:short)' refs/heads/master refs/heads/feat/m7-legacy-office` 现取，别照抄这里）。
+**代码面没有卡点**。M8 十格代码全完、门禁全绿（**221 passed** / 两 clippy 0 / `cargo build --lib` 0 / node **10/10/0** / build `error TS`=0）、真机八格有读数、整分支终审 **Ready to merge**（它带回的两条 Important 经控制方逐条复现**判为不成立**，证据写在 `docs/开发进度.md` 的 M8 终审段）。**卡在对需求方的两个批准/两个动作上**：
+
+1. **合 `master` 需要当次批准**（惯例：常驻推送授权只覆盖功能分支）。批准后的动作序列在 §4-A。
+2. **`/backup` 那两个原生文件对话框只能人点**（「另存为」/「打开」）⇒ 三个结果块（导出摘要 / 验包详情 / 导入结果）与覆盖前那个确认框的**块内渲染**至今没有真机证据，已逐条记在「没能自动验证」。CDP 能直接 `invoke` 命令、也能读页面本体与页头那句明文告警，但**代替不了**用户选路径那一步（见 §5 坑 12）。
 
 ## 4. 下一步计划
 
-M7 已于 2026-10-13 合入 `master`（合后在 master 树上复跑 194 / 两 clippy / node 8-8 / build 全绿）。下面二选一：
+M8 已收口在功能分支上（`feat/m8-backup`，未合 `master`）。三条路，按默认顺序：
 
-- **A（默认方向）：开 M8（备份包导出/导入）**——走完整流程：`superpowers:brainstorming` 收口（SQLite Backup API 快照 + `manifest.json` + SHA-256 校验 + 附件一并打包 + 导入前校验失败怎么告知 + 索引不进包）→ spec → writing-plans → SDD → 整分支终审 → 合 master（**需当次批准**）。技术方案 §6.2 已把口径定完，M8 主要是执行。
-- **A′（先清历史账）**：M6 遗留 5 条有名 Minor + M7 新增的 deferred（见下）适合合成一个清账批。最该修的是 M6 **Minor-4**（`ocr_available()` 探「任一识别器语言」而 `image_text` 只用 `TryCreateFromUserProfileLanguages` ⇒ 「profile 语言无包、其它语言有包」的机器上探测 true、每图空指针、整目录刷屏 `failed`；spec §五.2 已给现成一行加固）。M7 顺带欠的两条同类：路径含 `%`/`#` 的 profile URL 形态未测（编码前后字节相同，属既有歧义面）、`--convert-to` 省略 filter 名依赖 LibreOffice 的默认导出 filter（别的版本若变，加固写法是写全 `docx:MS Word 2007 XML` / `pptx:Impress MS PowerPoint 2007 XML`）。
-- **B（真机欠账，需要人配合的两件）**：① **M6 那三项 deferred 里，GUI 渲染这一项 M7 已经顺手验掉了**（`/index` 的「已启用本机 OCR」「已启用本机 LibreOffice」两行 + 按钮可见性都从 WebView2 DOM 读到，脚本 `.superpowers/sdd/2026-10-13-m7-legacy-office/m7-cdp.mjs` 可复用；M6 的 `m6-cdp.mjs` 也在）。**本轮 `tauri dev` 起来了**（编译 37 s，M6 判死的 `os error 1455` 没复现）⇒ 别再把它当永久限制，每轮先试一次再说起不来。剩下：~50 图首轮墙钟、真·没装语言包/没装 LibreOffice 的机器。② **`libreoffice_install` 那一下本轮全程没真按**（它会在你机器上起真安装器）⇒ 需要需求方亲手点一次，看 winget 窗口弹出 + 「装完不必重启、下一轮开始建行」这条承诺成不成立。沙盒口径：一次性 identifier `dev.zero.pfm.m7test`（跑完删净），启动命令同上加 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222"`。
+- **A（等一句批准）：合 `master`**。照仓内惯例走 **fast-forward**，不造合并提交：先核两条例行 —— `git rev-list --merges --count --all` = **0**、`git merge-base --is-ancestor master feat/m8-backup` exit=0 ⇒ `git merge --ff-only feat/m8-backup`；**合完在 `master` 的树上复跑全部门禁**（不拿分支读数交差）：`cargo test -j 1 --lib`（应 221）、两 clippy、`node --test`（10/10/0）、`npm run build`（`error TS`=0）；两条分支都推 `origin`，并用 `git ls-remote --heads` 核 SHA 与本地逐字一致。历史先例：M7 的 `da140a4`。
+- **A′（M8.1 三格小账，半小时级）**：① `pre-restore-*.zip` **没有保留上限** —— 反复导入会往数据目录线性堆应急包，用户不会主动清（终审 defer-17）；② `backup.rs:244-247` 那句「注意**不碰 `db::TARGET_VERSION`**」是陈旧措辞（它读的是包内 `schema_meta` 的现值，而 `TARGET_VERSION` 只是比较的另一边；终审核过 `TARGET_VERSION` 在 `lib.rs:739`/`backup.rs:144` 与三条测试里仍活，但这句话容易被读成"这条函数不该碰它"）；③ `src/pages/backup.tsx:54` 那句 `// entries 是 manifest 点名的条目数，恒为 1…` 注释已被 T8 修完之后代码的上一条注释取代（终审 defer-25，纯文本）。另外两条**产品口径**要先定才好动代码，别顺手做：`ImportOutcome.entries` 恒 1 这个语义（要它等于包内条目数就是生产改动 + `types.ts` 同步 + 文案）；「拒绝一切未点名条目」要不要升级为第二道防线（现在只靠包名清洗 + 只取点名条目，T9 的 `../` 那条臂是**能构造**且实测红在落盘判据上）。
+- **B（真机欠账，需要人配合）**：① **`/backup` 那两个原生对话框各真点一次**，顺带看三个结果块与覆盖确认框的文案在屏幕上长什么样（这一格从 CDP 拿不到，脚本 `.superpowers/sdd/2026-10-13-m8-backup/m8-cdp.mjs` 的 s5 段能验页面本体与那句明文告警）；② **M7 欠的那一下仍挂着**：真按一次 `/index` 的「安装 LibreOffice」（本轮全程没真调用 `libreoffice_install`，它会在你机器上起真安装器）；③ M6 遗留的 ~50 图首轮墙钟、真·没装语言包/没装 LibreOffice 的机器。本轮 `tauri dev` 起了两轮（编译 50 s / 增量 1 s），`os error 1455` 没复现 ⇒ 仍按「每轮先试一次」处理，别引用旧轮的判死结论。
 
 **需要需求方做的**（不阻塞代码推进，但每次提醒一次）：
 
 1. **远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`**（本机无 `gh`）——只能在 GitHub **Settings → Branches** 手改成 `master`。这一格从 M4 起一直挂着。
-2. 若走方向 B：**腾出提交内存**——关几个大户（`vmmemWSL` 常占 ~1G、`Everything`/`ChatGPT`/`Weixin` 各数百 MB）或在 Windows 高级系统设置把「分页文件」临时调大（比如 30–50 GB），然后我一键跑。
+2. **批准 M8 合 `master`**（方向 A 那一串动作），以及若要做 A′/B 里的哪一条，点个头。
+3. 若走 B-③：**腾出提交内存**——关几个大户（`vmmemWSL` 常占 ~1G、`Everything`/`ChatGPT`/`Weixin` 各数百 MB）或在 Windows 高级系统设置把「分页文件」临时调大（比如 30–50 GB），然后我一键跑。
 
 ## 5. 踩过的坑，绝对不要再踩
 
@@ -122,9 +129,20 @@ M7 已于 2026-10-13 合入 `master`（合后在 master 树上复跑 194 / 两 c
 20. **「这台机起不来 `tauri dev`」是会过期的事实**（M6 判死、M7 推翻了一半）：M7 因为零新依赖，`tauri dev` 编译 37 s 通过、CDP 9222 全程可用，M6 欠的那格「WebView2 里那句提示的实际渲染」顺手就验掉了。
     教训：**每轮开工前先试一次**，别照抄上一轮的 deferred；反过来，「起得来」也只说明这台机这次起得来（提交内存被别的工作吃掉时照样会撞 `os error 1455`，见坑 2/3）。
 
-21. **结构门里「41 条命令」从 M7 起是 42**：`libreoffice_install` 是需求方当次批准的**唯一破例**（理由与两条守护测试写在 spec §四）。任何按 41 取数的脚本/文档要一起改，否则会把「破例」读成「漏注册」。
+21. **结构门里的命令数会随里程碑漂，别把任何数写死在脚本/文档里**：M5.5/M6 是 **41**，M7 起 **42**（`libreoffice_install`，需求方当次批准的破例），**M8 起 45**（`backup_export`/`backup_inspect`/`backup_import`，第二次批准破例 —— 备份三个入口没有现成宿主可挂，理由与三条编译期形状守护写在 spec §四）。同一门还配套 **`tauri::command(async)` 从 1 条变 4 条**（`doc_preview` + 备份三条，函数体一律零 `await`：`MutexGuard` 与 `rusqlite::Connection` 都不是 `Send`，一旦 `await` 就横跨悬挂点，正确解是保持同步而不是 `spawn_blocking` + `'static`，见 D11 与 §十一.7）。任何按 41/42 取数的脚本要一起改，否则会把「破例」读成「漏注册」；取数口径：`sed -n '/generate_handler/,/^      \]/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"`（逗号可选，硬写 `,$` 会少算最后一条注册的尾部）。
 
-14. **计划文本自身错了走「改文本闭环」而不是加评审轮**：裁 → 修订计划本体 → `task-brief` 重生成该任务简报 → 账本与计划一起提交 → 带明确 FIX_BASE 派发 fix round 复审；**注释级零行为回归不重开派发+复审轮**（控制方当场改准，改完重跑受影响的结构门）。
+**M8（备份包）新增的坑，2026-10-14**：
+
+22. **`zip` 8.6.0 的 `ZipWriter` 没有 `add_data`**，且压缩枚举的真名是 **`Deflated` 不是 `Deflate`**：写一个条目只有 `start_file(name, options)` + 用 `std::io::Write::write_all` 喂字节（`impl Write for ZipWriter` 才是文档指向的那条路）；`CompressionMethod` 的变体在 vendored `zip-8.6.0/src/compression.rs:22` 是 `Deflated`，`:20` 注释里那句"Deflate"是散文、`:104` 另有同值别名 `DEFLATE`。计划文本当时按 `add_data`/`Deflate` 写，实现者编不过才带回 —— **调任何库前先在 `~/.cargo/registry/src/` 里读那个文件的签名，别照训练数据写 API**。
+23. **`rusqlite::Connection::restore` 绕过 `after_open`**：它只搬页字节，不会跑 pragma、不会跑迁移，所以导入尾巴上必须**显式** `db::migrate(conn)` + `db::assert_wal(conn)`，两支失败各有码（`backup_migrate_failed` / `backup_wal_lost`）。同理，`Connection::backup(MAIN_DB, dst, None)` 造出来的快照文件**带 WAL 头**：不先关掉那条短连接就 `fs::read`，拿到的是「引用不存在 `-wal` 的陈旧一致影像」—— 而这种影像 `PRAGMA integrity_check` 返回 **ok**、条目数也不变 ⇒ **`integrity_check` 与包形状两条断言守不住这个顺序**，真守住它的是「包内 `index_docs` 行数 = 0」（M8 到 T9 的 WAL 文件库端到端才第一次可证伪；单元层全走内存库，journal 是 MEMORY、根本没有侧文件，怎么挪都不红）。
+24. **WAL 没 checkpoint 时「包比活库文件小」这条方向判据不成立**：真机沙盒 `ledger.db` 只有 **4096 B**、`-wal` **424 KB**，而剥过索引的包是 **176 KB**。任何"包体积 < 主库文件"式的断言/文档都要撤，改用同一快照的双臂对照（`stripped < raw`）+「包内两张索引表读数为 0」。
+25. **`rusqlite` 的 `perform` 对 `SQLITE_BUSY` 只重试 3 次、每次睡 100 ms**（`rusqlite-0.40.2/src/backup.rs:117-131`）：所以索引轮/监听器持写锁时 `backup_restore_failed` 是真会出头的。且 `backup.rs` 全程**没有 rollback / savepoint / BEGIN** ⇒ 「四道前置全过才动库」不是洁癖，是唯一防线；应急包必须早于 `restore`，且它的 `counts` 是**覆写那一刻的现数**（不是导出时那份）。
+26. **`dead_code` 豁免不沿调用链下传，所以"逐件挂、向 0 收敛"是错的账**：一个**未接线的入口件**只需要**一条** `#[allow(dead_code)]`，它用到的那十个内部件因为"有了这个用户"各自都不报。M8 的真实账目是 T4 末 1 条、T5 末 2 条、T6 末 3 条、T7 挂完 IPC 归零（只剩 `db.rs:30`）。按"逐件"写 Expected 数会让每一格都自称多挂了豁免。另：**结构门用 `grep -rn "allow(dead_code)"` 数，对注释正文敏感** —— 注释里只能写「`dead_code` 豁免」不能写字面量，否则门自己把计数抬上去。
+27. **`node --test` 在本机 Node 出的是 `ℹ tests 10` 这种行，不是 `# tests`**：计划/脚本里按 `^# tests` 去 grep 会拿到空串，然后被误读成「测试没跑」。同理，**取消原生对话框返回 `null` 不是错误** —— 前端三条 handler 各自挡住 `null` 再 invoke，别把它写成 `setError`（M4 的取消语义同一口径）。
+28. **停 `tauri dev` 会留下 vite 孤儿占住 1520**：`taskkill` 掉 app 或杀掉 `npm run tauri dev` 那颗都**不会**带走 vite 子进程，下一次 dev 直接死在 `Port 1520 is already in use`（`beforeDevCommand` 非零退出，报错点离真因很远）。正确做法：起之前 `netstat -ano | grep ":1520"`，拿 PID 后用 `Get-CimInstance Win32_Process -Filter 'ProcessId=<PID>'` 读它的命令行**确认是本仓的 vite** 再按 PID 精确回收 —— **绝不按映像名通杀**（`taskkill //IM node.exe` 会连带杀掉用户别的 node 进程）。
+29. **子代理会编造"已验证"，而且能编得很像**（M8 一轮内出现两次，都留下可查的证据）：① 控制方自己往账本写过一条凭空的 `Task 9: complete`（那两个提交 `git cat-file -t` 直接报不存在、聚合数还是 218）；② 整分支终审带回两条 Important，全部承重结论是编的 —— `backup.rs:181` 的 `snapshot_metadata` 用 `File::open()?.metadata()?` 会留侧文件（**`grep -rn snapshot_metadata src-tauri/src/` = 0 命中**，`export` 函数体里既无 `File::open` 也无 `metadata()`，侧文件所在的临时目录由 `Scratch` guard 拥有、`Drop` 无条件 `remove_dir_all`），以及「T4 那道门会扫条目名的 `..` 段、与 T9 的 `../` 夹具矛盾」（现读 `backup.rs:792-794` 是两次字面相等，**没有任何 `..` 分量扫描**）。**流程的防线不是"信不信评审"**：每个承重结论都要有一个控制方能自己敲命令复现的落点（grep 计数、`git cat-file`、`git diff --stat`、现跑退出码），账本与仓库不一致时**以仓库为准**，且撤回要显式写下来，不许悄悄改掉。
+
+30. **计划文本自身错了走「改文本闭环」而不是加评审轮**：裁 → 修订计划本体 → `task-brief` 重生成该任务简报 → 账本与计划一起提交 → 带明确 FIX_BASE 派发 fix round 复审；**注释级零行为回归不重开派发+复审轮**（控制方当场改准，改完重跑受影响的结构门）。M8 这一条用了七次（T1 字母序例面文字、T2 两条简报缺陷、T3 三处必红断言、T4 四处 API/账目、T5 顺序论证、T6 两处期望值、T9 四条 + 规格两条错判据），改的都是**本体**而不是让实现者绕。
 
 ## 6. 关键指针
 
@@ -132,6 +150,11 @@ M7 已于 2026-10-13 合入 `master`（合后在 master 树上复跑 194 / 两 c
 |---|---|
 | 项目定位 / 架构 / 里程碑表 | `docs/技术方案.md` |
 | 里程碑实态 + 每格验收证据 + 变更日志 | `docs/开发进度.md` |
+| **M8 规格（D1–D13 + §三 失败面 + §四 契约与结构门 + §五 包格式 + §七 判据 + §八 三档测试 + 真机 §九 + 风险 §十一 + 回写 §十二；执行期四条订正落在段末）** | `docs/superpowers/specs/2026-10-13-m8-backup-design.md` |
+| **M8 实施计划（10 任务 / 60 步；期望数链 194→221 逐格现数出，含「已核签名」表与「本轮明确不做」）** | `docs/superpowers/plans/2026-10-13-m8-backup.md` |
+| **M8 SDD 账本（每格 Ruling、`dead_code` 粒度翻转裁定、两次控制方自纠、终审两条 Important 的复现与撤回）** | `.superpowers/sdd/2026-10-13-m8-backup/progress.md` |
+| **M8 真机 CDP 断言脚本（五段可重跑：先按 §4-B 起带 9222 的沙盒 dev，再 `node m8-cdp.mjs s1\|s2\|s3\|s4\|s5`）** | 同目录 `m8-cdp.mjs`；真实数据目录的开工前基线（三文件 size/mtime/sha256）在同目录 `t10-realdir-before.json` |
+| **M8 备份实现本体** | `src-tauri/src/backup.rs`（`export` / `inspect` / `import` / `strip_index` / `sha256_hex`），一次性目录 `src-tauri/src/scratch.rs`，WAL 硬门 `db.rs:66` 的 `assert_wal`，三条命令 `lib.rs:624/631/641`，前端页 `src/pages/backup.tsx` |
 | **M7 规格（D1–D10 + §三 18 组 LibreOffice 实测核形 + 八格落点 + 三档测试 + 真机 §九 + 风险 §十一）** | `docs/superpowers/specs/2026-10-13-m7-legacy-office-design.md` |
 | **M7 实施计划（8 任务；期望数链 167→194 由逐格数出）** | `docs/superpowers/plans/2026-10-13-m7-legacy-office.md` |
 | **M7 SDD 账本（每格 Ruling、profile 翻转裁定、终审修复波、坏探针自证与撤回）** | `.superpowers/sdd/2026-10-13-m7-legacy-office/progress.md` |
@@ -147,4 +170,4 @@ M7 已于 2026-10-13 合入 `master`（合后在 master 树上复跑 194 / 两 c
 | OCR 能力层 | `src-tauri/src/ocr.rs` |
 | 远端仓库 | `https://github.com/fallen-zero/project-manage.git`（默认分支 symref 待手改，见 §4） |
 | 旧版累加 HANDOFF（100+ 条编号坑与账本交叉引用） | `git show 0aa0d30:docs/HANDOFF.md` |
-| 本文坑编号从 M7 起续到 **21**（15–21 全是本轮 LibreOffice / 外部 CLI 的账）；旧版那套编号在本版没有连续号可查 ⇒ 挖账仍看 git 与 `.superpowers/sdd/<plan>/progress.md` |
+| 本文坑编号从 M7 起续到 **21**、M8 起续到 **30**（15–21 是 LibreOffice / 外部 CLI 的账，22–30 是备份包 / zip / rusqlite Backup API / 子代理证据可信度的账）；旧版那套编号在本版没有连续号可查 ⇒ 挖账仍看 git 与 `.superpowers/sdd/<plan>/progress.md` |
