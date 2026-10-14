@@ -85,6 +85,17 @@ pub struct PackageInfo {
     pub plaintext_warning: String,
 }
 
+/// `import` 的出参。`counts` 是**覆写前**那份现状的计数（等于应急包里念出来的数字），不是导入后的 ——
+/// 导入后的数字由前端重新拉一次 `index_overview`/`project_list` 得到，这里不做第二份真值。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOutcome {
+    pub entries: i64,
+    pub schema_version: i64,
+    pub pre_restore_path: String,
+    pub counts: Counts,
+}
+
 /// 十六进制小写。手写，不为 hex 再加一个 crate（`Cargo.lock` 的门：不新增 `[[package]]`）。
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -149,8 +160,8 @@ pub fn now_utc(conn: &rusqlite::Connection) -> AppResult<String> {
 /// 切进 WAL 并跑 `migrate`，于是包里的 `schema_version` 会被本机版本悄悄改写 —— manifest 那句
 /// 「比本机新就拒」就失去意义（spec §六.4）。
 ///
-/// 本模块现在只剩两条 `dead_code` 豁免（这条 + T5 的 `inspect`），归属都是 T7：`mod backup` 要到三条 IPC 命令
-/// 进 `generate_handler!` 才从 crate 根可达，在那之前 `export`/`inspect` 是树顶的两个入口。它们下面
+/// 本模块现在只剩三条 `dead_code` 豁免（这条 + T5 的 `inspect` + T6 的 `import`），归属都是 T7：`mod backup` 要到三条 IPC 命令
+/// 进 `generate_handler!` 才从 crate 根可达，在那之前 `export`/`inspect`/`import` 是树顶的三个入口。它们下面
 /// 那 11 件（两个条目名常量、`FORMAT_VERSION`、`warn_plaintext_columns`、`FileEntry`/`Counts`/
 /// `Manifest`/`BackupSummary`、`sha256_hex`/`count_one`/`read_counts`/`now_utc`）已被本函数接上，
 /// 而 `dead_code` 不沿调用链往下传（实测：只留这一条时 `cargo clippy --lib -- -D warnings` 仍 exit=0），
@@ -377,6 +388,97 @@ fn zip_read_entry(z: &mut zip::ZipArchive<std::fs::File>, name: &str) -> AppResu
     Ok(buf)
 }
 
+/// 应急包的文件名。**冒号换成 `-`**：`:` 在 Windows 文件名里非法（M7 的 profile URL `%20` 是同一类
+/// 「路径形状要到本机量」的教训，spec §三.17）。
+pub fn pre_restore_name(stamp: &str) -> String {
+    format!("pre-restore-{stamp}.zip")
+}
+
+/// 本次覆写的时刻（不是包的导出时刻！manifest 的 `created_at` 走的是 `now_utc`，那个带冒号的形态
+/// 进得了 manifest、进不了文件名），形态已按 `pre_restore_name` 的要求去掉冒号（注 1）。
+fn stamp(conn: &rusqlite::Connection) -> AppResult<String> {
+    conn.query_row("SELECT strftime('%Y-%m-%dT%H-%M-%SZ','now')", [], |r| r.get(0))
+        .map_err(|e| {
+            AppError::new(
+                "backup_timestamp_failed",
+                &format!("取时间戳失败：{e}"),
+                Some("这份库连 strftime 都用不了，多半不是本工具的库"),
+            )
+        })
+}
+
+/// 把包里的库灌回**当前已打开**的连接。顺序即判据（spec D13 + §三）：
+/// ① 解包读 manifest ②比格式版本 ③比 schema 版本 ④验 db 哈希（①–④全在 `read_package` 里，
+/// 一道不过就返回，**库未动**、也不写应急包）→ ⑤写应急包到数据目录（写不出去就中止，仍在覆写之前）→
+/// ⑥`restore` 灌页 → ⑦`migrate` 补版本 → ⑧`assert_wal` 现读回。
+///
+/// ⑥ 之后没有任何回滚：`Connection::restore` 按页拷贝、rusqlite 对 Busy 只重试 3 次 ×100 ms
+/// （实读 vendored `rusqlite-0.40.2/src/backup.rs:102-134`），真失败就是半新半旧 —— 所以 ⑤ 那份
+/// 应急包是唯一的撤销键，⑥⑦⑧ 每条错误的 hint 都必须把它的**完整路径**念出来（spec §三 表）。
+/// 本机无法廉价构造「灌到一半」的现场，那一档登记为有名缺口（spec §九），这里只保证失败点前移。
+///
+/// 豁免归属 T7（与 `export`/`inspect` 同批删）：`mod backup` 三条 IPC 命令进 `generate_handler!`
+/// 才可达；被本函数使用的 `stamp`/`pre_restore_name` 不各自挂豁免（`dead_code` 不沿调用链下传，T4 实测）。
+#[allow(dead_code)] // T7 挂 IPC 后删
+pub fn import(
+    conn: &mut rusqlite::Connection,
+    src: &Path,
+    data_dir: &Path,
+) -> AppResult<ImportOutcome> {
+    // ①–④：与 inspect 同一份逻辑，不抄两遍。
+    let (manifest, db_bytes) = read_package(src)?;
+    // ⑤ 应急包：用**即将被覆写的那条连接**导出（D12：它抓的必须正是这份状态 —— 覆写前的现数）。
+    let when = stamp(conn)?;
+    let pre = data_dir.join(pre_restore_name(&when));
+    let summary = export(conn, &pre)?;
+    let counts_before = summary.counts;
+    // 撤销键：⑥⑦⑧ 三支 hint 共用的那句，必须带应急包的完整路径（裁定 2）。
+    let undo = format!("库里可能已是半新半旧的状态。用这份应急包再导入一次即可回到覆写前：{}", pre.display());
+
+    // ⑥ 把包内 db 落进一次性目录，再 restore 进去（`restore` 只收路径，不收字节 —— 实读 backup.rs:102）。
+    // `_scratch`：下划线前缀是必须的 —— 本函数只在末尾靠 Drop 清理，没有任何一处读它，
+    // 绑成 `scratch` 会被 `unused_variables` 在 `-D warnings` 下打成红。
+    let _scratch = crate::scratch::Scratch::new("pfm-m8", "import")?;
+    let snap = _scratch.dir().join(DB_ENTRY);
+    std::fs::write(&snap, &db_bytes).map_err(|e| AppError::io(&snap, &e))?;
+    // 泛型 `F: Fn(Progress)` ⇒ `None` 必须显式标注类型（实读 backup.rs:102 签名）。
+    conn.restore(rusqlite::MAIN_DB, &snap, None::<fn(rusqlite::backup::Progress)>)
+        .map_err(|e| {
+            AppError::new(
+                "backup_restore_failed",
+                &format!("灌入包内库失败：{e}"),
+                Some(&undo),
+            )
+        })?;
+    // 一次性目录由 `_scratch` 在函数末尾（含错误返回那条路）Drop 时整棵删掉，不在此处手写清理。
+
+    // ⑦ 包里可能是旧版本 ⇒ 补迁移。
+    crate::db::migrate(conn)
+        .map_err(|e| {
+            AppError::new(
+                "backup_migrate_failed",
+                &format!("导入后补迁移失败：{}", e.message),
+                Some(&format!("这份包的库版本本机读得动但补不动迁移；用数据目录里的应急包导回去：{}", pre.display())),
+            )
+        })?;
+    // ⑧ WAL 现读（`restore` 绕过 after_open，spec §七）。
+    crate::db::assert_wal(conn)
+        .map_err(|e| {
+            AppError::new(
+                "backup_wal_lost",
+                &format!("导入后这份库不在 WAL 上了：{}", e.message),
+                Some(&format!("这份库不再受断电保护。先用数据目录里的应急包导回去，并把现象反馈给维护者：{}", pre.display())),
+            )
+        })?;
+
+    Ok(ImportOutcome {
+        entries: manifest.files.len() as i64,
+        schema_version: manifest.schema_version,
+        pre_restore_path: pre.display().to_string(),
+        counts: counts_before,
+    })
+}
+
 #[cfg(test)]
 impl Counts {
     /// 只给测试用（生产路径的 counts 必须来自 `read_counts`）。
@@ -485,21 +587,28 @@ mod tests {
 
     // ---- T4：export（快照 → 剥两张索引表 → VACUUM → 先关连接再打 zip）----
 
-    /// 测试辅助件：手写 INSERT 种 1 行 `projects` + n 行 `ledger_credentials`。
+    /// 测试辅助件：手写 INSERT 种 n 行 `projects`（id 落成 `p1..pN`）+ n 行 `ledger_credentials`。
     /// 不依赖任何别的模块的私有 seed（`index_job::tests::seed_project` 之类跨不过去）。
+    /// T6 注 3：本格的导入测试用 `DELETE FROM projects WHERE id='p1'` 制造「回滚」差异，
+    /// 项目 id 必须真落成 p1..pN 且行数等于 n —— 否则删掉 0 行、断言恒真。内部那条
+    /// `assert_eq!(n, 实插行数)` 就是钉这件事。
     fn seed_ledger(conn: &rusqlite::Connection, n: i64) {
-        conn.execute(
-            "INSERT INTO projects (id, name, status) VALUES ('p1','甲项目','立项')",
-            [],
-        )
-        .unwrap();
         for i in 1..=n {
+            conn.execute(
+                "INSERT INTO projects (id, name, status) VALUES (?1, ?2, '立项')",
+                rusqlite::params![format!("p{i}"), format!("甲项目{i}")],
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO ledger_credentials (id, project_id, title) VALUES (?1, 'p1', ?2)",
                 rusqlite::params![format!("c{i}"), format!("凭据{i}")],
             )
             .unwrap();
         }
+        let got: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(got, n, "seed_ledger 必须真落 n 行项目（id=p1..pN），否则 DELETE 制造的差异不存在：{got}");
     }
 
     /// 测试辅助件：往 `index_docs` 与 `index_docs_fts` **各**写 n 行，正文塞 ~4 KB 文本。
@@ -819,5 +928,158 @@ mod tests {
         let e = inspect(&weird).expect_err("未知包格式版本必须红");
         assert_eq!(e.code, "backup_package_invalid");
         assert!(e.message.contains("7"), "消息要念出它读到的版本号：{}", e.message);
+    }
+
+    // ---- T6：import（四道前置全过才动库 → 应急包 → restore 灌活连接 → migrate → assert_wal）----
+
+    /// 主承诺的正反两面：导入把台账灌回来，同时**索引仍是空的**（包里就没有），
+    /// 且数据目录里出现一份能读得通的应急包，其 counts 等于覆写前（restore 之前）那一刻的活库。
+    #[test]
+    fn import_restores_the_ledger_and_leaves_an_undo_copy_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let mut live = crate::db::open(&data).unwrap();
+        seed_ledger(&live, 3);
+        let pkg = dir.path().join("p.zip");
+        export(&live, &pkg).unwrap();
+
+        // 导出时的基准数字（导入后应当逐张表回到这里）。
+        let before = read_counts(&live).unwrap();
+        // 改活库：删掉一条项目，制造「回滚」的现实场景。从这一刻到 restore 之前才是「覆写前」，
+        // 应急包念出来的必须是这份现数（控制方裁定 4：counts 语义 = 覆写前那份现状）。
+        live.execute("DELETE FROM projects WHERE id='p1'", []).unwrap();
+        let after_delete = read_counts(&live).unwrap();
+        assert_eq!(after_delete.projects, before.projects - 1, "夹具得先真的删掉一条，否则下面什么都没证");
+
+        let out = import(&mut live, &pkg, &data).unwrap();
+        let back = read_counts(&live).unwrap();
+        assert_eq!(back.projects, before.projects, "被删的项目要回来，这是回滚的全部意义：{back:?}");
+        assert_eq!(back, before, "逐张表对上：导出前 {before:?} vs 导入后 {back:?}");
+        let idx: i64 = live.query_row("SELECT COUNT(*) FROM index_docs", [], |r| r.get(0)).unwrap();
+        assert_eq!(idx, 0, "索引不进包 ⇒ 导入后必然是空的（spec §七 正面判据）");
+        assert_eq!(out.counts, after_delete, "ImportOutcome.counts 是覆写前的计数，不是导入后的（裁定 4）：{:?}", out.counts);
+
+        // 应急包：落在数据目录里、能被 inspect 读通、counts 等于覆写前那一刻的现数。
+        let pre = std::path::Path::new(&out.pre_restore_path);
+        assert!(pre.parent() == Some(data.as_path()), "应急包必须落在数据目录内，不在包旁边：{:?}", out.pre_restore_path);
+        let fname = pre.file_name().unwrap().to_string_lossy().to_string();
+        assert!(fname.starts_with("pre-restore-") && fname.ends_with(".zip"), "应急包名形状不对：{fname}");
+        assert!(!fname.contains(':'), "Windows 文件名里不能有冒号：{fname}");
+        let info = inspect(pre).unwrap();
+        assert_eq!(info.counts, after_delete, "应急包念出来的数字必须就是覆写前（restore 之前）那份：{:?}", info.counts);
+    }
+
+    /// 覆写之后 WAL 这条硬门必须还在 —— `restore` 不经过 `after_open`，这格全靠 import 收尾现读。
+    #[test]
+    fn import_leaves_the_restored_db_in_wal_and_unlocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("d2");
+        std::fs::create_dir_all(&data).unwrap();
+        let mut live = crate::db::open(&data).unwrap();
+        seed_ledger(&live, 1);
+        let pkg = dir.path().join("q.zip");
+        export(&live, &pkg).unwrap();
+        import(&mut live, &pkg, &data).unwrap();
+        // 文件库上现读 journal_mode：内存库这条断言是恒真的废断言，所以夹具必须是文件库（spec §八）。
+        let mode: String = live.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        assert_eq!(mode.to_lowercase(), "wal", "导入后必须仍是 WAL，否则断电就损坏用户唯一的库");
+        // -wal 侧文件在不在由 SQLite 自己管，这里不钉（钉了就是拿实现细节当断言）。
+        assert!(data.join("ledger.db").exists());
+    }
+
+    /// 前置①②③失败时**库必须逐字未动**（四道里前三道的共同期望，spec §三 表）。
+    #[test]
+    fn a_rejected_package_leaves_the_database_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("d3");
+        std::fs::create_dir_all(&data).unwrap();
+        let mut live = crate::db::open(&data).unwrap();
+        seed_ledger(&live, 5);
+        let untouched = read_counts(&live).unwrap();
+
+        // ①非 zip
+        let junk = dir.path().join("j.zip");
+        std::fs::write(&junk, b"not a zip").unwrap();
+        // ②翻 db 字节（哈希不符）
+        let good = dir.path().join("g3.zip");
+        export(&live, &good).unwrap();
+        let flipped = dir.path().join("f3.zip");
+        flip_one_db_byte(&good, &flipped);
+        // ③包比本机新
+        let newer = dir.path().join("n3.zip");
+        bump_schema_in_manifest(&good, &newer, crate::db::TARGET_VERSION + 1);
+
+        for (name, p) in [("junk", &junk), ("flipped", &flipped), ("newer", &newer)] {
+            let err = import(&mut live, p, &data).expect_err("{name} 必须被拒");
+            assert!(matches!(err.code, "backup_package_invalid" | "backup_hash_mismatch" | "backup_schema_too_new"),
+                "{name} 报了个没登记过的码：{}", err.code);
+            assert_eq!(read_counts(&live).unwrap(), untouched, "{name} 被拒之后库必须一字未动");
+            // 更要紧：前三道失败**不许留下应急包**（应急包是第四道才写的）。
+            assert_eq!(std::fs::read_dir(&data).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("pre-restore-")).count(), 0,
+                "{name} 被拒后不该在数据目录里写出应急包");
+        }
+    }
+
+    /// 第二连接在册时导入必须仍成功（控制方在 T6 派发前补的一臂，spec §三 那条具名风险的替代取证）：
+    /// 本仓生产路径**本来就存在**第二条常驻连接 —— watcher 线程在 `watch.rs:70` 开一条并长持。
+    /// `restore` 往活连接灌页时它若在**读**，就是两个读者/一个写者争同一库；实测「它当前不持读事务
+    /// 时 restore 照常成功」能钉住「导入不会把 watcher 打死」这件事，但**钉不住**「watcher 正在
+    /// `list_watchable_roots` 读库的中间被 import 打断」那一档时序（本机不可廉价构造 ⇒ 有名缺口，
+    /// 由 SQLite 自身的文件锁互斥兜，写进 §九 的没能自动验证）。
+    #[test]
+    fn import_succeeds_while_a_second_connection_holds_the_same_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("d5");
+        std::fs::create_dir_all(&data).unwrap();
+        let mut conn = crate::db::open(&data).unwrap();
+        seed_ledger(&conn, 2);
+        let pkg = dir.path().join("p5.zip");
+        export(&conn, &pkg).unwrap();
+        // 照 watcher 的形制长持第二条连接（同 `db::open`，不是只读打开 —— 只读打开 WAL 库在本机
+        // 已被证伪过一次：`-shm` 需要恢复时会 `unable to open database file`）。
+        let second = crate::db::open(&data).unwrap();
+        let n: i64 = second.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 2, "第二条连接先读一次，确认它真连到了同一个库：{n}");
+        let out = import(&mut conn, &pkg, &data).expect("第二条连接在册时 import 必须成功");
+        assert!(!out.pre_restore_path.is_empty());
+        let m: i64 = second.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap();
+        assert_eq!(m, 2, "另一条连接随后再读要看得见导入后的库（不是报错、也不是读到陈旧页）：{m}");
+    }
+
+    /// 前置④：应急包写不出去 ⇒ 必须在覆写之前失败，且 hint 里不许出现「已导入」。
+    /// 造法：`data_dir` 指向一个**不存在且建不了**的位置（Windows 下用一个已有文件当目录名最稳）。
+    #[test]
+    fn an_unwritable_undo_copy_aborts_before_any_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("d4");
+        std::fs::create_dir_all(&data).unwrap();
+        let mut live = crate::db::open(&data).unwrap();
+        seed_ledger(&live, 4);
+        let pkg = dir.path().join("p4.zip");
+        export(&live, &pkg).unwrap();
+        let before = read_counts(&live).unwrap();
+        // 删一条，制造「如果导成功了就会看到」的差异。
+        live.execute("DELETE FROM projects WHERE id='p1'", []).unwrap();
+
+        let block_file = dir.path().join("block");
+        std::fs::write(&block_file, b"x").unwrap();
+        // 把一个**普通文件**当数据目录传进去：create_dir_all / File::create 必然失败。
+        let err = import(&mut live, &pkg, &block_file).expect_err("应急包写不出去就必须中止");
+        assert!(!matches!(err.code, "backup_restore_failed" | "backup_wal_lost" | "backup_migrate_failed"),
+            "报的是覆写之后的码，说明前置④没挡住覆写：{}", err.code);
+        let now = read_counts(&live).unwrap();
+        assert_eq!(now.projects, before.projects - 1, "库必须还是「删过一条」的状态，一点没被灌：{now:?}");
+    }
+
+    /// 应急包的名字不许带冒号（Windows 文件名里 `:` 非法，M7 的 `%20` 教训同类：路径形状是实测项）。
+    #[test]
+    fn pre_restore_name_has_no_illegal_characters() {
+        let n = pre_restore_name("2026-10-13T21-30-12Z");
+        assert_eq!(n, "pre-restore-2026-10-13T21-30-12Z.zip");
+        for bad in ['"', '<', '>', '|', '?', '*'] {
+            assert!(!n.contains(bad), "包名里不能有 {bad}：{n}");
+        }
+        assert!(n.starts_with("pre-restore-") && n.ends_with(".zip"));
     }
 }
