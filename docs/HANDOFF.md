@@ -1,10 +1,10 @@
 # 交接文档 —— 项目资料管理（写给一个完全没有上下文的新对话）
 
-**快照时间**：2026-10-14。**当前分支 `feat/m8-backup`，HEAD 现取**：`git rev-parse --short HEAD`（本文最后一次提交即这份交接本身，别把 SHA 写死在这里、必漂）。`master` 停在 M7 的合并点之后（`git rev-parse --short master` 现取）。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。
+**快照时间**：2026-10-14。**当前分支 `master`，HEAD 现取**：`git rev-parse --short master`（本文最后一次提交即这份交接本身，别把 SHA 写死在这里、必漂）。`master` 停在 M7 的合并点之后（`git rev-parse --short master` 现取）。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。
 
 ## 0. 先读这一段
 
-这是一个 Tauri 桌面工具的持续开发项目，按里程碑推进。**M0–M7 都已完成并合入 `master`**（M7 于 2026-10-13 fast-forward 合入，合并点 `da140a4`）。**M8（备份包导出/导入）本轮已做完代码 + 真机 + 整分支终审（Verdict **Needs fixes / 1 Critical + 2 Important**，三条全部复现成立、全部修完，限定复审 clean），停在功能分支 `feat/m8-backup` 等需求方当次批准合 `master`** —— 那条 Critical 就是坑 31：导出落点指进数据目录会把用户唯一的持久库截断归零 —— 合完之后的下一格是 **M9（待办清单）**，开工前先把 M8.1 那三格小账过一遍（见 §4）。
+这是一个 Tauri 桌面工具的持续开发项目，按里程碑推进。**M0–M8 都已完成并合入 `master`**（M7 合并点 `da140a4`；M8 合并点 `99c9401`，全历史零 merge commit 的惯例保持）。**M8（备份包导出/导入）已于 2026-10-14 fast-forward 合入 `master` 并推送 origin**（合入前整分支终审给的是 **Needs fixes / 1 Critical + 2 Important**，三条全部复现成立、全部修完、限定复审 clean；那条 Critical 就是坑 31）。**下一格是 M9（待办清单）**，开工前先把 §4 里 M8.1 那四格小账过一遍 —— 那条 Critical 就是坑 31：导出落点指进数据目录会把用户唯一的持久库截断归零 —— 合完之后的下一格是 **M9（待办清单）**，开工前先把 M8.1 那三格小账过一遍（见 §4）。
 
 三份必读文档按重要性：
 
@@ -57,24 +57,28 @@
 
 ## 3. 当前卡在哪
 
-**代码面没有卡点**（但**合入前发现并修掉了一条会毁库的 Critical**，见坑 31）。M8 十格代码全完、门禁全绿（**224 passed** / 两 clippy 0 / `cargo build --lib` 0 / node **10/10/0** / build `error TS`=0）、真机八格有读数、整分支终审 **Needs fixes / 1 Critical + 2 Important → 修复波 + 判据收口波 + 限定复审 clean**（它带回的两条 Important 经控制方逐条复现**判为不成立**，证据写在 `docs/开发进度.md` 的 M8 终审段）。**卡在对需求方的两个批准/两个动作上**：
+**代码面与合并面都没有卡点**。M8 十格代码全完、真机八格有读数、整分支终审给的是 **Needs fixes / 1 Critical + 2 Important** —— 三条控制方逐条读代码复现**全部成立**（其中 C1 就是坑 31：导出落点指进数据目录会把用户唯一的持久库截断归零），修复波 `197144e` + 判据收口波 `d2220b4`、限定复审 clean ⇒ **2026-10-14 已 fast-forward 合入 `master`（`99c9401`）并推 origin**，合完在 `master` 的树上复跑 **224 passed / 两 clippy exit=0 / `cargo build --lib` exit=0 / node 10-10-0 / build `error TS`=0**。
 
-1. **合 `master` 需要当次批准**（惯例：常驻推送授权只覆盖功能分支）。批准后的动作序列在 §4-A。
-2. **`/backup` 那两个原生文件对话框只能人点**（「另存为」/「打开」）⇒ 三个结果块（导出摘要 / 验包详情 / 导入结果）与覆盖前那个确认框的**块内渲染**至今没有真机证据，已逐条记在「没能自动验证」。CDP 能直接 `invoke` 命令、也能读页面本体与页头那句明文告警，但**代替不了**用户选路径那一步（见 §5 坑 12）。
+**只剩这类只有需求方能做的动作**：
+
+1. **`/backup` 那两个原生文件对话框只能人点**（「另存为」/「打开」）⇒ 三个结果块（导出摘要 / 验包详情 / 导入结果）与覆盖前那个确认框的**块内渲染**至今没有真机证据，已逐条记在 `docs/开发进度.md` 的「没能自动验证」。CDP 能直接 `invoke` 命令、也能读页面本体与页头那句明文告警，但**代替不了**用户选路径那一步（见 §5 坑 12）。
+2. 顺带**故意把包存进 `%APPDATA%\dev.zero.pfm\` 试一次**，亲眼看那条 `backup_destination_unsafe` 的拒绝 —— 守卫的判据有单测，**它的调用点没有**（本仓不开 `tauri::test` 驱动不了 `backup_export`），这一格只能人点补上。
+3. M7 欠的那一下仍挂着：真按一次 `/index` 的「安装 LibreOffice」（`libreoffice_install` 全程没真调用过，它会在你机器上起真安装器）。
+4. 远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`（本机无 `gh`）⇒ 只能在 Settings → Branches 手改。
 
 ## 4. 下一步计划
 
-M8 已收口在功能分支上（`feat/m8-backup`，未合 `master`）。三条路，按默认顺序：
+M8 已于 2026-10-14 合入 `master` 并推送。往下三条路，按默认顺序：
 
-- **A（等一句批准）：合 `master`**。照仓内惯例走 **fast-forward**，不造合并提交：先核两条例行 —— `git rev-list --merges --count --all` = **0**、`git merge-base --is-ancestor master feat/m8-backup` exit=0 ⇒ `git merge --ff-only feat/m8-backup`；分支尾部除十格实现外还多了三笔收口提交（`c555412` 文档回写、`197144e` 终审 C1/I1/I2 修复、`d2220b4` 守卫判据收口），合并范围以 `git log --oneline master..feat/m8-backup` 现取为准；**合完在 `master` 的树上复跑全部门禁**（不拿分支读数交差）：`cargo test -j 1 --lib`（应 **224**）、两 clippy、`node --test`（10/10/0）、`npm run build`（`error TS`=0）；两条分支都推 `origin`，并用 `git ls-remote --heads` 核 SHA 与本地逐字一致。历史先例：M7 的 `da140a4`。
-- **A′（M8.1 三格小账，半小时级）**：① `pre-restore-*.zip` **没有保留上限** —— 反复导入会往数据目录线性堆应急包，用户不会主动清（终审 defer-17）；② `backup.rs:244-247` 那句「注意**不碰 `db::TARGET_VERSION`**」是陈旧措辞（它读的是包内 `schema_meta` 的现值，而 `TARGET_VERSION` 只是比较的另一边；终审核过 `TARGET_VERSION` 在 `lib.rs:739`/`backup.rs:144` 与三条测试里仍活，但这句话容易被读成"这条函数不该碰它"）；③ `src/pages/backup.tsx:54` 那句 `// entries 是 manifest 点名的条目数，恒为 1…` 注释已被 T8 修完之后代码的上一条注释取代（终审 defer-25，纯文本）。另外两条**产品口径**要先定才好动代码，别顺手做：`ImportOutcome.entries` 恒 1 这个语义（要它等于包内条目数就是生产改动 + `types.ts` 同步 + 文案）；「拒绝一切未点名条目」要不要升级为第二道防线（现在只靠包名清洗 + 只取点名条目，T9 的 `../` 那条臂是**能构造**且实测红在落盘判据上）。
-- **B（真机欠账，需要人配合）**：① **`/backup` 那两个原生对话框各真点一次**，顺带看三个结果块与覆盖确认框的文案在屏幕上长什么样（这一格从 CDP 拿不到，脚本 `.superpowers/sdd/2026-10-13-m8-backup/m8-cdp.mjs` 的 s5 段能验页面本体与那句明文告警）；② **M7 欠的那一下仍挂着**：真按一次 `/index` 的「安装 LibreOffice」（本轮全程没真调用 `libreoffice_install`，它会在你机器上起真安装器）；③ M6 遗留的 ~50 图首轮墙钟、真·没装语言包/没装 LibreOffice 的机器。本轮 `tauri dev` 起了两轮（编译 50 s / 增量 1 s），`os error 1455` 没复现 ⇒ 仍按「每轮先试一次」处理，别引用旧轮的判死结论。
+- **A（默认方向）：开 M9（待办清单）** —— 走完整流程：`superpowers:brainstorming` 收口 → spec → writing-plans → SDD → 整分支终审 → 合 master（**需当次批准**）。技术方案 §九 里程碑表里 M9 只写了「待办清单」四个字，阶段模型（统一枚举 vs 每项目模板）与粒度都还没定，属于架构级那一格、不是 bounded 改动。
+- **A′（M8.1 四格小账，开工 M9 之前顺手清掉最划算）**：① `pre-restore-*.zip` **没有保留上限** —— 反复导入会往数据目录线性堆撤销包，用户不会主动清（终审 defer）；② **守卫调用点的结构门** —— `guard_destination` 判据有单测、`backup_export` 里那句调用没有（`Cargo.toml` 一行不动 + 只允许 `tempfile::tempdir()` 两条硬边界内开不出 `tauri::test`，M5 终审已把"为什么测不了"写成机制并给了最小改法），可用仓内现成的 `include_str!` 文本门那一形制补钉（先例 `tokenize.rs` 的 `query_side_has_exactly_one_cut`、`extract.rs` 的 `release_profile_does_not_abort_so_panic_guards_work`）；③ `backup.rs` 里「注意**不碰 `db::TARGET_VERSION`**」那句是陈旧措辞（它读的是包内 `schema_meta` 的现值，`TARGET_VERSION` 只是比较的另一边）与 `src/pages/backup.tsx` 里那句已被取代的 `entries` 注释；④ 两条**要先定产品口径才好动代码**的：`ImportOutcome.entries` 恒为 1 这个语义（要它等于包内条目数就是生产改动 + `types.ts` 同步 + 界面文案），以及「拒绝一切未点名条目」要不要升级成第二道防线（眼下防线是只按点名条目取 + 包名清洗挡绝对路径，T9 的 `../` 那条臂实测能构造、红在落盘判据上）。
+- **B（真机欠账，需要人配合）**：见 §3 那四条 —— 两个原生对话框、故意往数据目录存一次看守卫报错、M7 那一下「安装 LibreOffice」、GitHub 默认分支 symref。
 
 **需要需求方做的**（不阻塞代码推进，但每次提醒一次）：
 
-1. **远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`**（本机无 `gh`）——只能在 GitHub **Settings → Branches** 手改成 `master`。这一格从 M4 起一直挂着。
-2. **批准 M8 合 `master`**（方向 A 那一串动作），以及若要做 A′/B 里的哪一条，点个头。
-3. 若走 B-③：**腾出提交内存**——关几个大户（`vmmemWSL` 常占 ~1G、`Everything`/`ChatGPT`/`Weixin` 各数百 MB）或在 Windows 高级系统设置把「分页文件」临时调大（比如 30–50 GB），然后我一键跑。
+1. **远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`**（本机无 `gh`）—— 只能在 GitHub **Settings → Branches** 手改成 `master`。这一格从 M4 起一直挂着。
+2. §3 那四条人手动作里，**至少把 B-①/② 那两下点了** —— 那是 `/backup` 块内渲染与落点守卫的唯一真机证据。
+3. 若要我再跑 `cargo test`/`tauri dev` 而它报 `os error 1455`：**腾出提交内存** —— 关几个大户（`vmmemWSL` 常占 ~1G、`Everything`/`ChatGPT`/`Weixin` 各数百 MB）或在 Windows 高级系统设置把「分页文件」临时调大（比如 30–50 GB）。本轮就撞过一次，`cargo test` 起不来、只有 clippy 过得去。
 
 ## 5. 踩过的坑，绝对不要再踩
 
