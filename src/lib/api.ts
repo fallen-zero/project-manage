@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { Project, ProjectInput } from "@/types/project";
 import type { DocPreview, SearchBundle } from "@/types/search";
@@ -16,6 +16,7 @@ import type {
   ServerInput,
 } from "@/types/ledger";
 import type { DocHit, DocRow, IndexOverview, IndexProgress } from "@/types/index";
+import type { BackupSummary, ImportOutcome, PackageInfo } from "@/types/backup";
 
 export const listProjects = () => invoke<Project[]>("project_list");
 export const getProject = (id: string) => invoke<Project>("project_get", { id });
@@ -46,6 +47,29 @@ export async function pickFolder(): Promise<string | null> {
   const picked = await openDialog({ directory: true, multiple: false });
   return typeof picked === "string" ? picked : null;
 }
+
+// —— M8 备份：三条命令 + 两个原生对话框封装 ——
+// 取消不是错误：save/open 返回 null 时由调用方直接 return，绝不写进 error。
+// dialog:default 实测含 allow-save / allow-open，补 save 不需要新权限。
+export async function pickBackupPath(defaultName: string): Promise<string | null> {
+  const picked = await saveDialog({
+    defaultPath: defaultName,
+    filters: [{ name: "备份包", extensions: ["zip"] }],
+  });
+  return typeof picked === "string" ? picked : null;
+}
+
+export async function pickPackagePath(): Promise<string | null> {
+  const picked = await openDialog({
+    multiple: false,
+    filters: [{ name: "备份包", extensions: ["zip"] }],
+  });
+  return typeof picked === "string" ? picked : null;
+}
+
+export const backupExport = (path: string) => invoke<BackupSummary>("backup_export", { path });
+export const backupInspect = (path: string) => invoke<PackageInfo>("backup_inspect", { path });
+export const backupImport = (path: string) => invoke<ImportOutcome>("backup_import", { path });
 
 // 走 Tauri 的原生剪贴板而不是 navigator.clipboard：后者要求文档处于焦点态，
 // 窗口刚失焦就会静默抛错，而"一键复制路径/密码"正是这个软件的核心动作。

@@ -9,6 +9,7 @@ const nav = [
   { to: "/", label: "搜索" },
   { to: "/projects", label: "项目" },
   { to: "/index", label: "索引" },
+  { to: "/backup", label: "备份" },
 ];
 
 export function AppShell() {
