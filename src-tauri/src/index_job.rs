@@ -1463,6 +1463,9 @@ mod tests {
     // 四条私有夹具都重写一份小的，不跨模块借用 backup.rs `mod tests` 里的同形件（那是私有模块，
     // 兄弟模块拿不到），也不为测试把任何一边提可见性 —— 本仓形制：`seeded_project` 与 `seed_project`
     // 就是两份（简报注 1 的裁定）。
+    // 判据（简报注 1 点名要登记）：本轮 zip 读改写夹具已有两处（backup.rs 的 `unpack_for_test` 一份、
+    // 本模块的 `rewrite_zip_add_stray_entry` + `bump_schema_in_manifest_to` 一份）—— **第三处再要就抽公共件**，
+    // 别再抄第三份。
 
     /// 包内条目名清单。
     fn zip_names_of(path: &Path) -> Vec<String> {
@@ -1590,13 +1593,19 @@ mod tests {
 
         let pkg = data.path().join("round-trip.zip");
         let sum = crate::backup::export(&conn, &pkg).unwrap();
-        assert!(sum.bytes > 0);
+        assert!(sum.bytes > 0, "包必须真的落盘并且非空：{}", pkg.display());
         // 「先关快照连接再读字节」这一臂**只有在 durable（WAL）源库上才有牙**：T4 的单元测试全走
         // `db::open_in_memory()`（`after_open(durable=false)` ⇒ journal 为 MEMORY，全程没有 -wal 侧文件），
         // 所以那边把 `drop(s)` 挪到 `fs::read` 之后也不会红（T4 评审的 Important，控制方裁定：判据挪到本格）。
-        // 本格的 `conn` 来自 `crate::db::open(data.path())` = 真 WAL 库 ⇒ 这两条断言才是 spec §七 的守卫。
+        // 本格实测（变异④ 已跑）：`drop(s)` 挪到 `fs::read` 之后**确实红**，但红点是下面的 `idx == 0`
+        // —— 快照连接没关时 `-wal` 里的帧没 checkpoint，`fs::read` 拿到的主文件是**剥索引之前的陈旧一致影像**
+        // （3 行原样），于是 `idx` 读出 3。⇒ **spec §七 在本格的守卫是 `idx == 0` / `fts == 0` 这两条**，
+        // 不是紧邻的两条包形状断言：`names` 那条由 `zip_out` 写死的两个常量条目名决定（本变异动不了它），
+        // `PRAGMA integrity_check` 对「缺自己 -wal 的库」返回 ok（它就是一致的旧影像）。那两条各自守的是
+        // 「包里只有 manifest 点名的那两个条目」与「解出来的 db 自洽」，本身有用，但**不许**在注释里记成 §七 的功劳。
         let names = zip_names_of(&pkg);
-        assert_eq!(names.len(), 2, "包里只该两条目（-wal/-shm 混进来就是 drop 位置错了）：{names:?}");
+        // 订正：只数条数没有失败面 ⇒ 断**名字集合本身**（这才是「包内只有这两条」那句判据的实体）。
+        assert_eq!(names, vec!["manifest.json".to_owned(), "backup.db".to_owned()], "{names:?}");
         // 解出来验：台账在、两张索引表空。
         // 控制方修订：原写还调一个 `unpack_backup_db(&pkg, ...)` 再 `unpack_for_test(&pkg, ...)` —— 两个名字
         // 指的是同一件事（解出包内 db 并开一条连接），重复了。只留 `backup::unpack_for_test` 一份，
@@ -1605,10 +1614,10 @@ mod tests {
         let ok: String = probe
             .query_row("PRAGMA integrity_check", [], |r| r.get(0))
             .expect("integrity_check 必须有且只有一行读数");
-        assert_eq!(ok, "ok", "包里的 db 必须自洽（引用不存在 -wal 的 db 在这一步就会现形）");
+        assert_eq!(ok, "ok", "解出来的包内 db 必须自洽（注意：这条**不是** §七 的守卫 —— 缺自己 -wal 的库是一致旧影像，integrity_check 照样 ok）");
         let idx: i64 = probe.query_row("SELECT COUNT(*) FROM index_docs", [], |r| r.get(0)).unwrap();
         let fts: i64 = probe.query_row("SELECT COUNT(*) FROM index_docs_fts", [], |r| r.get(0)).unwrap();
-        assert_eq!(idx, 0, "索引不进包（D4 的兑现）");
+        assert_eq!(idx, 0, "索引不进包（D4 的兑现）；这一条同时是 spec §七「先关快照连接再读字节」的载体：把 `drop(s)` 挪到 `fs::read` 之后这里会读出 3（陈旧影像），与变异① 同为一条 —— 这是已知的一条断言担两条判据，别再为它加假断言");
         assert_eq!(fts, 0, "FTS 侧同样要空");
         let proj: i64 = probe.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap();
         assert_eq!(proj, 1, "台账侧一行都不能少：{proj}");
@@ -1665,16 +1674,22 @@ mod tests {
         let evil = data.path().join("evil.zip");
         let stray = "pfm-m8-zipslip-probe.txt"; // 名字带里程碑前缀，避免撞上 %TEMP% 里的既有文件
         rewrite_zip_add_stray_entry(&good, &evil, &format!("../{stray}"), b"pwned");
+        // 订正（评审 Minor）：**当场钉住这条测试自己的前提** —— 野条目真的在那个包里。
+        // 不钉的话，将来 `zip` 写侧一旦开始清洗条目名（注 2 设想过的那档退化），包会被静默写成
+        // 没有越界名，两条 `!exists` 全绿而什么都没测。
+        let evil_names = zip_names_of(&evil);
+        assert_eq!(evil_names.len(), 3, "恶包必须真的比好包多一条野条目：{evil_names:?}");
+        assert!(evil_names.iter().any(|n| n == &format!("../{stray}")), "越界名必须原样在包里存着：{evil_names:?}");
         drop(conn);
 
         let mut conn2 = crate::db::open(data.path()).unwrap();
         conn2.execute("DELETE FROM projects WHERE id='p1'", []).unwrap();
         let out = crate::backup::import(&mut conn2, &evil, data.path())
             .expect("manifest 没点名的条目只是被忽略，不该让导入失败（§五）");
-        // 简报原文期望 2，实跑得 1 —— 计划把「包内两条目」（zip 侧：manifest.json + backup.db）与
-        // `ImportOutcome.entries`（= `manifest.files.len()`，manifest 只点名 db 那一条，`backup.rs:490`）
-        // 混成一件事了。改成 1 之后这条钉的仍是本来要钉的那句：多塞进来的野条目**没进** manifest 的点名列。
-        assert_eq!(out.entries, 1, "包里的野条目不会添进 manifest 的点名列");
+        // 控制方修订（T9 实跑读数）：`ImportOutcome.entries = manifest.files.len()`（`backup.rs:490`），
+        // 而 manifest 只点名 `backup.db` **一条** ⇒ 期望是 1；「两条目」是 zip 侧条目数，属
+        // `BackupSummary.entries`，两者别混（真机 `backup_import` 的出参也是 1，与此一致）。
+        assert_eq!(out.entries, 1, "出参形状：manifest 点名列恒只有 backup.db 一条（**这条不守 zip-slip** —— 就算实现真的把野条目落了盘，这个数也还是 1；守那一判据的是下面两条 !exists）");
         let back: i64 = conn2
             .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
             .unwrap();
