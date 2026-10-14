@@ -1,6 +1,6 @@
 # 交接文档 —— 项目资料管理（写给一个完全没有上下文的新对话）
 
-**快照时间**：2026-10-14（M8 已合入之后的 M8.1 收口时刻）。**当前分支 `feat/m8.1-cleanup`，HEAD 现取**：`git rev-parse --short HEAD`；`master` 现取 `git rev-parse --short master`（本文最后一次提交即这份交接本身，别把 SHA 写死在这里、必漂）。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。**注意：M8.1 的代码此刻还只在功能分支上，没有进 `master`。**
+**快照时间**：2026-10-14（M8.1 已 fast-forward 合入 `master` 之后的收口时刻）。**当前分支 `master`，HEAD 现取**：`git rev-parse --short HEAD`；`master` 现取 `git rev-parse --short master`（本文最后一次提交即这份交接本身，别把 SHA 写死在这里、必漂）。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。**M8.1 的代码此刻已经在 `master` 上，且 `master` 已推 `origin`。**
 
 ## 0. 先读这一段
 
@@ -8,8 +8,7 @@
 
 **现在在哪（三条都要用命令复核，别信这段文字）**：
 
-- **M0–M8 已全部合入 `master`**。M8 = 备份包导出/验包/导入，合并点 `99c9401`，收口文档 `a5c593b`。M8 的整分支终审结论是 **Needs fixes / 1 Critical + 2 Important**，三条复现全部成立、全部修完（那条 Critical 是「导出落点能把用户唯一的持久库截断归零」，见坑 31）。
-- **M8.1（备份包四格小账）代码已做完、门禁已跑绿、已推 `origin`，但还没合 `master`** —— 卡在等需求方当次批准。分支 `feat/m8.1-cleanup`（代码提交 `a6583fa`，分支 HEAD 现取 `git rev-parse --short HEAD`），四格口径与三处变异取证见 `docs/开发进度.md`「## M8.1 收口」。
+- **M0–M8.1 已全部合入 `master`**。M8 = 备份包导出/验包/导入，合并点 `99c9401`，收口文档 `a5c593b`；M8 的整分支终审结论是 **Needs fixes / 1 Critical + 2 Important**，三条复现全部成立、全部修完（那条 Critical 是「导出落点能把用户唯一的持久库截断归零」，见坑 31）。**M8.1 = 备份包四格小账**，合并点 `d203156`（`a5c593b..d203156` 的 **fast-forward**，全历史 merge commit 仍 0），`master` 已推 `origin` 且 `git ls-remote --heads origin` 的 SHA 与本地逐字一致；四格口径与**三处变异取证**见 `docs/开发进度.md`「## M8.1 收口」+ 变更日志最后一条。**M8.1 这一格没有真机验证**（详见 §2 末与 §3）。
 - **M9（待办清单）刚开工就暂停**：只完成了「读需求 + 读现状」这一步，**一个澄清问题都没问出口，spec 文件不存在**。已勘察到的事实与 M9 会撞上的四条既有不变量集中在 §4-B，下一个对话直接从那里接着问就行。
 
 **给下一个对话的一句提醒**：这一轮里「已验证」这三个字被伪造过两次，两次都是控制方自己（一次是凭空写 `Task 9: complete`，一次是从一份 **0 字节**的子代理输出里"读出"整份终审裁决并提交了）。教训与三条可敲的防线在坑 29。**本文任何结论都别直接当读数用 —— 照它附的命令自己跑一遍。**
@@ -65,30 +64,29 @@
 
 **M8（2026-10-14）= 备份包导出 / 验包 / 导入**：新模块 `src-tauri/src/backup.rs` + 一次性目录 guard 搬到 `src-tauri/src/scratch.rs` + `db.rs` 把 WAL 读回硬门拆成 `pub fn assert_wal`（行为零改动）+ `lib.rs` 三条命令 `backup_export`/`backup_inspect`/`backup_import` + 新页 `/backup`（nav 第 4 格）。包 = zip **两条目**（`manifest.json` + `backup.db`），`vault_meta` 跟着库走不另立条目；索引两张表在**快照**里删行留结构再 `VACUUM`，且**先关快照连接再读字节**。导入的形态是本轮最需要读懂的一段：**四道前置全过才动库**（解包读 manifest → `formatVersion` → `schemaVersion` 只拒「包比本机新」→ 大小与 SHA-256），然后**先在数据目录写一份 `pre-restore-<UTC秒>-<pid>-<seq>-<纳秒>.zip` 应急包**，再 `Connection::restore(MAIN_DB, src, None::<fn(Progress)>)` 灌进**已打开的那条连接**（不覆盖在用的 `ledger.db`、不重启），最后补 `migrate` + `assert_wal`。权威口径与全部实现在 `docs/superpowers/specs/2026-10-13-m8-backup-design.md`（D1–D13 + §三 失败面 + §五 包格式 + §九 真机九条），执行期翻掉计划/规格自己的六处与两条错判据都记在 `docs/开发进度.md`「## M8 验收证据」。
 
-**M8.1（2026-10-14，M8 合入同日）= 备份包四格小账**，在 `feat/m8.1-cleanup`（代码提交 `a6583fa`，**未合 `master`**）。四格：① 撤销包 `pre-restore-*.zip` 无保留上限 ⇒ 需求方定「只加界面可见性、**不自动删**」（自动删要破「只新增文件、绝不删改既有文件」这条红线，还会断掉多步回滚）；② 落点守卫 `guard_destination` **判据有单测、调用点没有**（本仓不开 `tauri::test` 就驱动不了 `backup_export`）⇒ 照仓内现成形制补一条 `include_str!` 文本门 `lib.rs::backup_export_wires_the_guard_before_any_write`；③ 两句陈旧注释/文案改准（`schema_version_of` 那句「不碰 `db::TARGET_VERSION`」易读成「不该引用它」）；④ 两条产品口径经批准落地 —— **删掉恒为 1 的 `ImportOutcome.entries`**（本里程碑唯一一次**收缩**线格式，四处引用一次清干净，`tsc` 全绿就是「无人再引用」的证据）、**未点名条目从静默忽略升级成硬拒**（`read_package` 新增第 1.5 道：包内条目集合必须恰好等于 manifest 点名集合，含 `manifest.json` 自身；排在版本判据之后、大小/哈希与应急包之前 ⇒ 被拒的包多一条文件都不许多写）。**④b 换来了纵深、吃掉了可证伪性（这一条是实测）**：集合校验在前 ⇒ T9 那条测试里「野条目一条也没落盘」的两条 `!exists` 从唯一防线降为纵深 —— 把「遍历条目按自带路径落盘」那一档变异加回去、集合校验保留，`cargo test -j 1 --lib an_extra_entry` 实测 **1 passed / 全绿**（包在抵达落盘代码之前就被拒），而同一档变异在 ④b 之前是红的。防线换了位置、旧断言换了性质，这件事已写进测试注释、spec 与「没能自动验证」（坑 35）。全部门禁读数与两次变异取证见 `docs/开发进度.md`「## M8.1 收口」。
+**M8.1（2026-10-14，M8 合入同日）= 备份包四格小账**，功能分支 `feat/m8.1-cleanup`（代码提交 `a6583fa`），**已 fast-forward 合入 `master`（合并点 `d203156`，`master` 与功能分支同指该提交，全历史零 merge commit）**。四格：① 撤销包 `pre-restore-*.zip` 无保留上限 ⇒ 需求方定「只加界面可见性、**不自动删**」（自动删要破「只新增文件、绝不删改既有文件」这条红线，还会断掉多步回滚）；② 落点守卫 `guard_destination` **判据有单测、调用点没有**（本仓不开 `tauri::test` 就驱动不了 `backup_export`）⇒ 照仓内现成形制补一条 `include_str!` 文本门 `lib.rs::backup_export_wires_the_guard_before_any_write`；③ 两句陈旧注释/文案改准（`schema_version_of` 那句「不碰 `db::TARGET_VERSION`」易读成「不该引用它」）；④ 两条产品口径经批准落地 —— **删掉恒为 1 的 `ImportOutcome.entries`**（本里程碑唯一一次**收缩**线格式，四处引用一次清干净，`tsc` 全绿就是「无人再引用」的证据）、**未点名条目从静默忽略升级成硬拒**（`read_package` 新增第 1.5 道：包内条目集合必须恰好等于 manifest 点名集合，含 `manifest.json` 自身；排在版本判据之后、大小/哈希与应急包之前 ⇒ 被拒的包多一条文件都不许多写）。**④b 换来了纵深、吃掉了可证伪性（这一条是实测）**：集合校验在前 ⇒ T9 那条测试里「野条目一条也没落盘」的两条 `!exists` 从唯一防线降为纵深 —— 把「遍历条目按自带路径落盘」那一档变异加回去、集合校验保留，`cargo test -j 1 --lib an_extra_entry` 实测 **1 passed / 全绿**（包在抵达落盘代码之前就被拒），而同一档变异在 ④b 之前是红的。防线换了位置、旧断言换了性质，这件事已写进测试注释、spec 与「没能自动验证」（坑 35）。全部门禁读数与两次变异取证见 `docs/开发进度.md`「## M8.1 收口」。
 
 **M8.1 这一格没有真机验证**：沙盒 `dev.zero.pfm.m8test` 在 M8 收口时就删净了，本轮没再起 `tauri dev` ⇒ ① 那句新界面文案、④b 那条新拒绝、以及 `ImportOutcome` 少一个字段之后的前端渲染，全都只有单元/编译层证据。**并且 ④b 改掉了 M8 真机第 5 格当时的行为语义**（那份「多一条条目」的包现在会被拒而不是照灌）。
 
 ## 3. 当前卡在哪
 
-**代码面没有卡点，工作树干净**（只有一颗未跟踪的 `Python/` —— 它绝不 stage、绝不删，仓里有专门的历史教训）。M8.1 的门禁在终态树上全绿：`cargo test -j 1 --lib` **225 passed / exit=0**、两条 clippy `-D warnings` **exit=0**、`cargo build --lib` **exit=0**、`node --test` **10/10/0**、`npm run build` **exit=0 且 `error TS`=0**、结构门 **45 条命令 / `command(async)` 4 / `TARGET_VERSION` 4 / 全仓 `dead_code` 豁免 1**（`db.rs:30`）、`Cargo.lock` 零新 `[[package]]`。**这些数一定漂，用 §4-A 那串命令现跑一遍再信。**
+**代码面没有卡点，工作树干净**（只有一颗未跟踪的 `Python/` —— 它绝不 stage、绝不删，仓里有专门的历史教训）。M8.1 已合入 `master`，整套门禁**在合并后的 `master` 树上复跑过**（不是拿分支读数交差）：`cargo test -j 1 --lib` **225 passed / exit=0**、两条 clippy `-D warnings` **exit=0**、`cargo build --lib` **exit=0**、`node --test` **10/10/0**、`npm run build` **exit=0 且 `error TS`=0**、结构门 **45 条命令 / `command(async)` 4 / `TARGET_VERSION` 4 / 全仓 `dead_code` 豁免 1**（`db.rs:30`）、`Cargo.lock` 在合并区间零变化且 `[[package]]` **616** 不变。**这些数一定漂，用 §4-A 那串命令现跑一遍再信。**
 
-**卡住的三件事，没有一件是代码问题**：
+**卡住的两件事，没有一件是代码问题**：
 
-1. **M8.1 等需求方当次批准合 `master`**（仓内惯例：常驻推送授权只覆盖功能分支，合并要另外批）。批准后的动作与要复跑的读数在 §4-A。
-2. **M9 卡在「第一个澄清问题还没问出口」**。上一轮只做完勘察（读了 `docs/思维导图.md` §二 的原始待办需求、库表现状、前端栏目结构），**spec 文件不存在**。附带一条已发生的误判：我一度把 M9 说成「需求侧口径未定」——不对，口径写在 `思维导图.md` 里（坑 34）；纠正之后剩下的开放问题才是真开放，那份清单在 §4-B。
-3. **这台机的提交内存是常态瓶颈**：16 G 机，`FreeVirtual` 掉到 ~1 G 时 cargo 会报 `os error 1455`，且症状包括「报编译失败却一行 `error[Exxxx]` 都没有」（坑 32）。要跑门禁前先看 `Get-CimInstance Win32_OperatingSystem` 的 `FreeVirtualMemory`，低于 ~2 G 就叫需求方腾内存，别去改代码。
+1. **M9 卡在「第一个澄清问题还没问出口」**。上一轮只做完勘察（读了 `docs/思维导图.md` §二 的原始待办需求、库表现状、前端栏目结构），**spec 文件不存在**。附带一条已发生的误判：我一度把 M9 说成「需求侧口径未定」——不对，口径写在 `思维导图.md` 里（坑 34）；纠正之后剩下的开放问题才是真开放，那份清单在 §4-B。
+2. **这台机的提交内存是常态瓶颈**：16 G 机，`FreeVirtual` 掉到 ~1 G 时 cargo 会报 `os error 1455`，且症状包括「报编译失败却一行 `error[Exxxx]` 都没有」（坑 32）。要跑门禁前先看 `Get-CimInstance Win32_OperatingSystem` 的 `FreeVirtualMemory`，低于 ~2 G 就叫需求方腾内存，别去改代码。
 
 **只剩需求方能做的四格（一直挂着，不阻塞代码）**：① `/backup` 上「另存为」/「打开」两个原生对话框各真点一次 —— 三个结果块与覆盖确认框的**块内渲染**至今没有真机证据；② 故意把导出目标选进 `%APPDATA%\dev.zero.pfm\`，亲眼看 `backup_destination_unsafe` 报错（守卫的调用点只有文本门守着，M8.1 之后这条更要看一眼）；③ M7 欠的那一下：真按一次 `/index` 的「安装 LibreOffice」（`libreoffice_install` 全程没真调用过）；④ 远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`（本机无 `gh`）⇒ 只能在 Settings → Branches 手改。
 
 ## 4. 下一步计划
 
-**A（五分钟先收掉：把 M8.1 合入 `master`，需需求方当次批准）**。照仓内惯例走 fast-forward、不造合并提交，先核两条例行再复跑整套门：
+**A（已完成：M8.1 已合入 `master`；下面这串现在是「master 整套门的复跑清单」）**。合并走的是 fast-forward（不造合并提交），合并点 `d203156`，`master` 已推 `origin` 且远端 SHA 与本地逐字一致 —— **这三条别信这句话，照下面的命令跑一遍**。以后任何一格收口也用同一串：
 
 ```
 git rev-list --merges --count --all                          # 期望 0
-git merge-base --is-ancestor master feat/m8.1-cleanup; echo $?   # 期望 0
-git checkout master && git merge --ff-only feat/m8.1-cleanup
+git rev-parse --abbrev-ref HEAD                              # 现在应在 master
+git rev-parse --short HEAD master feat/m8.1-cleanup           # 三者应同指一个提交
 cd src-tauri && cargo test -j 1 --lib                        # 期望 225 passed / 0 failed
 cargo clippy --lib -- -D warnings; cargo clippy --lib --all-targets -- -D warnings   # 两个都期望 exit=0、0 warning
 cargo build --lib                                            # exit=0
@@ -97,11 +95,13 @@ npm run build                                                # exit=0，且 grep
 sed -n '/generate_handler/,/^      \]/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"   # 45（逗号可选，写死 ,$ 会漏算末条）
 grep -c 'tauri::command(async)' src-tauri/src/lib.rs         # 4
 grep -rn "allow(dead_code)" src-tauri/src/ | wc -l           # 1（只有 db.rs:30）
-git push origin master && git push origin feat/m8.1-cleanup
+grep -c '^\[\[package\]\]' src-tauri/Cargo.lock              # 616
 git ls-remote --heads origin | grep -E "master|m8.1"         # 核远端 SHA 与本地逐字一致
 ```
 
-合完落一笔收口文档（`docs/开发进度.md` 的 M8.1 表行/变更日志、本文 §0/§3/§4 改到已合并态），M7/M8 的先例都是这个形状。**别忘了 §3 那句：M8.1 这轮没做真机验证**，合并前如果想稳，就把 §3-①/② 那两下人手的先点掉。
+**执行这一串时的两个本机坑（本轮真踩过）**：① cargo/clippy 前要 `cd src-tauri`，而 **cwd 在多次工具调用之间会残留** —— 本轮第一次批量跑就因 `cd: src-tauri: No such file or directory` 让一条 clippy 根本没执行、`exit=1` 是 `cd` 的退出码（坑 4）；② `cd ..` 之后所有仓库根路径都按仓库根算。**合并本身**要另外核的两条例行是 `git merge-base --is-ancestor master <功能分支>; echo $?` 期望 **0**、`git rev-list --count master..<功能分支>` 看领先几笔，然后 `git checkout master && git merge --ff-only <功能分支>`；合完**在 `master` 的树上**复跑上面整套门，别拿分支读数交差。
+
+**M8.1 这一格没有真机验证**（§2 末），需要人手的那四格一条也没被这次合并兑掉（见 §3 末「只剩需求方能做的四格」）。
 
 **B（然后开 M9：待办清单）** —— 架构级路径（仓库里**没有**现成的待办流程可改，不是 bounded）：`superpowers:brainstorming` 逐题收口 → spec → `superpowers:writing-plans` → SDD → 整分支终审 → 合 master（**需当次批准**）。
 
@@ -210,13 +210,13 @@ git ls-remote --heads origin | grep -E "master|m8.1"         # 核远端 SHA 与
 | **M8 规格（D1–D13 + §三 失败面 + §四 契约与结构门 + §五 包格式 + §七 判据 + §八 三档测试 + 真机 §九 + 风险 §十一 + 回写 §十二；执行期四条订正落在段末）** | `docs/superpowers/specs/2026-10-13-m8-backup-design.md` |
 | **M8 实施计划（10 任务 / 60 步；期望数链 194→221 逐格现数出，含「已核签名」表与「本轮明确不做」）** | `docs/superpowers/plans/2026-10-13-m8-backup.md` |
 | **M8 SDD 账本（每格 Ruling、`dead_code` 粒度翻转裁定、两次控制方自纠、终审两条 Important 的复现与撤回）** | `.superpowers/sdd/2026-10-13-m8-backup/progress.md` |
-| **M8 真机 CDP 断言脚本（五段可重跑：先按 §4-B 起带 9222 的沙盒 dev，再 `node m8-cdp.mjs s1\|s2\|s3\|s4\|s5`）** | 同目录 `m8-cdp.mjs`；真实数据目录的开工前基线（三文件 size/mtime/sha256）在同目录 `t10-realdir-before.json` |
+| **M8 真机 CDP 断言脚本（五段可重跑：先按 §5 坑 9 的一次性 identifier 起带 9222 的沙盒 dev、坑 28 处理 1520 上的 vite 孤儿，再 `node m8-cdp.mjs s1\|s2\|s3\|s4\|s5`）** | 同目录 `m8-cdp.mjs`；真实数据目录的开工前基线（三文件 size/mtime/sha256）在同目录 `t10-realdir-before.json` |
 | **M8 备份实现本体** | `src-tauri/src/backup.rs`（`export` / `inspect` / `import` / `strip_index` / `sha256_hex`），一次性目录 `src-tauri/src/scratch.rs`，WAL 硬门 `db.rs:66` 的 `assert_wal`，三条命令 `lib.rs:624/631/641`，前端页 `src/pages/backup.tsx` |
 | **M7 规格（D1–D10 + §三 18 组 LibreOffice 实测核形 + 八格落点 + 三档测试 + 真机 §九 + 风险 §十一）** | `docs/superpowers/specs/2026-10-13-m7-legacy-office-design.md` |
 | **M7 实施计划（8 任务；期望数链 167→194 由逐格数出）** | `docs/superpowers/plans/2026-10-13-m7-legacy-office.md` |
 | **M7 SDD 账本（每格 Ruling、profile 翻转裁定、终审修复波、坏探针自证与撤回）** | `.superpowers/sdd/2026-10-13-m7-legacy-office/progress.md` |
 | **M7 阶段 0 探针与读数（改任何 soffice 写法前先重跑它）** | 同目录 `probe.sh` / `probe4.sh` / `probe5.sh` / `probe*-readings.txt`、`fixtures/`（两枚夹具母本） |
-| **M7 真机 CDP 断言脚本（六格，可复用）** | 同目录 `m7-cdp.mjs`（先按 §4-B 起带 9222 的 dev，再 `SB=<Windows 绝对路径> node <该脚本>`） |
+| **M7 真机 CDP 断言脚本（六格，可复用）** | 同目录 `m7-cdp.mjs`（先按 §5 坑 9 的一次性 identifier 起带 9222 的 dev，再 `SB=<Windows 绝对路径> node <该脚本>`） |
 | M7 终审代码面包与修复波报告 | 同目录 `final-code-563f2a7..HEAD.diff`、`final-fix-report.md`
 | M6 规格（决策 D1–D7、判据、真机 §八、风险、回写清单） | `docs/superpowers/specs/2026-10-12-m6-ocr-design.md` |
 | M6 实施计划（6 任务 31 步） | `docs/superpowers/plans/2026-10-12-m6-ocr.md` |
