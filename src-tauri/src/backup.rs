@@ -775,9 +775,13 @@ mod tests {
             "差值下限 8 KB，夹具分不出差就重造：{stripped_bytes} vs {raw_bytes}");
     }
 
-    /// spec §七 那条判据：快照连接必须**先关**再把字节读进 zip。
-    /// 这里钉的是结果形状：包里的 `backup.db` 单独打开就 `integrity_check` = ok，
-    /// 且临时目录里没有 `-wal` 被一起打进去（条目数恒等于 2 已经覆盖了这一半）。
+    /// 钉的是**包的形状**：包里只有 `manifest.json` + `backup.db` 两条（`-wal`/`-shm` 一条都不许混进来），
+    /// 且解出来的 `backup.db` 单独打开就 `integrity_check` = ok。
+    ///
+    /// **别把这条当 spec §七「先关快照连接再读字节」的守卫**（T9 评审把这句记账纠正过，同源订正留在这里）：
+    /// 本夹具走 `db::open_in_memory()` ⇒ journal 是 MEMORY，全程没有 `-wal` 侧文件，把 `export` 里的
+    /// `drop(s)` 挪到 `fs::read` 之后这三条断言**全都不会红**。§七 在本仓的可证伪载体是 T9 那条
+    /// WAL 文件库端到端（`index_job.rs` 的往返测试，变异实测红在 `index_docs` 行数为 3 的陈旧影像上）。
     #[test]
     fn packaged_db_is_self_contained_and_checks_clean() {
         let live = crate::db::open_in_memory().unwrap();

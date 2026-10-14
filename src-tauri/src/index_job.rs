@@ -1602,9 +1602,9 @@ mod tests {
         // （3 行原样），于是 `idx` 读出 3。⇒ **spec §七 在本格的守卫是 `idx == 0` / `fts == 0` 这两条**，
         // 不是紧邻的两条包形状断言：`names` 那条由 `zip_out` 写死的两个常量条目名决定（本变异动不了它），
         // `PRAGMA integrity_check` 对「缺自己 -wal 的库」返回 ok（它就是一致的旧影像）。那两条各自守的是
-        // 「包里只有 manifest 点名的那两个条目」与「解出来的 db 自洽」，本身有用，但**不许**在注释里记成 §七 的功劳。
+        // 「包里只有 `manifest.json` + `backup.db` 这两条」与「解出来的 db 自洽」，本身有用，但**不许**在注释里记成 §七 的功劳。
         let names = zip_names_of(&pkg);
-        // 订正：只数条数没有失败面 ⇒ 断**名字集合本身**（这才是「包内只有这两条」那句判据的实体）。
+        // 订正：只数条数没有失败面 ⇒ 断**名字的逐条内容与写入顺序**（这才是「包内只有这两条」那句判据的实体）。
         assert_eq!(names, vec!["manifest.json".to_owned(), "backup.db".to_owned()], "{names:?}");
         // 解出来验：台账在、两张索引表空。
         // 控制方修订：原写还调一个 `unpack_backup_db(&pkg, ...)` 再 `unpack_for_test(&pkg, ...)` —— 两个名字
@@ -1678,7 +1678,7 @@ mod tests {
         // 不钉的话，将来 `zip` 写侧一旦开始清洗条目名（注 2 设想过的那档退化），包会被静默写成
         // 没有越界名，两条 `!exists` 全绿而什么都没测。
         let evil_names = zip_names_of(&evil);
-        assert_eq!(evil_names.len(), 3, "恶包必须真的比好包多一条野条目：{evil_names:?}");
+        assert_eq!(evil_names.len(), 3, "恶包必须真的有 3 条（好包的 2 条 + 这条野条目）：{evil_names:?}");
         assert!(evil_names.iter().any(|n| n == &format!("../{stray}")), "越界名必须原样在包里存着：{evil_names:?}");
         drop(conn);
 
