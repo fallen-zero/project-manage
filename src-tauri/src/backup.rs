@@ -161,32 +161,40 @@ pub fn now_utc(conn: &rusqlite::Connection) -> AppResult<String> {
 /// 正被 SQLite 开着的 `ledger.db`，实测把落点指向活库会让文件长度当场归零、随即被 zip 覆掉，
 /// 用户唯一的持久库就此没了。所以必须在真正打开文件之前把这种落点拒掉。
 pub fn guard_destination(data_dir: &Path, dst: &Path) -> AppResult<()> {
-    // 规范化的是 dst 的**父目录**而不是文件本身：一次全新导出时目标文件还不存在，canonicalize(文件)
-    // 会 ENOENT；父目录存在时规范化又顺带吃掉 `..\`/`.` 回溯段，让「指向数据目录内的相对/回溯形状」
-    // 与绝对路径走同一判据。
-    let parent = dst.parent().unwrap_or(dst);
+    // 相对形状先按**当前目录**展开：Windows 下 `File::create` 也是相对 CWD 解析的，不展开就无从判断
+    // 一条相对落点到底落不落进数据目录（留相对串直接做裸前缀比对的话，它永远"不像"在目录里 ⇒ 漏拒）。
+    let abs = if dst.is_relative() {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(dst))
+            .unwrap_or_else(|_| dst.to_path_buf())
+    } else {
+        dst.to_path_buf()
+    };
+    // 规范化的是**父目录**而不是文件本身：一次全新导出时目标文件还不存在，canonicalize(文件) 会 ENOENT；
+    // 父目录存在时规范化又顺带吃掉 `..\`/`.` 回溯段，让「指向数据目录内的相对/回溯形状」与绝对路径同判据。
+    let parent = abs.parent().unwrap_or(&abs);
     let canonical_parent = std::fs::canonicalize(parent).ok();
     let canonical_dir = std::fs::canonicalize(data_dir).ok();
-    // 三档，每档只在自己那档里可比：
-    // ① 父子都能规范化 ⇒ 规范化 vs 规范化（挡住 `..\` 回溯与 junction 指回来的形状）。
+    // 三档，每档只在自己那档里可比（两种形状 `C:\…` 与 `\\?\C:\…` 按组件比对**永不命中**，混档比=假阴性）：
+    // ① 父子都能规范化 ⇒ 规范化 vs 规范化：挡住 `..\` 回溯、junction 指回来的形状。
     // ② 父能规范化、数据目录不能（还没建出来）⇒ 退回裸串 vs 裸串。
     // ③ 父规范化不了（那条路径本身不存在）⇒ 只能裸串 vs 裸串。
-    // 为什么不能把裸串比对无条件并列进去：`data\sub\..\..\x.zip` 折叠后其实**在目录外**，
-    // 裸串前缀却看得见 `data\` —— 无脑并列会把这种合法落点误拒（第 (e) 档就是钉这一条的，
-    // 控制方第一版就是这么写、被这条测试打回来的）。
-    // **残余窗口要如实写在这里**：③ 那一档候选串还是 `C:\…` 原形，而 ① 的基串一旦换成 `\\?\C:\…`
-    // 就按组件**永不命中** ⇒ 规范化彻底失败时判据实际是**放行**，不是「多拒」。那一档同时意味着
-    // 父目录不存在、`File::create` 本来也会失败，所以不是可利用的毁库路径；但别把它读成已经兜住了。
-    let inside = match (&canonical_parent, dst.file_name()) {
+    // 为什么不能把裸串比对无条件并列进去：`data\sub\..\..\x.zip` 折叠后其实**在目录外**，裸串前缀却看得见
+    // `data\` —— 无脑并列会把这种合法落点误拒（第 (e) 档就是钉这一条的，控制方第一版就是这么写、被这条
+    // 测试当场打回来的）。
+    // **残余窗口要如实写**：②③ 两档里如果父子其中一边规范化不了、而另一边的形状又不是同一根串，判据会
+    // 落到「放行」。真机上那两档同时意味着目标不可创建（父目录不存在 / 数据目录不存在）⇒ 不是可利用的
+    // 毁库路径；但**别把这一条读成已经全档兜住**（`\\?\` 前缀种类不同的那一档只能退回放行）。
+    let inside = match (&canonical_parent, abs.file_name()) {
         (Some(p), Some(name)) => match &canonical_dir {
             Some(d) => p.join(name).starts_with(d),
-            None => dst.starts_with(data_dir),
+            None => abs.starts_with(data_dir),
         },
         (Some(p), None) => match &canonical_dir {
             Some(d) => p.starts_with(d),
-            None => dst.starts_with(data_dir),
+            None => abs.starts_with(data_dir),
         },
-        (None, _) => dst.starts_with(data_dir),
+        (None, _) => abs.starts_with(data_dir),
     };
     if inside {
         return Err(AppError::new(
@@ -1307,6 +1315,20 @@ mod tests {
             guard_destination(&ghost_dir, &ghost_dir.join("ledger.db")).is_err(),
             "(g) 数据目录规范化不了时，裸串前缀那一档必须仍然拒"
         );
+        // (h) 相对形状按 CWD 展开那一档：**读** `current_dir()` 不**改**它 —— `set_current_dir` 是进程级的，
+        // cargo 把同批测试跑在同一进程的多个线程里，为造一条相对路径去改 CWD 会把别人脚下的路径换掉
+        // （那会红得毫无道理）。相对 `dst` 会被展成 `CWD/filename`，而本进程的 CWD 就是 `src-tauri`，
+        // 于是「以 CWD 当数据目录 + 只给一个裸文件名」这条组合是**确定**落在目录里的 ⇒ 必须拒。
+        // 摘掉 `is_relative()` 那一段展开，本行就会红（裸串 `ledger.db` 对绝对基串永不命中 ⇒ 静默放行）。
+        let cwd = std::env::current_dir().unwrap();
+        assert!(
+            guard_destination(&cwd, std::path::Path::new("ledger.db")).is_err(),
+            "(h) 相对落点必须先按 CWD 展开再判，否则裸串对绝对基串静默放行"
+        );
+        // 反向那一半同样确定：CWD 下一个**不存在**的子目录当数据目录，裸文件名展开后落在它外面 ⇒ 必须放行
+        // （挡住"凡是相对都拒"这种过度收紧 —— 它会连带拒掉合法的相对形状）。
+        guard_destination(&cwd.join("not-the-cwd"), std::path::Path::new("out.zip"))
+            .expect("(h) 展开后落在数据目录之外的相对形状必须放行");
     }
 
     /// C1 的收口断言：走 `backup_export` 那条「守卫在前、export 在后」的顺序，落在数据目录里的既有文件
