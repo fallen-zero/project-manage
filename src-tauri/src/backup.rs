@@ -513,6 +513,28 @@ impl Counts {
     }
 }
 
+/// 只给测试用（T9 端到端）：把包内 `backup.db` 解到调用方给的一次性目录并开一条连接读它。
+/// 挂在模块层而不是 `mod tests` 里，是为了让 `crate::backup::unpack_for_test` 这个路径可达
+/// （`mod tests` 是私有模块，兄弟模块拿不到里面的东西，T6 注 2 撞过同一件事）。
+///
+/// **必须用 `rusqlite::Connection::open`，不能走 `db::open`**：后者会把解出来的库 WAL 化并跑
+/// `migrate`，于是测的就不是「包里那份 db」而是本机现造的库了（spec §六.4 的判据会被悄悄改掉）。
+/// 落点与生命周期归调用方（一次性 `tempfile::tempdir()`），本函数只返回连接。
+#[cfg(test)]
+pub(crate) fn unpack_for_test(zip_path: &Path, dir: &Path) -> rusqlite::Connection {
+    use std::io::Read as _;
+    let file = std::fs::File::open(zip_path).unwrap();
+    let mut z = zip::ZipArchive::new(file).unwrap();
+    let mut bytes = Vec::new();
+    {
+        let mut entry = z.by_name(DB_ENTRY).unwrap();
+        entry.read_to_end(&mut bytes).unwrap();
+    }
+    let db_path = dir.join(DB_ENTRY);
+    std::fs::write(&db_path, bytes).unwrap();
+    rusqlite::Connection::open(&db_path).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

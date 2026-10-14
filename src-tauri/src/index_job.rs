@@ -1458,4 +1458,263 @@ mod tests {
         assert_eq!(doc_rows(&conn, "p1"), 2, "是更新同一行，不是新增一行");
         assert_eq!(crate::index_store::doc_hits(&conn, "验收流程", 20).unwrap().len(), 1, "回填后又能搜到");
     }
+
+    // ---- M8 T9：headless 端到端（真 run_pass + 真文件库走完整条往返）----
+    // 四条私有夹具都重写一份小的，不跨模块借用 backup.rs `mod tests` 里的同形件（那是私有模块，
+    // 兄弟模块拿不到），也不为测试把任何一边提可见性 —— 本仓形制：`seeded_project` 与 `seed_project`
+    // 就是两份（简报注 1 的裁定）。
+
+    /// 包内条目名清单。
+    fn zip_names_of(path: &Path) -> Vec<String> {
+        let file = std::fs::File::open(path).unwrap();
+        let mut z = zip::ZipArchive::new(file).unwrap();
+        (0..z.len())
+            .map(|i| z.by_index(i).unwrap().name().to_owned())
+            .collect()
+    }
+
+    /// 种出 p1/p2/p3 三行项目。id 必须真落成 p1..p3 且行数自检 —— 否则下面
+    /// `DELETE FROM projects WHERE id='p1'` 删 0 行，「包与活库有差异」这个前提根本不存在（T6 注 3）。
+    fn seed_ledger_for_job(conn: &Connection) {
+        for i in 1..=3 {
+            conn.execute(
+                "INSERT INTO projects (id, name, status) VALUES (?1, ?2, '立项')",
+                params![format!("p{i}"), format!("甲项目{i}")],
+            )
+            .unwrap();
+        }
+        let got: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(got, 3, "必须真落 3 行（id=p1..p3），否则删一条制造的差异不存在：{got}");
+    }
+
+    /// 复制 src 的全部条目到 dst，并按 `name` 多塞一条 `bytes`（manifest 不会点名它）。
+    /// 注 2 要求先确认写侧收不收 `../`：实读 vendored `zip-8.6.0` —— `ZipWriter::start_file`
+    /// （`write.rs:1501`）直接把名字交给 `start_entry`（`:1169`），后者落到 `types.rs:422` 的
+    /// `name.to_string()`，整条路上**没有任何**清洗或拒绝（清洗只在读侧的 `enclosed_name`/
+    /// `file_name_sanitized` 里），所以 `../` 形态在本机构造得出来，不需要走注 2 的退让分支。
+    fn rewrite_zip_add_stray_entry(src: &Path, dst: &Path, name: &str, bytes: &[u8]) {
+        use std::io::{Read as _, Write as _};
+        let file = std::fs::File::open(src).unwrap();
+        let mut z = zip::ZipArchive::new(file).unwrap();
+        let out = std::fs::File::create(dst).unwrap();
+        let mut w = zip::ZipWriter::new(out);
+        for i in 0..z.len() {
+            // 条目借用 `z`（Drop 时还要用它）⇒ 取完名字与字节就出块，别横跨下一次 `by_index`。
+            let (entry_name, entry_bytes) = {
+                let mut entry = z.by_index(i).unwrap();
+                let n = entry.name().to_owned();
+                let mut buf = Vec::new();
+                entry.read_to_end(&mut buf).unwrap();
+                (n, buf)
+            };
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            w.start_file(entry_name, options).unwrap();
+            w.write_all(&entry_bytes).unwrap();
+        }
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        w.start_file(name, options).unwrap();
+        w.write_all(bytes).unwrap();
+        w.finish().unwrap();
+    }
+
+    /// 只改 manifest 的 `schemaVersion`、db 字节原样重写进 dst。
+    /// db 原样 ⇒ manifest 记的哈希对这种包**仍然通过**，红点只可能落在版本判据那一道上。
+    fn bump_schema_in_manifest_to(src: &Path, dst: &Path, version: i64) {
+        use std::io::{Read as _, Write as _};
+        let file = std::fs::File::open(src).unwrap();
+        let mut z = zip::ZipArchive::new(file).unwrap();
+        let mut json = String::new();
+        {
+            let mut entry = z.by_name(crate::backup::MANIFEST_ENTRY).unwrap();
+            entry.read_to_string(&mut json).unwrap();
+        }
+        let mut manifest: crate::backup::Manifest = serde_json::from_str(&json).unwrap();
+        let mut db_bytes = Vec::new();
+        {
+            let mut entry = z.by_name(crate::backup::DB_ENTRY).unwrap();
+            entry.read_to_end(&mut db_bytes).unwrap();
+        }
+        manifest.schema_version = version;
+        let body = serde_json::to_vec_pretty(&manifest).unwrap();
+        let out = std::fs::File::create(dst).unwrap();
+        let mut w = zip::ZipWriter::new(out);
+        for (name, bytes) in [
+            (crate::backup::MANIFEST_ENTRY, body.as_slice()),
+            (crate::backup::DB_ENTRY, db_bytes.as_slice()),
+        ] {
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            w.start_file(name, options).unwrap();
+            w.write_all(bytes).unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    /// M8 的主承诺端到端（headless，与 M6 T6 / M7 T7 同形制）：一张真目录经 `run_pass` 建出索引
+    /// → 导出 → 解包验「台账在、两张索引表空」→ 改活库（删一条项目）→ 导入 → 项目回来、索引仍空、
+    /// 应急包落在数据目录且能读通。绕开 `tauri dev` 的提交内存墙，直驱真代码（`--lib` 测试 profile）。
+    /// 顺带当场证红线①：被索引的源 txt 文件 size+mtime 跑前跑后逐字不变。
+    #[test]
+    fn backup_round_trip_through_a_real_pass_keeps_the_source_files_untouched() {
+        let root = tempfile::tempdir().unwrap(); // 被索引的目录
+        let data = tempfile::tempdir().unwrap(); // 一次性 data_dir（不是真实数据目录）
+        let mut sources = Vec::new();
+        for i in 0..3 {
+            let p = root.path().join(format!("合同{i}.txt"));
+            std::fs::write(&p, format!("项目 验收 指标 第{i}份").as_bytes()).unwrap();
+            sources.push(p);
+        }
+        // 红线①：跑前记 size+mtime，跑后逐字比。
+        let before: Vec<(u64, Option<std::time::SystemTime>)> = sources
+            .iter()
+            .map(|p| {
+                let m = std::fs::metadata(p).unwrap();
+                (m.len(), m.modified().ok())
+            })
+            .collect();
+
+        let mut conn = crate::db::open(data.path()).unwrap();
+        seeded_project(&conn, "p1", root.path());
+        let summary = run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(summary.state, "done");
+        let indexed: i64 = conn
+            .query_row("SELECT COUNT(*) FROM index_docs", [], |r| r.get(0))
+            .unwrap();
+        assert!(indexed >= 3, "真扫描后要非空，否则下面「剥索引」是空对空恒真：{indexed}");
+        assert!(crate::index_store::doc_hits(&conn, "验收", 20).unwrap().iter().any(|h| h.path.ends_with("合同0.txt")),
+            "夹具本身得先能搜到，否则后面那条空不是失败而是没测");
+
+        let pkg = data.path().join("round-trip.zip");
+        let sum = crate::backup::export(&conn, &pkg).unwrap();
+        assert!(sum.bytes > 0);
+        // 「先关快照连接再读字节」这一臂**只有在 durable（WAL）源库上才有牙**：T4 的单元测试全走
+        // `db::open_in_memory()`（`after_open(durable=false)` ⇒ journal 为 MEMORY，全程没有 -wal 侧文件），
+        // 所以那边把 `drop(s)` 挪到 `fs::read` 之后也不会红（T4 评审的 Important，控制方裁定：判据挪到本格）。
+        // 本格的 `conn` 来自 `crate::db::open(data.path())` = 真 WAL 库 ⇒ 这两条断言才是 spec §七 的守卫。
+        let names = zip_names_of(&pkg);
+        assert_eq!(names.len(), 2, "包里只该两条目（-wal/-shm 混进来就是 drop 位置错了）：{names:?}");
+        // 解出来验：台账在、两张索引表空。
+        // 控制方修订：原写还调一个 `unpack_backup_db(&pkg, ...)` 再 `unpack_for_test(&pkg, ...)` —— 两个名字
+        // 指的是同一件事（解出包内 db 并开一条连接），重复了。只留 `backup::unpack_for_test` 一份，
+        // 上面那条 `PRAGMA integrity_check` 就在它返回的连接上跑。
+        let probe = crate::backup::unpack_for_test(&pkg, data.path());
+        let ok: String = probe
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .expect("integrity_check 必须有且只有一行读数");
+        assert_eq!(ok, "ok", "包里的 db 必须自洽（引用不存在 -wal 的 db 在这一步就会现形）");
+        let idx: i64 = probe.query_row("SELECT COUNT(*) FROM index_docs", [], |r| r.get(0)).unwrap();
+        let fts: i64 = probe.query_row("SELECT COUNT(*) FROM index_docs_fts", [], |r| r.get(0)).unwrap();
+        assert_eq!(idx, 0, "索引不进包（D4 的兑现）");
+        assert_eq!(fts, 0, "FTS 侧同样要空");
+        let proj: i64 = probe.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap();
+        assert_eq!(proj, 1, "台账侧一行都不能少：{proj}");
+        drop(probe);
+
+        // 改活库，制造回滚场景。
+        conn.execute("DELETE FROM projects WHERE id='p1'", []).unwrap();
+        assert_eq!(conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap(), 0);
+
+        let out = crate::backup::import(&mut conn, &pkg, data.path()).unwrap();
+        assert_eq!(
+            conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap(),
+            1,
+            "被删的项目要回来 —— 这是回滚的全部意义"
+        );
+        assert_eq!(conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM index_docs", [], |r| r.get(0)).unwrap(), 0,
+            "导入后索引必须是空的（D7 那句提示的存在理由）");
+        let pre = std::path::Path::new(&out.pre_restore_path);
+        assert!(pre.parent() == Some(data.path()), "应急包必须落在数据目录内：{}", out.pre_restore_path);
+        let info = crate::backup::inspect(pre).unwrap();
+        // 简报原文期望 1，实跑得 0 —— 计划错，不是实现错：应急包是 `import` 在 **restore 之前**用
+        // 活连接导的（`backup.rs:448`），此刻活库刚被 DELETE 成 0 行，所以它念的就是 0。
+        // T6 裁定 4 钉的也是这件事（`out.counts == after_delete`）。期望改成 0 之后这条仍有牙：
+        // 谁把 ⑤ 挪到 ⑥ 之后，这里就会变成 1。
+        assert_eq!(info.counts.projects, 0, "应急包念的就是覆写前那一刻的现数（删掉 p1 之后的活库）：{:?}", info.counts);
+
+        // 红线①：索引器与备份器都只读，源文件一字未动。
+        let after: Vec<(u64, Option<std::time::SystemTime>)> = sources
+            .iter()
+            .map(|p| {
+                let m = std::fs::metadata(p).unwrap();
+                (m.len(), m.modified().ok())
+            })
+            .collect();
+        assert_eq!(after, before, "被索引的源文件 size+mtime 必须逐字不变");
+    }
+
+    /// zip-slip：包内多塞一条 manifest 没点名的条目，导入后那个位置**不许**被写出来。
+    /// T5 的判据是「只按 manifest 点名的条目取」，这条测试是那一句的唯一直接证据。
+    ///
+    /// 控制方修订（原写法必红，是计划的错不是实现的错）：`read_package` 只按 `DB_ENTRY` 取名，
+    /// 多一条野条目**不会**让任何一道前置变红 —— 哈希算的是**解压后**的 db 字节，重写 zip 时
+    /// 重新压缩只改存放字节、不改摘要 ⇒ 「期望 `backup_package_invalid`」在这个实现下不成立。
+    /// 本里程碑 §五 的判据本来就是「包内其它条目一律忽略」，所以这里期望导入**成功**，
+    /// 真正要钉的是后半句：**那条野条目一条也没落过盘**（变异②把取条目那一段改成遍历
+    /// `file_names()` 逐个落盘时，红的就是这一句）。前半句的 `expect` 同时保证这不是空对空。
+    #[test]
+    fn an_extra_entry_in_the_package_is_never_written_to_disk() {
+        let data = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(data.path()).unwrap();
+        seed_ledger_for_job(&conn); // 必须种出 p1..p3，下面删掉 p1 才有可观测的差异
+        let good = data.path().join("ok.zip");
+        crate::backup::export(&conn, &good).unwrap();
+        let evil = data.path().join("evil.zip");
+        let stray = "pfm-m8-zipslip-probe.txt"; // 名字带里程碑前缀，避免撞上 %TEMP% 里的既有文件
+        rewrite_zip_add_stray_entry(&good, &evil, &format!("../{stray}"), b"pwned");
+        drop(conn);
+
+        let mut conn2 = crate::db::open(data.path()).unwrap();
+        conn2.execute("DELETE FROM projects WHERE id='p1'", []).unwrap();
+        let out = crate::backup::import(&mut conn2, &evil, data.path())
+            .expect("manifest 没点名的条目只是被忽略，不该让导入失败（§五）");
+        // 简报原文期望 2，实跑得 1 —— 计划把「包内两条目」（zip 侧：manifest.json + backup.db）与
+        // `ImportOutcome.entries`（= `manifest.files.len()`，manifest 只点名 db 那一条，`backup.rs:490`）
+        // 混成一件事了。改成 1 之后这条钉的仍是本来要钉的那句：多塞进来的野条目**没进** manifest 的点名列。
+        assert_eq!(out.entries, 1, "包里的野条目不会添进 manifest 的点名列");
+        let back: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(back, 3, "包确实被灌进去了（否则下面那句 !exists 是空对空）");
+        assert!(
+            !data.path().join(stray).exists(),
+            "绝不能按包内自带路径落盘（数据目录内侧）：{}",
+            data.path().join(stray).display()
+        );
+        assert!(
+            !data.path().join("..").join(stray).exists(),
+            "绝不能按包内自带路径落盘（数据目录外侧，zip-slip 的正身）：{}",
+            data.path().join("..").join(stray).display()
+        );
+    }
+
+    /// 「包比本机新」在端到端这一层也只拒不动（T5 测的是函数，这条测的是带真库的调用形状）。
+    #[test]
+    fn a_newer_package_does_not_touch_a_real_file_database() {
+        let data = tempfile::tempdir().unwrap();
+        let mut conn = crate::db::open(data.path()).unwrap();
+        seed_ledger_for_job(&conn);
+        let pkg = data.path().join("n.zip");
+        crate::backup::export(&conn, &pkg).unwrap();
+        let newer = data.path().join("nn.zip");
+        bump_schema_in_manifest_to(&pkg, &newer, crate::db::TARGET_VERSION + 5);
+        // 控制方修订：包是从**这个库**导出来的 ⇒ 若不加这一步，`before` 与包内容恒等，
+        // 「被拒之后一行都没动」在版本判据被删掉的情况下仍然为真（灌回去也是同样的数），是恒真断言。
+        // 删一行制造差异：版本判据一旦失效，导入会把 3 行灌回来 ⇒ 这一句才真的可证伪。
+        conn.execute("DELETE FROM projects WHERE id='p1'", []).unwrap();
+        let before = conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap();
+        assert_eq!(before, 2, "差异得真的存在，否则下面那条断言什么都没测");
+        let e = crate::backup::import(&mut conn, &newer, data.path()).expect_err("必须拒");
+        assert_eq!(e.code, "backup_schema_too_new");
+        assert_eq!(conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap(), before,
+            "被拒之后一行都没动");
+        let leaves = std::fs::read_dir(data.path())
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("pre-restore-"))
+            .count();
+        assert_eq!(leaves, 0, "前三道失败不许留应急包");
+    }
 }
