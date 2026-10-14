@@ -1,10 +1,18 @@
 # 交接文档 —— 项目资料管理（写给一个完全没有上下文的新对话）
 
-**快照时间**：2026-10-14。**当前分支 `master`，HEAD 现取**：`git rev-parse --short master`（本文最后一次提交即这份交接本身，别把 SHA 写死在这里、必漂）。`master` 停在 M7 的合并点之后（`git rev-parse --short master` 现取）。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。
+**快照时间**：2026-10-14（M8 已合入之后的 M8.1 收口时刻）。**当前分支 `feat/m8.1-cleanup`，HEAD 现取**：`git rev-parse --short HEAD`；`master` 现取 `git rev-parse --short master`（本文最后一次提交即这份交接本身，别把 SHA 写死在这里、必漂）。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。**注意：M8.1 的代码此刻还只在功能分支上，没有进 `master`。**
 
 ## 0. 先读这一段
 
-这是一个 Tauri 桌面工具的持续开发项目，按里程碑推进。**M0–M8 都已完成并合入 `master`**（M7 合并点 `da140a4`；M8 合并点 `99c9401`，全历史零 merge commit 的惯例保持）。**M8（备份包导出/导入）已于 2026-10-14 fast-forward 合入 `master` 并推送 origin**（合入前整分支终审给的是 **Needs fixes / 1 Critical + 2 Important**，三条全部复现成立、全部修完、限定复审 clean；那条 Critical 就是坑 31）。**M8.1 那四格小账也已于同日清完**（`feat/m8.1-cleanup`，四格口径 + 两次变异取证见 `docs/开发进度.md`「## M8.1 收口」）⇒ **下一格是 M9（待办清单）** —— 那条 Critical 就是坑 31：导出落点指进数据目录会把用户唯一的持久库截断归零 —— 合完之后的下一格是 **M9（待办清单）**，开工前先把 M8.1 那三格小账过一遍（见 §4）。
+这是一个 Tauri 桌面工具的持续开发项目（一个人管几十个本地项目的「档案 + 台账 + 全文检索」单机工具），按里程碑推进，每个里程碑走一轮 `brainstorming → spec → writing-plans → SDD → 整分支终审 → 合 master`。
+
+**现在在哪（三条都要用命令复核，别信这段文字）**：
+
+- **M0–M8 已全部合入 `master`**。M8 = 备份包导出/验包/导入，合并点 `99c9401`，收口文档 `a5c593b`。M8 的整分支终审结论是 **Needs fixes / 1 Critical + 2 Important**，三条复现全部成立、全部修完（那条 Critical 是「导出落点能把用户唯一的持久库截断归零」，见坑 31）。
+- **M8.1（备份包四格小账）代码已做完、门禁已跑绿、已推 `origin`，但还没合 `master`** —— 卡在等需求方当次批准。分支 `feat/m8.1-cleanup`（HEAD `a6583fa`），四格口径与两次变异取证见 `docs/开发进度.md`「## M8.1 收口」。
+- **M9（待办清单）刚开工就暂停**：只完成了「读需求 + 读现状」这一步，**一个澄清问题都没问出口，spec 文件不存在**。已勘察到的事实与 M9 会撞上的四条既有不变量集中在 §4-B，下一个对话直接从那里接着问就行。
+
+**给下一个对话的一句提醒**：这一轮里「已验证」这三个字被伪造过两次，两次都是控制方自己（一次是凭空写 `Task 9: complete`，一次是从一份 **0 字节**的子代理输出里"读出"整份终审裁决并提交了）。教训与三条可敲的防线在坑 29。**本文任何结论都别直接当读数用 —— 照它附的命令自己跑一遍。**
 
 三份必读文档按重要性：
 
@@ -28,6 +36,8 @@
 - **M7 引入的是一个「外部运行时依赖」而不是 cargo 依赖**：本机已用 `winget install --id TheDocumentFoundation.LibreOffice -e` 装了 LibreOffice 26.8.1.1（`C:\Program Files\LibreOffice\program\soffice.com`）；换机器没装就是整类不建行 + `/index` 一个安装按钮
 - **M8 起，工具会往磁盘写文件了**（M0–M7 的「只读源文件」红线不变，但红线本身要按白名单表述）：允许落盘的位置只有两处 —— 用户当场在原生对话框里选中的那个包路径，与数据目录里的 `pre-restore-*.zip` 应急包；**只新增文件，绝不删改任何既有文件**。评审/派发词里请按这一条写，别再写「工具不写盘」
 
+**需求口径的真正出处是 `docs/思维导图.md`，不是 `docs/技术方案.md` 的里程碑表**：后者每个里程碑只有一行摘要（M9 那格只有「待办清单」四个字），原始需求逐条在 `docs/思维导图.md` —— §二 = 项目待办清单（`:38-45`）、§三 = 日报 + 工时 + Excel（`:47-58`）、§四.3 = 可选迭代增强（`:71-74`，到期预警在 `:73`）。开任何新里程碑前先回那里读原文（这一轮我把它误判成「口径未定」，见坑 34）。
+
 **执行方法**：`superpowers:subagent-driven-development`（SDD）—— 每个任务派一个全新实现者子代理 + 一个只读评审（spec 合规 + 代码质量双 verdict）+ 修复轮（≤5）；全部任务完成后做一次整分支终审；终审后走「合 master」（**合并需需求方当次批准**，常驻推送授权只覆盖功能分支）。
 
 **每完成一个小节点就提交并推 `origin` 功能分支**（需求方 2026-10 起的常驻指示）；「遇到需要配合的一步一步告诉我改如何操作」——需要人做的事都收在 §4「需需求方做的」里。
@@ -36,7 +46,7 @@
 
 **M0→M6 全部 ✅ 合入 `master`**。MVP 是 M0→M4，M5/M5.5/M6 在其上加了「启动对账 + 自动追平 + notify 监听 + 图片 OCR」。
 
-**M6（本轮收口的里程碑）= Windows 原生图片 OCR**：`png/jpg/jpeg/webp/bmp` 里的中文/英文经本机 Windows OCR 引擎进入全文索引，可被 `search_all` 命中与 `doc_preview` 打开。关键落点：
+**M6（2026-10-12）= Windows 原生图片 OCR**：`png/jpg/jpeg/webp/bmp` 里的中文/英文经本机 Windows OCR 引擎进入全文索引，可被 `search_all` 命中与 `doc_preview` 打开。关键落点：
 
 - 新纯能力模块 `src-tauri/src/ocr.rs`：`ocr_available()`（进程内 `OnceLock` 记忆化探测，Err 保守按 false）、`image_text()`（WinRT 识别 + `\\?\` 前缀剥离）、`clean_cjk_spaces()`（仅当空格两侧都 CJK 才删的纯函数；OCR 会在中文字符间塞空格，不清洗就永远搜不到）。
 - `extract.rs` 加 `DocKind::Image`、`kind_of` 认 5 张扩展名、`SUPPORTED` 到 **27 项**（17 纯文本/代码 + `docx/pptx/xlsx/xls/pdf` + 5 图片）；`TEXT_EXTS` 不动（图片不是纯文本）。
@@ -55,36 +65,61 @@
 
 **M8（2026-10-14）= 备份包导出 / 验包 / 导入**：新模块 `src-tauri/src/backup.rs` + 一次性目录 guard 搬到 `src-tauri/src/scratch.rs` + `db.rs` 把 WAL 读回硬门拆成 `pub fn assert_wal`（行为零改动）+ `lib.rs` 三条命令 `backup_export`/`backup_inspect`/`backup_import` + 新页 `/backup`（nav 第 4 格）。包 = zip **两条目**（`manifest.json` + `backup.db`），`vault_meta` 跟着库走不另立条目；索引两张表在**快照**里删行留结构再 `VACUUM`，且**先关快照连接再读字节**。导入的形态是本轮最需要读懂的一段：**四道前置全过才动库**（解包读 manifest → `formatVersion` → `schemaVersion` 只拒「包比本机新」→ 大小与 SHA-256），然后**先在数据目录写一份 `pre-restore-<UTC秒>-<pid>-<seq>-<纳秒>.zip` 应急包**，再 `Connection::restore(MAIN_DB, src, None::<fn(Progress)>)` 灌进**已打开的那条连接**（不覆盖在用的 `ledger.db`、不重启），最后补 `migrate` + `assert_wal`。权威口径与全部实现在 `docs/superpowers/specs/2026-10-13-m8-backup-design.md`（D1–D13 + §三 失败面 + §五 包格式 + §九 真机九条），执行期翻掉计划/规格自己的六处与两条错判据都记在 `docs/开发进度.md`「## M8 验收证据」。
 
+**M8.1（2026-10-14，M8 合入同日）= 备份包四格小账**，在 `feat/m8.1-cleanup`（`a6583fa`，**未合 `master`**）。四格：① 撤销包 `pre-restore-*.zip` 无保留上限 ⇒ 需求方定「只加界面可见性、**不自动删**」（自动删要破「只新增文件、绝不删改既有文件」这条红线，还会断掉多步回滚）；② 落点守卫 `guard_destination` **判据有单测、调用点没有**（本仓不开 `tauri::test` 就驱动不了 `backup_export`）⇒ 照仓内现成形制补一条 `include_str!` 文本门 `lib.rs::backup_export_wires_the_guard_before_any_write`；③ 两句陈旧注释/文案改准（`schema_version_of` 那句「不碰 `db::TARGET_VERSION`」易读成「不该引用它」）；④ 两条产品口径经批准落地 —— **删掉恒为 1 的 `ImportOutcome.entries`**（本里程碑唯一一次**收缩**线格式，四处引用一次清干净，`tsc` 全绿就是「无人再引用」的证据）、**未点名条目从静默忽略升级成硬拒**（`read_package` 新增第 1.5 道：包内条目集合必须恰好等于 manifest 点名集合，含 `manifest.json` 自身；排在版本判据之后、大小/哈希与应急包之前 ⇒ 被拒的包多一条文件都不许多写）。**④b 换来了纵深、吃掉了可证伪性（这一条是实测）**：集合校验在前 ⇒ T9 那条测试里「野条目一条也没落盘」的两条 `!exists` 从唯一防线降为纵深 —— 把「遍历条目按自带路径落盘」那一档变异加回去、集合校验保留，`cargo test -j 1 --lib an_extra_entry` 实测 **1 passed / 全绿**（包在抵达落盘代码之前就被拒），而同一档变异在 ④b 之前是红的。防线换了位置、旧断言换了性质，这件事已写进测试注释、spec 与「没能自动验证」（坑 35）。全部门禁读数与两次变异取证见 `docs/开发进度.md`「## M8.1 收口」。
+
+**M8.1 这一格没有真机验证**：沙盒 `dev.zero.pfm.m8test` 在 M8 收口时就删净了，本轮没再起 `tauri dev` ⇒ ① 那句新界面文案、④b 那条新拒绝、以及 `ImportOutcome` 少一个字段之后的前端渲染，全都只有单元/编译层证据。**并且 ④b 改掉了 M8 真机第 5 格当时的行为语义**（那份「多一条条目」的包现在会被拒而不是照灌）。
+
 ## 3. 当前卡在哪
 
-**代码面与合并面都没有卡点**。M8 十格代码全完、真机八格有读数、整分支终审给的是 **Needs fixes / 1 Critical + 2 Important** —— 三条控制方逐条读代码复现**全部成立**（其中 C1 就是坑 31：导出落点指进数据目录会把用户唯一的持久库截断归零），修复波 `197144e` + 判据收口波 `d2220b4`、限定复审 clean ⇒ **2026-10-14 已 fast-forward 合入 `master`（`99c9401`）并推 origin**，合完在 `master` 的树上复跑 **224 passed / 两 clippy exit=0 / `cargo build --lib` exit=0 / node 10-10-0 / build `error TS`=0**。
+**代码面没有卡点，工作树干净**（只有一颗未跟踪的 `Python/` —— 它绝不 stage、绝不删，仓里有专门的历史教训）。M8.1 的门禁在终态树上全绿：`cargo test -j 1 --lib` **225 passed / exit=0**、两条 clippy `-D warnings` **exit=0**、`cargo build --lib` **exit=0**、`node --test` **10/10/0**、`npm run build` **exit=0 且 `error TS`=0**、结构门 **45 条命令 / `command(async)` 4 / `TARGET_VERSION` 4 / 全仓 `dead_code` 豁免 1**（`db.rs:30`）、`Cargo.lock` 零新 `[[package]]`。**这些数一定漂，用 §4-A 那串命令现跑一遍再信。**
 
-**只剩这类只有需求方能做的动作**：
+**卡住的三件事，没有一件是代码问题**：
 
-1. **`/backup` 那两个原生文件对话框只能人点**（「另存为」/「打开」）⇒ 三个结果块（导出摘要 / 验包详情 / 导入结果）与覆盖前那个确认框的**块内渲染**至今没有真机证据，已逐条记在 `docs/开发进度.md` 的「没能自动验证」。CDP 能直接 `invoke` 命令、也能读页面本体与页头那句明文告警，但**代替不了**用户选路径那一步（见 §5 坑 12）。
-2. 顺带**故意把包存进 `%APPDATA%\dev.zero.pfm\` 试一次**，亲眼看那条 `backup_destination_unsafe` 的拒绝 —— 守卫的判据有单测，**它的调用点没有**（本仓不开 `tauri::test` 驱动不了 `backup_export`），这一格只能人点补上。
-3. M7 欠的那一下仍挂着：真按一次 `/index` 的「安装 LibreOffice」（`libreoffice_install` 全程没真调用过，它会在你机器上起真安装器）。
-4. 远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`（本机无 `gh`）⇒ 只能在 Settings → Branches 手改。
+1. **M8.1 等需求方当次批准合 `master`**（仓内惯例：常驻推送授权只覆盖功能分支，合并要另外批）。批准后的动作与要复跑的读数在 §4-A。
+2. **M9 卡在「第一个澄清问题还没问出口」**。上一轮只做完勘察（读了 `docs/思维导图.md` §二 的原始待办需求、库表现状、前端栏目结构），**spec 文件不存在**。附带一条已发生的误判：我一度把 M9 说成「需求侧口径未定」——不对，口径写在 `思维导图.md` 里（坑 34）；纠正之后剩下的开放问题才是真开放，那份清单在 §4-B。
+3. **这台机的提交内存是常态瓶颈**：16 G 机，`FreeVirtual` 掉到 ~1 G 时 cargo 会报 `os error 1455`，且症状包括「报编译失败却一行 `error[Exxxx]` 都没有」（坑 32）。要跑门禁前先看 `Get-CimInstance Win32_OperatingSystem` 的 `FreeVirtualMemory`，低于 ~2 G 就叫需求方腾内存，别去改代码。
+
+**只剩需求方能做的四格（一直挂着，不阻塞代码）**：① `/backup` 上「另存为」/「打开」两个原生对话框各真点一次 —— 三个结果块与覆盖确认框的**块内渲染**至今没有真机证据；② 故意把导出目标选进 `%APPDATA%\dev.zero.pfm\`，亲眼看 `backup_destination_unsafe` 报错（守卫的调用点只有文本门守着，M8.1 之后这条更要看一眼）；③ M7 欠的那一下：真按一次 `/index` 的「安装 LibreOffice」（`libreoffice_install` 全程没真调用过）；④ 远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`（本机无 `gh`）⇒ 只能在 Settings → Branches 手改。
 
 ## 4. 下一步计划
 
-M8 已于 2026-10-14 合入 `master` 并推送。往下三条路，按默认顺序：
+**A（五分钟先收掉：把 M8.1 合入 `master`，需需求方当次批准）**。照仓内惯例走 fast-forward、不造合并提交，先核两条例行再复跑整套门：
 
-- **A（默认方向）：开 M9（待办清单）** —— 走完整流程：`superpowers:brainstorming` 收口 → spec → writing-plans → SDD → 整分支终审 → 合 master（**需当次批准**）。技术方案 §九 里程碑表里 M9 只写了「待办清单」四个字，阶段模型（统一枚举 vs 每项目模板）与粒度都还没定，属于架构级那一格、不是 bounded 改动。
-- **A′（已完成）：M8.1 四格小账** —— ① 撤销包无上限 ⇒ 需求方定「只加界面可见性、不自动删」（自动删要破「只新增不删改」这条红线，还会断掉多步回滚）；② 落点守卫**判据有单测、调用点没有** ⇒ 补一条仓内现成形制的 `include_str!` 文本门；③ 两句陈旧注释/文案改准；④ 两条产品口径经批准落地：**删掉 `ImportOutcome.entries`**（恒 1、零信息量）、**未点名条目从静默忽略升级成硬拒**（`read_package` 第 1.5 道）。过程与取证见 `docs/开发进度.md`「## M8.1 收口」。
-- **A″（M8.1 做完新留下的，都不阻塞 M9）**：① `pre-restore-*.zip` 仍无上界（① 选了交给用户；真要自动清得先批准破红线）；② 集合校验排在前面，T9 那两条 `!exists` 已被**遮蔽成纵深** —— 要让它俩重新可证伪，得单独造一份「集合校验过但落盘行为错」的夹具，本机成本高；③ `ImportOutcome.entries` 已删，但 `BackupSummary.entries`（`string[]`）与 `PackageInfo`（没有这个字段）两处语义仍不一致，下轮碰线格式时统一口径。
+```
+git rev-list --merges --count --all                          # 期望 0
+git merge-base --is-ancestor master feat/m8.1-cleanup; echo $?   # 期望 0
+git checkout master && git merge --ff-only feat/m8.1-cleanup
+cd src-tauri && cargo test -j 1 --lib                        # 期望 225 passed / 0 failed
+cargo clippy --lib -- -D warnings; cargo clippy --lib --all-targets -- -D warnings   # 两个都期望 exit=0、0 warning
+cargo build --lib                                            # exit=0
+cd .. && node --test "tests/**/*.test.ts"                    # tests 10 / pass 10 / fail 0（在仓库根跑）
+npm run build                                                # exit=0，且 grep -c "error TS" 为 0
+sed -n '/generate_handler/,/^      \]/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"   # 45（逗号可选，写死 ,$ 会漏算末条）
+grep -c 'tauri::command(async)' src-tauri/src/lib.rs         # 4
+grep -rn "allow(dead_code)" src-tauri/src/ | wc -l           # 1（只有 db.rs:30）
+git push origin master && git push origin feat/m8.1-cleanup
+git ls-remote --heads origin | grep -E "master|m8.1"         # 核远端 SHA 与本地逐字一致
+```
 
-- **B（真机欠账，需要人配合）**：见 §3 那四条 —— 两个原生对话框、故意往数据目录存一次看守卫报错、M7 那一下「安装 LibreOffice」、GitHub 默认分支 symref。
+合完落一笔收口文档（`docs/开发进度.md` 的 M8.1 表行/变更日志、本文 §0/§3/§4 改到已合并态），M7/M8 的先例都是这个形状。**别忘了 §3 那句：M8.1 这轮没做真机验证**，合并前如果想稳，就把 §3-①/② 那两下人手的先点掉。
 
-**需要需求方做的**（不阻塞代码推进，但每次提醒一次）：
+**B（然后开 M9：待办清单）** —— 架构级路径（仓库里**没有**现成的待办流程可改，不是 bounded）：`superpowers:brainstorming` 逐题收口 → spec → `superpowers:writing-plans` → SDD → 整分支终审 → 合 master（**需当次批准**）。
 
-1. **远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`**（本机无 `gh`）—— 只能在 GitHub **Settings → Branches** 手改成 `master`。这一格从 M4 起一直挂着。
-2. §3 那四条人手动作里，**至少把 B-①/② 那两下点了** —— 那是 `/backup` 块内渲染与落点守卫的唯一真机证据。
-3. 若要我再跑 `cargo test`/`tauri dev` 而它报 `os error 1455`：**腾出提交内存** —— 关几个大户（`vmmemWSL` 常占 ~1G、`Everything`/`ChatGPT`/`Weixin` 各数百 MB）或在 Windows 高级系统设置把「分页文件」临时调大（比如 30–50 GB）。本轮就撞过一次，`cargo test` 起不来、只有 clippy 过得去。
+已勘察完的事实（下一个对话不必重读，但建议复核）：
+
+- **原始需求在 `docs/思维导图.md:38-45`**：待办 = 独立一级栏目、跨项目统一管理；基础操作新增/编辑/删除/改内容；状态只有「未完成/已完成勾选切换」；每条待办**关联所属项目、可按项目筛选**；视图要「全部 / 按项目分组 / 按截止日期排序」。另外 `docs/技术方案.md:126` 那份数据模型草图里有一张**从未实现**的 `milestones`（里程碑：阶段、日期、备注），而 `思维导图.md:71-74` 把「到期预警」列在可选增强（`:73`，属 M11）。
+- **所以第一个该问的问题已经收窄了**：M9 只做「一张待办表 + 独立栏目 + 勾选完成 + 按项目筛选/按截止排序」（思维导图 §二 的字面范围），还是顺手把 `milestones`（阶段/日期）一起建、把 M11 的「到期预警」提前接上？前者是 4-5 格的小里程碑，后者会把范围抬到两档数据模型。
+- 库表现状与形制：`projects` 已带 `status`（8 段**全局**枚举 立项/需求/开发/测试/预发/上线/运维/归档 —— M1 当年定的就是「全局统一」而非每项目模板，问点 16 已闭环）、`delivery_deadline`、`contract_period`，日期全是 `TEXT`。表形制 = `id TEXT PRIMARY KEY` + `created_at/updated_at TEXT DEFAULT (datetime('now'))` + `deleted_at` 软删 + `CHECK` 枚举 + 迁移**线性追加**（`TARGET_VERSION` 现为 4 ⇒ M9 是 **V5**，`apply_version` 一版本一个事务）。
+- **M9 一定会撞上的四条既有不变量**（都有断言守着，漏改就红）：① `backup::Counts` 是 **7 字段 camelCase 线格式**、`read_counts` 逐表现数 ⇒ 新业务表要么进 `counts`（线格式变化，要批准）、要么在 spec 里显式写明为什么不进；② 备份是**整库快照按表剥索引** ⇒ 新表自动跟着进包，`docs/技术方案.md` §6.2 与 spec §五 的口径要复核；③ 前端 nav 现在 **4 格**（搜索/项目/索引/备份），加第 5 格是 UI 契约变化（M8 为 `/backup` 破过一次「零新 IPC」，先例在）；④ `generate_handler!` 现 **45**，待办必带新命令 ⇒ 又一次需要当次批准的破例。
+- 红线不变：工具绝不动被索引的源文件；写盘落点只有「用户当场选的包路径 + 数据目录里的 `pre-restore-*.zip`」两处且只新增（M8.1 之后还多了一道 `guard_destination` 硬拒）。**M9 若要引入导出（`思维导图.md:70` 有「支持导出 Excel/Markdown 台账文件」那格，属 M10），落点白名单要重新谈一遍**，并且必须复用 `guard_destination` 那一形制（判据写成吃 `data_dir` + `dst` 的纯函数，见坑 31）。
+
+**C（M8.1 做完新留下的三条，都不阻塞 M9）**：① `pre-restore-*.zip` 仍无上界（① 选了交给用户；真要自动清得先批准破红线）；② 集合校验排在前面 ⇒ T9 那两条 `!exists` 被遮蔽成纵深，要让它们重新可证伪得单独造一份「集合校验过但落盘行为错」的夹具，本机成本高；③ `ImportOutcome.entries` 已删，但 `BackupSummary.entries`（`string[]`）与 `PackageInfo`（无此字段）两处语义仍不一致，下轮碰线格式时统一口径。
+
+**D（环境类，每次开工先看一眼）**：若要跑 `cargo test`/`tauri dev` 而它报 `os error 1455` 或「could not compile 却没有 error[Exxxx]」⇒ 是提交内存，**先重跑一次**（本轮两次都是重跑即绿）；再不行就叫需求方腾内存（关 `vmmemWSL`/`Everything`/`ChatGPT`/微信几个大户，或把分页文件临时调到 30–50 GB）。
 
 ## 5. 踩过的坑，绝对不要再踩
 
-按「新人最容易踩」排。每条都是独立可读的（旧版编号的坑在 git 里可查）。
+按「新人最容易踩」排。每条都是独立可读的（旧版编号的坑在 git 里可查）。**编号只增不改，也别按连续找**：14 号在本版已被并入 30 号（同一条规则改到 M8 的语境下重述），缺号是有意的；1–33 有别的文档按号引用（如 `docs/开发进度.md` 引坑 29/31、§3 引坑 12），要动先 `grep -rn "坑 [0-9]\+" docs/`。
 
 1. **绝不用 `taskkill //F //IM node.exe` 或 `//IM msedgewebview2.exe` 通杀**：映像名通杀会把需求方**其他项目的 vite**（E:\myjob\…、treasure-os 等）一并干掉，也把你自己的 CDP 会话打断。**只按你自己记下来的 PID 精确回收**。识别自己的孤儿进程用 `Get-CimInstance Win32_Process` 的 `CommandLine` 特征（本项目路径下的 `node_modules\vite`），并用 `Get-Process -Id <pid> StartTime` 与你自己几次尝试的 log mtime 对时间戳；不匹配的一律不动。这条我在 M5.5 犯过一次、教训已入跨会话记忆。
 
@@ -158,6 +193,14 @@ M8 已于 2026-10-14 合入 `master` 并推送。往下三条路，按默认顺�
 32. **`cargo test` 报「could not compile」却一行 `error[Exxxx]` 都没有 ⇒ 先重跑，别改代码**（M8.1 实测两次）：本机提交内存不够时 rustc 连 `libcore`/`libtest` 的 rlib 都 mmap 不了，报的是 `E0786 found invalid metadata files` + `页面文件太小 (os error 1455)`；而用 `--message-format short` 过滤后**什么都看不见**，看着就像代码写坏了。同一条命令重跑就 `exit=0`。判据顺序：先看 `Get-CimInstance Win32_OperatingSystem` 的 `FreeVirtualMemory`（低于 ~2 G 基本就是它），再决定是叫人腾内存还是真去查代码。
 33. **`include_str!` 文本门有两个自有的坑**（仓内本有两处先例，M8.1 补第三处时又踩了一遍）：① needle 必须用 `concat!` 拼断，否则测试把**自己的源码**数进去（`tokenize.rs` 那条注释就是为这件事写的）；② 它钉的是**源码文本形状**，不是运行时行为 —— 挡得住「有人删了/挪了那一行调用」，挡不住「那句调用的参数写错了」，所以判据本体仍必须有真单测，文本门只是补上接线那一格。用之前先想清这两条边界，别拿它当行为测试。
 
+**M8.1（待办开工前）新增的坑，2026-10-14**：
+
+34. **里程碑表那一行摘要不是需求来源**：我开口就说「M9 在技术方案 §九 只有四个字、需求侧口径未定」——**说错了**，需求一直写得很具体，在 `docs/思维导图.md:38-45`（待办 = 独立一级栏目 / 跨项目 / 勾选完成 / 关联项目可筛选 / 全部-分组-按截止排序）。`docs/技术方案.md` 的里程碑表只是索引。⇒ 开任何新里程碑前先把 `思维导图.md` 对应小节读一遍，再决定「什么还没定」；把已定的东西当未定去问需求方，是在浪费他的回合，也会让 spec 建在错前提上。
+
+35. **新加一道更靠前的校验，会把后面的断言变成不可证伪 —— 加防线时要同时重算旧断言的可证伪性**（M8.1 ④b **实测过，不是推断**）：把「未点名条目」从静默忽略升级成硬拒之后，T9 那条测试里「野条目一条也没落盘」的两条 `!exists` 被前面的集合校验遮蔽了。**读数为证**：临时把 `read_package` 里「只按 `DB_ENTRY` 取名」那一段改成「遍历 `file_names()` 把每个条目按自带路径写进 `src` 的父目录」（就是 M8 那轮变异②的缺陷形态，只是保留集合校验）⇒ `cargo test -j 1 --lib an_extra_entry` **1 passed / 0 failed，全绿** —— 包在抵达那段落盘代码之前就被拒了；而同一档变异在 ④b 之前是红的（M8 那轮实测红在外侧那条 `!exists`）。**这不影响该不该加防线（该加），但它意味着防线换了位置、旧断言换了性质**：必须当场写进测试注释 + `docs/开发进度.md`「没能自动验证」+ spec，否则下一个对话会以为那两条还在守着。跑完 `cp` + `cmp` 验字节还原、复跑 225 全绿。同款先例：T5 的「同时违反多道的包必须有确定的那一条错误」。
+
+36. **改这份长文档别拿行号做算术**：M8.1 收口时我用 python 按行号切 `docs/HANDOFF.md`，一次插入了 §3 的替身文本、又把 §4/§5 的标题吃掉（`grep "^## "` 只剩两个 `## 4.`），当场发现靠 `git checkout -- docs/HANDOFF.md` 恢复。两条正确做法：① 用 `Edit` 逐处替换（每处 old_string 唯一，改错也只伤一处）；② 真要程序化改，就按**标题切块**（`re.split` 在 `(?=^## )` 处）重建，不要维护索引。**同一轮另一处行尾事故**：几次 python 插入用的是 `\n`，在工作树里留下裸 LF（`index_job.rs` 56 行、本文 25 行、`开发进度.md` 4 行）—— 先 `git ls-files --eol <文件>` 看清「仓库侧是 `i/lf` + `core.autocrlf=true`（提交内容不受影响，检出是 CRLF）」再决定要不要动，别顺手"归一化"；要动就整档 `\r\n` 重写并**重跑门禁确认读数不变**（本轮就是这么收的）。
+
 ## 6. 关键指针
 
 | 主题 | 位置 |
@@ -184,4 +227,6 @@ M8 已于 2026-10-14 合入 `master` 并推送。往下三条路，按默认顺�
 | OCR 能力层 | `src-tauri/src/ocr.rs` |
 | 远端仓库 | `https://github.com/fallen-zero/project-manage.git`（默认分支 symref 待手改，见 §4） |
 | 旧版累加 HANDOFF（100+ 条编号坑与账本交叉引用） | `git show 0aa0d30:docs/HANDOFF.md` |
-| 本文坑编号从 M7 起续到 **21**、M8 起续到 **33**（15–21 是 LibreOffice / 外部 CLI 的账，22–33 是备份包与门禁取证 / zip / rusqlite Backup API / 子代理证据可信度的账）；旧版那套编号在本版没有连续号可查 ⇒ 挖账仍看 git 与 `.superpowers/sdd/<plan>/progress.md` |
+| **需求原文（待办 / 日报 / 工时 / Excel / 增强项的逐条口径）** | `docs/思维导图.md` —— §二 `:38-45` 待办清单、§三 `:47-58` 日报与 Excel、§四.3 `:70-74` 可选增强；**开工前先读它，别读里程碑表**（坑 34） |
+| **M8.1 四格小账的证据（含两次变异取证与「④b 遮蔽了 !exists」这条）** | `docs/开发进度.md`「## M8.1 收口（备份包那四格小账）」一节 + `.superpowers/sdd/2026-10-13-m8-backup/progress.md` 末尾的 `M8.1` 段 |
+| 本文坑编号：M7 起续到 **21**、M8 起续到 **33**、M8.1 起续到 **36**（15–21 是 LibreOffice / 外部 CLI 的账，22–33 是备份包 / zip / rusqlite Backup API / 门禁取证 / 子代理证据可信度，34–36 是需求出处、防线的可证伪性、文档与行尾的手艺）；**编号只增不改 —— 别的文档按号引用 1–33** | 旧版那套 100+ 编号在本版没有连续号可查 ⇒ 挖账看 `git show 0aa0d30:docs/HANDOFF.md` 与 `.superpowers/sdd/<plan>/progress.md` |
