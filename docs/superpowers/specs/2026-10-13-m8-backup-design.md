@@ -51,7 +51,7 @@
 
 `restore` 按页拷贝、无回滚，rusqlite 对 `Busy` 只重试 3 次 ×100 ms 就报错（vendored `backup.rs:117-131` 实读）。所以**导入侧不吹「全有或全无」**，只保证「失败点尽量前移 + 失败后有确定的撤销路」：
 
-**导入的四道前置**（全过了才动库）：① zip 能解、`manifest.json` 能读；② 每个条目 SHA-256 与 manifest 相符；③ `schema_version <= TARGET_VERSION`（包来自更新版应用 ⇒ 拒，绝不拿旧代码跑新 schema）；④ 应急包已成功写进数据目录。之后 `restore` 真失败，库里就是半新半旧，**唯一救法是拿刚落在数据目录的那份 `pre-restore-*.zip` 再导一次** —— 这就是 D1 那条「覆盖可撤销」的兑现物，也是应急包不做成贴心功能、做成承重件的原因。
+**导入的四道前置**（全过了才动库）：① zip 能解、`manifest.json` 能读，**且包内条目集合恰好等于 manifest 点名的集合**（M8.1 ④b 加的第 1.5 道，报错仍走 `backup_package_invalid`）；② 每个条目 SHA-256 与 manifest 相符；③ `schema_version <= TARGET_VERSION`（包来自更新版应用 ⇒ 拒，绝不拿旧代码跑新 schema）；④ 应急包已成功写进数据目录。之后 `restore` 真失败，库里就是半新半旧，**唯一救法是拿刚落在数据目录的那份 `pre-restore-*.zip` 再导一次** —— 这就是 D1 那条「覆盖可撤销」的兑现物，也是应急包不做成贴心功能、做成承重件的原因。
 
 **四道前置各自都能本机证伪**（逐条给得出读数）：① 往包里塞非 zip 字节 / 删掉 `manifest.json`；② 翻 `backup.db` 一个字节；③ 手造 manifest 写 `schema_version = 9`；④ 把应急包落点做成不可写（只读夹具目录）。四条的期望是同一个形状：**调用前后活库逐字相同**（`projects` 行数 + 某一行的完整内容 + `PRAGMA integrity_check`），且返回码等于那一条专属错误码 —— 只断「报错了」不够，因为「报错但已经写了一半」也想通过它。另配一条反向对照：同一夹具去掉前置④的不可写条件后导入必须成功，证明这四道不是恒红摆设。
 
@@ -77,7 +77,7 @@
 - **`generate_handler!` 42 → 45**（本批第二次破「零新 IPC」，需求方 2026-10-13 知情批准）。守护沿用 M7 那条形制并加一条：三条命令的**入参只有一个 `path: String`**（不接受第二个参数，尤其不接受命令名/包 ID 那类可执行内容），且 `WINGET_PACKAGE_ID` 那种「硬编码在 Rust 侧」的原则本轮没有新增项 —— 备份命令不做任何「起进程」的事。
 - **零新迁移**：`TARGET_VERSION` 保持 **4**（备份包不新增列，manifest 是文件不是表）。
 - **不扩码表**：`index_status` 五值、`skip_reason` 值域一字不动；新错误码是 `AppError.code` 的字符串（自由取值，M4 起就不是枚举）。
-- **新线格式**：三个新返回结构（`BackupSummary` / `PackageInfo` / `ImportOutcome`）是**新命令自带的新线格式**，不动既有断言 —— `SearchBundle` 七键（`search.rs:796/799`，后者是 `assert_eq!(obj.len(), 7)`）、`DocPreview` 六键（`doc_preview.rs:386`）两条断言字节不动且必须继续绿。**`IndexOverview` 本轮不加字段**（备份页自己拉自己的数据，不搭索引概览的车）。
+- **新线格式**：三个新返回结构（`BackupSummary` / `PackageInfo` / `ImportOutcome`）是**新命令自带的新线格式**。`ImportOutcome` 原为四字段，M8.1 ④a 删掉了其中 `entries`（它读的是 `manifest.files.len()`，而 manifest 只点名 `backup.db` 一条 ⇒ 恒等于 1，零信息量且易被念成「包内文件数」）⇒ **现为三字段** `schemaVersion` / `preRestorePath` / `counts`；这是本里程碑唯一一次**收缩**线格式，需求方当次批准，连带删掉 T6/T9 里对该字段的断言与 `src/types/backup.ts` 的那一行，不动既有断言 —— `SearchBundle` 七键（`search.rs:796/799`，后者是 `assert_eq!(obj.len(), 7)`）、`DocPreview` 六键（`doc_preview.rs:386`）两条断言字节不动且必须继续绿。**`IndexOverview` 本轮不加字段**（备份页自己拉自己的数据，不搭索引概览的车）。
 - **两处「全仓唯一」的旧措辞会失真，必须回写**：① `#[tauri::command(async)]` 从 1 条变 **4** 条（唯一现存那条是 `doc_preview`，`lib.rs:577`）；② 「生产路径唯一落盘文件是 `ledger.db`」变多（包路径与 `pre-restore-*.zip`）。技术方案 line 175 那句「各文件 SHA-256」本轮兑现，但它同时含**附件**那半格 —— 按 §一 缩量口径写明只做了一半。
 - **本轮用到的外部 API 全部实读过签名**（红线 A，计划阶段不许凭印象写）：
   - `rusqlite-0.40.2/src/backup.rs:64` `Connection::backup<N: Name, P: AsRef<Path>>(&self, name, dst_path, Option<fn(Progress)>) -> Result<()>`；`:102` `Connection::restore<N, P, F: Fn(Progress>>(&mut self, name, src_path, Option<F>)`。**两者 progress 参数类型不对称**（backup 收 `Option<fn(Progress)>` 函数指针，restore 收泛型 `Option<F>`）⇒ `None` 直传会歧义，各自要显式标注；`restore` 要 `&mut self`，所以 `db(&state)` 那条返回 `MutexGuard` 的现成 helper 得配 `mut` 绑定（`let mut conn = db(&state)?;`）。模块门在 `rusqlite-0.40.2/src/lib.rs:118-119` `#[cfg(feature = "backup")] pub mod backup;` ⇒ 不开 feature 连 `MAIN_DB` 之外的这条路整个不存在。
@@ -112,7 +112,9 @@ pfm-backup-2026-10-13T2130.zip          ← 用户选的目标路径，界面给
 
 - `counts` 在导出时从**快照连接**现数（不是从活库数），这样 inspect 念出来的「含 12 个项目」与包内容必然同源。数某张表失败**不吞**：`export` 直接返回 `Err` 中止本次导出（宁可报「导出失败」，也不产出一份数字不全的 manifest —— 「看得见包内有什么」是 D5 花一条命令换来的，不能是空的）。注意这里没有 `index_status`/`skip_reason` 什么事：那两个词是索引轮的字段，备份命令的失败面只有 `AppError`（§七 最后一条）。
 - 哈希对象 = 写入 zip 的**条目原始字节**（压缩前）；验算时对解压出的字节算。
-- 防 zip-slip：只按 `files[].name` 里那一个固定条目名取，包内其他条目一律忽略；解出后落临时目录自己指定的文件名，绝不用包内名字拼路径。
+- 防 zip-slip（**两道**，M8.1 ④b 之后）：① 解包后先比**条目集合** —— 包内条目必须恰好等于 manifest 点名的集合（`manifest.json` 自己算一条），对不上就 `backup_package_invalid` 硬拒；② 取 db 仍只按 `files[].name` 里那一个固定条目名取，解出后落临时目录里自己指定的文件名，绝不用包内名字拼路径。
+  - **这条判据在本里程碑里翻过一次方向，两版都留痕**：M8 交付时是「其他条目一律忽略」，理由是「我们从不按包内名字构路径，所以多余条目天然无害」，T9 那条端到端实测钉的就是「它一条也没落过盘」（当时导入是**照成**的）。M8.1 评估时认定静默接受一份被人改过的包这件事本身就不该对用户保密 —— 响亮地拒才对得起 D6 那句「包可能被改过」，于是需求方当次批准升级成硬拒。
+  - **升级换来了什么、又吃掉了什么**（写清楚，别只说变好了）：多一道防线，且被拒的包仍然一条文件都不许多写（这道检查排在应急包之前）；代价是 T9 那条测试的两条 `!exists` 断言从「唯一防线」降级成**纵深** —— 集合校验在它之前就把包拒了，所以「只加遍历落盘、集合校验还在」这一档变异现在打不红那条测试。这是 T5 那条「同时违反多道的包必须有确定的那一条错误」的同款遮蔽，按同款口径如实登记而不是假装更严。
 - `formatVersion` 只保证「同版本读写 + 拒绝更高 `schemaVersion` 的包」，不做跨版本兼容矩阵（YAGNI；真要有第二个格式版本时再谈）。
 
 ## 六、落点（按文件七行）

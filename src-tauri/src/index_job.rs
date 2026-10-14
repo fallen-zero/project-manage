@@ -1658,14 +1658,21 @@ mod tests {
     /// zip-slip：包内多塞一条 manifest 没点名的条目，导入后那个位置**不许**被写出来。
     /// T5 的判据是「只按 manifest 点名的条目取」，这条测试是那一句的唯一直接证据。
     ///
-    /// 控制方修订（原写法必红，是计划的错不是实现的错）：`read_package` 只按 `DB_ENTRY` 取名，
-    /// 多一条野条目**不会**让任何一道前置变红 —— 哈希算的是**解压后**的 db 字节，重写 zip 时
-    /// 重新压缩只改存放字节、不改摘要 ⇒ 「期望 `backup_package_invalid`」在这个实现下不成立。
-    /// 本里程碑 §五 的判据本来就是「包内其它条目一律忽略」，所以这里期望导入**成功**，
-    /// 真正要钉的是后半句：**那条野条目一条也没落过盘**（变异②把取条目那一段改成遍历
-    /// `file_names()` 逐个落盘时，红的就是这一句）。前半句的 `expect` 同时保证这不是空对空。
+    /// 篡改包 / zip-slip：包内多一条 manifest 没点名的条目 ⇒ **导入被硬拒**，且那条一条也没落过盘。
+    ///
+    /// 这条测试的期望在两处交付之间翻过方向，两版都留痕（别只看见最后一版）：
+    /// ① 计划 T9 初稿写「期望 `backup_package_invalid`」—— 在那时的实现下**必红**：`read_package` 只按
+    ///    `DB_ENTRY` 取名，而哈希算的是**解压后**的 db 字节，重写 zip 时重新压缩只改存放字节、不改摘要
+    ///    ⇒ 多一条谁都不违反，四道前置全过、导入照成。那一版因此翻成「导入成功 + 钉 `!exists`」。
+    /// ② M8.1 ④b（需求方当次批准）把 spec §五 的判据从「静默忽略」升级成**硬拒**：包内条目集合必须
+    ///    恰好等于 manifest 点名的集合（含 `manifest.json` 自己）⇒ 本条重新期望被拒。
+    ///
+    /// **遮蔽要如实说**：④b 之后「不落盘」那两条 `!exists` 不再是唯一防线 —— 集合校验在它之前就把包拒了，
+    /// 「只加遍历落盘、集合校验还在」这一档变异现在打不红本条（它只能靠前一档红）。还留着是因为纵深不要钱，
+    /// 也因为这正是 T5 那条「同时违反多道的包必须有确定的那一条错误」的同款取舍。能红本条的两个变异是：
+    /// 摘掉集合校验（`expect_err` 红）、或校验与落盘一起退化回旧行为（`expect_err` 与 `!exists` 双红）。
     #[test]
-    fn an_extra_entry_in_the_package_is_never_written_to_disk() {
+    fn an_extra_entry_in_the_package_is_refused_and_never_written_to_disk() {
         let data = tempfile::tempdir().unwrap();
         let conn = crate::db::open(data.path()).unwrap();
         seed_ledger_for_job(&conn); // 必须种出 p1..p3，下面删掉 p1 才有可观测的差异
@@ -1674,9 +1681,8 @@ mod tests {
         let evil = data.path().join("evil.zip");
         let stray = "pfm-m8-zipslip-probe.txt"; // 名字带里程碑前缀，避免撞上 %TEMP% 里的既有文件
         rewrite_zip_add_stray_entry(&good, &evil, &format!("../{stray}"), b"pwned");
-        // 订正（评审 Minor）：**当场钉住这条测试自己的前提** —— 野条目真的在那个包里。
-        // 不钉的话，将来 `zip` 写侧一旦开始清洗条目名（注 2 设想过的那档退化），包会被静默写成
-        // 没有越界名，两条 `!exists` 全绿而什么都没测。
+        // 钉住这条测试自己的前提 —— 野条目真的在那个包里。不钉的话，将来 `zip` 写侧一旦开始清洗条目名
+        // （注 2 设想过的那档退化），包会被静默写成没有越界名，本条全绿而什么都没测。
         let evil_names = zip_names_of(&evil);
         assert_eq!(evil_names.len(), 3, "恶包必须真的有 3 条（好包的 2 条 + 这条野条目）：{evil_names:?}");
         assert!(evil_names.iter().any(|n| n == &format!("../{stray}")), "越界名必须原样在包里存着：{evil_names:?}");
@@ -1684,16 +1690,13 @@ mod tests {
 
         let mut conn2 = crate::db::open(data.path()).unwrap();
         conn2.execute("DELETE FROM projects WHERE id='p1'", []).unwrap();
-        let out = crate::backup::import(&mut conn2, &evil, data.path())
-            .expect("manifest 没点名的条目只是被忽略，不该让导入失败（§五）");
-        // 控制方修订（T9 实跑读数）：`ImportOutcome.entries = manifest.files.len()`（`backup.rs:490`），
-        // 而 manifest 只点名 `backup.db` **一条** ⇒ 期望是 1；「两条目」是 zip 侧条目数，属
-        // `BackupSummary.entries`，两者别混（真机 `backup_import` 的出参也是 1，与此一致）。
-        assert_eq!(out.entries, 1, "出参形状：manifest 点名列恒只有 backup.db 一条（**这条不守 zip-slip** —— 就算实现真的把野条目落了盘，这个数也还是 1；守那一判据的是下面两条 !exists）");
-        let back: i64 = conn2
+        let e = crate::backup::import(&mut conn2, &evil, data.path())
+            .expect_err("M8.1 ④b：manifest 没点名的条目现在必须硬拒，不再静默忽略");
+        assert_eq!(e.code, "backup_package_invalid", "实际错码 {code}，消息 {msg}", code = e.code, msg = e.message);
+        let after: i64 = conn2
             .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(back, 3, "包确实被灌进去了（否则下面那句 !exists 是空对空）");
+        assert_eq!(after, 2, "被拒之后库必须一字未动（删掉的那条项目不能神秘回来）⇒ 这道检查确实早于 restore");
         assert!(
             !data.path().join(stray).exists(),
             "绝不能按包内自带路径落盘（数据目录内侧）：{}",
@@ -1704,6 +1707,11 @@ mod tests {
             "绝不能按包内自带路径落盘（数据目录外侧，zip-slip 的正身）：{}",
             data.path().join("..").join(stray).display()
         );
+        let leaves = std::fs::read_dir(data.path())
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("pre-restore-"))
+            .count();
+        assert_eq!(leaves, 0, "这道新增的硬拒也必须早于应急包 —— 被拒的包一条文件都不许多写");
     }
 
     /// 「包比本机新」在端到端这一层也只拒不动（T5 测的是函数，这条测的是带真库的调用形状）。

@@ -214,6 +214,10 @@ export function BackupPage() {
           <CardTitle>用备份包导入</CardTitle>
           <CardDescription>
             整库覆写当前数据；覆写前会自动在你的数据目录里存一份现状，可以撤销。
+            {/* M8.1 ①（需求方定的口径：只加可见性，不自动删）：撤销包由工具自己写、应用永不删改，
+                所以反复导入会一份份留在数据目录里。界面上说清「谁负责清」，比偷偷删掉更符合这条红线。 */}
+            每导入一次就会留一份那样的撤销包（文件名以 <code>pre-restore-</code> 开头），应用不会自动清理 ——
+            用不上了你可以在数据目录里自己删掉旧的。
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-2 text-sm">
@@ -233,11 +237,12 @@ export function BackupPage() {
           )}
           {outcome && (
             <div className="flex flex-col gap-1 text-xs">
-              {/* 注 6：这里刻意**不**念 `outcome.entries`。那个字段是 Rust 侧的
-                  `manifest.files.len()`（src-tauri/src/backup.rs:490），而 manifest 只点名
-                  `backup.db` 一条 ⇒ 恒为 1，跟 zip 里实际有 2 个条目（`BackupSummary.entries`）
-                  不是一回事，念成「已导入 1 个条目」会被读成文件数。改念用户真正要核对的东西：
-                  包内库版本 + 应急包（撤销包）的完整路径。字段本身照旧留在类型与线格式里。 */}
+              {/* 注 6 → M8.1 ④a：这里念的是包内库版本 + 撤销包完整路径，**没有**「包内 N 个条目」那句。
+                  原来那句读的是 `ImportOutcome.entries = manifest.files.len()`，manifest 只点名
+                  `backup.db` 一条 ⇒ 那个数恒为 1，跟 zip 里实际有 2 个条目（`BackupSummary.entries`）
+                  根本不是一回事，念出来会被读成文件数。T8 先把这句从界面上撤掉，M8.1 再把这个
+                  没有信息量的字段从出参与 `src/types/backup.ts` 里一并删掉（需求方当次批准），
+                  所以现在也不会有人再把它捡回去念。 */}
               <div>
                 导入完成：用的这份包是 schema v{outcome.schemaVersion}。
               </div>

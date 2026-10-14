@@ -887,4 +887,37 @@ mod tests {
             "busy 若在 matches! 里被误加，本行必须红（闸门失败时库根本未动）"
         );
     }
+
+    /// M8.1 补钉：`backup_export` 里「守卫先于任何写盘」这条**接线**的落点。
+    ///
+    /// 为什么只能这么钉：判据本身有单测（`backup::guard_destination` 的落点各档 + 「既有文件不被覆写」），
+    /// 但命令层的调用点在这套门禁里开不出真测试 —— 本仓 `tauri` 没开 `test` feature（「`Cargo.toml`
+    /// 一行不动」是硬边界），而 mock 的空 identifier 会把 `app_data_dir()` 解析到**真实用户目录**、
+    /// 撞红线②（M5 终审把这条机制读过，见 HANDOFF 坑 101）。所以照本仓现成的**文本门**形制钉它
+    /// （先例：`tokenize.rs` 的 `query_side_has_exactly_one_cut`、`extract.rs` 的
+    /// `release_profile_does_not_abort_so_panic_guards_work`）：谁把守卫调用删掉、或把它挪到
+    /// `backup::export` 之后，本条就红。
+    ///
+    /// needle 一律 `concat!` 拼 —— 写成字面量会把本测试自己数进去（`tokenize.rs` 那条同款坑）。
+    #[test]
+    fn backup_export_wires_the_guard_before_any_write() {
+        let src = include_str!("lib.rs");
+        let start = src
+            .find(concat!("fn backup_", "export("))
+            .expect("backup_export 必须还在 lib.rs 里");
+        let body = &src[start..start + src[start..].find("\n}").expect("backup_export 的函数体收尾")];
+        let guard = concat!("backup::guard_", "destination(");
+        let write = concat!("backup::exp", "ort(");
+        assert_eq!(
+            body.matches(guard).count(),
+            1,
+            "命令层必须恰好调用一次落点守卫（两次就是有人加了第二条导出路径）"
+        );
+        let guard_at = body.find(guard).expect("守卫调用不见了");
+        let write_at = body.find(write).expect("写盘调用不见了");
+        assert!(
+            guard_at < write_at,
+            "守卫必须早于任何写盘：本函数里守卫在第 {guard_at} 字节、写盘在第 {write_at} 字节"
+        );
+    }
 }

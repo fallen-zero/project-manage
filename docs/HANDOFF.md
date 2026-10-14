@@ -4,7 +4,7 @@
 
 ## 0. 先读这一段
 
-这是一个 Tauri 桌面工具的持续开发项目，按里程碑推进。**M0–M8 都已完成并合入 `master`**（M7 合并点 `da140a4`；M8 合并点 `99c9401`，全历史零 merge commit 的惯例保持）。**M8（备份包导出/导入）已于 2026-10-14 fast-forward 合入 `master` 并推送 origin**（合入前整分支终审给的是 **Needs fixes / 1 Critical + 2 Important**，三条全部复现成立、全部修完、限定复审 clean；那条 Critical 就是坑 31）。**下一格是 M9（待办清单）**，开工前先把 §4 里 M8.1 那四格小账过一遍 —— 那条 Critical 就是坑 31：导出落点指进数据目录会把用户唯一的持久库截断归零 —— 合完之后的下一格是 **M9（待办清单）**，开工前先把 M8.1 那三格小账过一遍（见 §4）。
+这是一个 Tauri 桌面工具的持续开发项目，按里程碑推进。**M0–M8 都已完成并合入 `master`**（M7 合并点 `da140a4`；M8 合并点 `99c9401`，全历史零 merge commit 的惯例保持）。**M8（备份包导出/导入）已于 2026-10-14 fast-forward 合入 `master` 并推送 origin**（合入前整分支终审给的是 **Needs fixes / 1 Critical + 2 Important**，三条全部复现成立、全部修完、限定复审 clean；那条 Critical 就是坑 31）。**M8.1 那四格小账也已于同日清完**（`feat/m8.1-cleanup`，四格口径 + 两次变异取证见 `docs/开发进度.md`「## M8.1 收口」）⇒ **下一格是 M9（待办清单）** —— 那条 Critical 就是坑 31：导出落点指进数据目录会把用户唯一的持久库截断归零 —— 合完之后的下一格是 **M9（待办清单）**，开工前先把 M8.1 那三格小账过一遍（见 §4）。
 
 三份必读文档按重要性：
 
@@ -71,7 +71,9 @@
 M8 已于 2026-10-14 合入 `master` 并推送。往下三条路，按默认顺序：
 
 - **A（默认方向）：开 M9（待办清单）** —— 走完整流程：`superpowers:brainstorming` 收口 → spec → writing-plans → SDD → 整分支终审 → 合 master（**需当次批准**）。技术方案 §九 里程碑表里 M9 只写了「待办清单」四个字，阶段模型（统一枚举 vs 每项目模板）与粒度都还没定，属于架构级那一格、不是 bounded 改动。
-- **A′（M8.1 四格小账，开工 M9 之前顺手清掉最划算）**：① `pre-restore-*.zip` **没有保留上限** —— 反复导入会往数据目录线性堆撤销包，用户不会主动清（终审 defer）；② **守卫调用点的结构门** —— `guard_destination` 判据有单测、`backup_export` 里那句调用没有（`Cargo.toml` 一行不动 + 只允许 `tempfile::tempdir()` 两条硬边界内开不出 `tauri::test`，M5 终审已把"为什么测不了"写成机制并给了最小改法），可用仓内现成的 `include_str!` 文本门那一形制补钉（先例 `tokenize.rs` 的 `query_side_has_exactly_one_cut`、`extract.rs` 的 `release_profile_does_not_abort_so_panic_guards_work`）；③ `backup.rs` 里「注意**不碰 `db::TARGET_VERSION`**」那句是陈旧措辞（它读的是包内 `schema_meta` 的现值，`TARGET_VERSION` 只是比较的另一边）与 `src/pages/backup.tsx` 里那句已被取代的 `entries` 注释；④ 两条**要先定产品口径才好动代码**的：`ImportOutcome.entries` 恒为 1 这个语义（要它等于包内条目数就是生产改动 + `types.ts` 同步 + 界面文案），以及「拒绝一切未点名条目」要不要升级成第二道防线（眼下防线是只按点名条目取 + 包名清洗挡绝对路径，T9 的 `../` 那条臂实测能构造、红在落盘判据上）。
+- **A′（已完成）：M8.1 四格小账** —— ① 撤销包无上限 ⇒ 需求方定「只加界面可见性、不自动删」（自动删要破「只新增不删改」这条红线，还会断掉多步回滚）；② 落点守卫**判据有单测、调用点没有** ⇒ 补一条仓内现成形制的 `include_str!` 文本门；③ 两句陈旧注释/文案改准；④ 两条产品口径经批准落地：**删掉 `ImportOutcome.entries`**（恒 1、零信息量）、**未点名条目从静默忽略升级成硬拒**（`read_package` 第 1.5 道）。过程与取证见 `docs/开发进度.md`「## M8.1 收口」。
+- **A″（M8.1 做完新留下的，都不阻塞 M9）**：① `pre-restore-*.zip` 仍无上界（① 选了交给用户；真要自动清得先批准破红线）；② 集合校验排在前面，T9 那两条 `!exists` 已被**遮蔽成纵深** —— 要让它俩重新可证伪，得单独造一份「集合校验过但落盘行为错」的夹具，本机成本高；③ `ImportOutcome.entries` 已删，但 `BackupSummary.entries`（`string[]`）与 `PackageInfo`（没有这个字段）两处语义仍不一致，下轮碰线格式时统一口径。
+
 - **B（真机欠账，需要人配合）**：见 §3 那四条 —— 两个原生对话框、故意往数据目录存一次看守卫报错、M7 那一下「安装 LibreOffice」、GitHub 默认分支 symref。
 
 **需要需求方做的**（不阻塞代码推进，但每次提醒一次）：
@@ -153,6 +155,9 @@ M8 已于 2026-10-14 合入 `master` 并推送。往下三条路，按默认顺�
 
 31. **`std::fs::File::create` 是 CREATE_ALWAYS + 截断，而 Windows 的共享规则保护不了正被 SQLite 开着的库**（M8 终审 C1，本机实测过）：把导出落点指进 `%APPDATA%\dev.zero.pfm\`（哪怕就是那个 `ledger.db`）会让**文件长度当场归零**、随即被 zip 覆掉 —— 用户唯一的持久库就这么没了，不报错、不弹窗。修复者在本机 `%TEMP%` 用独立探针复现过（控制方只复核了读数的自洽性、没有亲自重跑）：SQLite 打开期间第二个句柄照样开得了，文件长度 176128 → 0（`std::fs::File::create` 请求的是 `GENERIC_READ|GENERIC_WRITE` + `FILE_SHARE_READ|WRITE|DELETE`，正合 Windows 的共享规则）。⇒ 本轮的修法是把判据写成一个**纯函数** `backup::guard_destination(data_dir, dst)`，在 `backup_export` 里**任何写盘之前**调用，落在数据目录内的任何位置一律拒（新错误码 `backup_destination_unsafe`）；`import` 自己写应急包那一支**刻意不套**（那本来就该落在数据目录里）。三条给下一个动写盘功能的人的教训：① 「只新增文件、绝不删改既有文件」这条红线**必须由代码保证，不能由对话框保证**（对话框只保证人当场选了一次，CDP/脚本走的是同一段代码）；② 判据要写成能吃 `data_dir` + `dst` 两个参数的纯函数，命令层才有可测的落点，否则「接了线但没测」这一格永远补不上；③ 路径形状可比性是坑：`C:\…` 与 `\?\C:\…`（Windows verbatim 前缀）用 `Path::starts_with` 按组件比对**永不命中**，所以规范化必须**成对**（父子都能规范化才用规范化比对，任一边规范化不了就退回两边裸串比对），把两种形状无脑并列会同时造出误拒与漏拒（本轮两条测试 (e)/(h) 各打过一次）。
 
+32. **`cargo test` 报「could not compile」却一行 `error[Exxxx]` 都没有 ⇒ 先重跑，别改代码**（M8.1 实测两次）：本机提交内存不够时 rustc 连 `libcore`/`libtest` 的 rlib 都 mmap 不了，报的是 `E0786 found invalid metadata files` + `页面文件太小 (os error 1455)`；而用 `--message-format short` 过滤后**什么都看不见**，看着就像代码写坏了。同一条命令重跑就 `exit=0`。判据顺序：先看 `Get-CimInstance Win32_OperatingSystem` 的 `FreeVirtualMemory`（低于 ~2 G 基本就是它），再决定是叫人腾内存还是真去查代码。
+33. **`include_str!` 文本门有两个自有的坑**（仓内本有两处先例，M8.1 补第三处时又踩了一遍）：① needle 必须用 `concat!` 拼断，否则测试把**自己的源码**数进去（`tokenize.rs` 那条注释就是为这件事写的）；② 它钉的是**源码文本形状**，不是运行时行为 —— 挡得住「有人删了/挪了那一行调用」，挡不住「那句调用的参数写错了」，所以判据本体仍必须有真单测，文本门只是补上接线那一格。用之前先想清这两条边界，别拿它当行为测试。
+
 ## 6. 关键指针
 
 | 主题 | 位置 |
@@ -179,4 +184,4 @@ M8 已于 2026-10-14 合入 `master` 并推送。往下三条路，按默认顺�
 | OCR 能力层 | `src-tauri/src/ocr.rs` |
 | 远端仓库 | `https://github.com/fallen-zero/project-manage.git`（默认分支 symref 待手改，见 §4） |
 | 旧版累加 HANDOFF（100+ 条编号坑与账本交叉引用） | `git show 0aa0d30:docs/HANDOFF.md` |
-| 本文坑编号从 M7 起续到 **21**、M8 起续到 **31**（15–21 是 LibreOffice / 外部 CLI 的账，22–31 是备份包 / zip / rusqlite Backup API / 子代理证据可信度的账）；旧版那套编号在本版没有连续号可查 ⇒ 挖账仍看 git 与 `.superpowers/sdd/<plan>/progress.md` |
+| 本文坑编号从 M7 起续到 **21**、M8 起续到 **33**（15–21 是 LibreOffice / 外部 CLI 的账，22–33 是备份包与门禁取证 / zip / rusqlite Backup API / 子代理证据可信度的账）；旧版那套编号在本版没有连续号可查 ⇒ 挖账仍看 git 与 `.superpowers/sdd/<plan>/progress.md` |

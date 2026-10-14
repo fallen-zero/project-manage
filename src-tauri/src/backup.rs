@@ -90,7 +90,6 @@ pub struct PackageInfo {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportOutcome {
-    pub entries: i64,
     pub schema_version: i64,
     pub pre_restore_path: String,
     pub counts: Counts,
@@ -303,8 +302,9 @@ fn strip_index(conn: &rusqlite::Connection) -> AppResult<()> {
         })
 }
 
-/// `schema_meta` 里的当前版本。注意**不碰 `db::TARGET_VERSION`**：包里的库是它自己那一刻的版本，
-/// 与本机目标版本是两件事（T5 的拒包判据比的是这两个）。
+/// 读**这条连接所指的那个库自己**的 `schema_meta` 现值（`MAX(version)`），不读任何本机常量。
+/// 本机上限是 `db::TARGET_VERSION`，两者是两件事：拒包的判据（T5）拿「包里这个数」去比「本机上限」，
+/// 而本函数只负责交出前一个数 —— 传进来的是活连接还是快照，就读出谁的版本，跟上限无关。
 fn schema_version_of(conn: &rusqlite::Connection) -> AppResult<i64> {
     conn.query_row("SELECT COALESCE(MAX(version), 0) FROM schema_meta", [], |r| r.get(0))
         .map_err(|e| {
@@ -352,11 +352,13 @@ fn io_fail(dst: &Path, e: &std::io::Error) -> AppError {
     AppError::io(dst, e)
 }
 
-/// 解包 → 读 manifest → 比 `formatVersion` → 比 `schemaVersion` → 验 db 哈希。
+/// 解包 → 读 manifest → 比 `formatVersion` → 比 `schemaVersion` → **比对包内条目集合** → 验 db 大小与哈希。
 /// **顺序是判据的一部分**（见任务注）：版本判据必须先于哈希判据 —— 对同时违反版本与哈希的包，
 /// 必须拒在版本上（`inspect_refuses_a_package_from_a_newer_schema` 的双违反臂直钉这条顺序）；
 /// 顺序反过来会把错因推给 mismatch，版本拦截失去出手机会，而「只改 manifest」的包（db 原样、
 /// 哈希仍相符）两种顺序都能走到版本判据，单独用它测不出顺序。
+/// 条目集合那一道（M8.1 ④b）排在版本判据之后、大小/哈希之前：它同样是「结构不对就先报结构」，
+/// 且必须早于 `import` 里的应急包写入 —— 被拒的包一条文件都不许多写。
 /// T6 的 import 也用它 —— 验包逻辑一份，不抄两遍。
 fn read_package(src: &Path) -> AppResult<(Manifest, Vec<u8>)> {
     let file = std::fs::File::open(src).map_err(|e| AppError::io(src, &e))?;
@@ -389,7 +391,30 @@ fn read_package(src: &Path) -> AppResult<(Manifest, Vec<u8>)> {
             Some("先升级应用再导入；别拿旧版本覆盖新版本的库"),
         ));
     }
-    // 只按 manifest 点名的那一个条目取，包内其它条目一律忽略 ⇒ zip-slip 一次性防掉（spec §五）。
+    // M8.1 ④b（需求方当次批准，spec §五 的判据随之从「静默忽略」改成「硬拒」）：
+    // 包内条目集合必须**恰好等于** manifest 点名的集合（`manifest.json` 自己也算一条）。
+    // 原先只做到「按点名的取，其它一律忽略」——那确实让野条目落不了盘（T9 实测钉的就是那一句），
+    // 但它同时会**静默接受一份被人改过的包**；响亮地拒才对得起 D6 那句「包可能被改过」。
+    // 顺序上放在版本判据之后、大小/哈希之前：与 T5 定下的「同时违反多道的包必须有确定的那一条错误」一致，
+    // 版本不符的包仍然先报版本，不会因为这一步变成结构错。
+    let mut got_names: Vec<String> = z.file_names().map(str::to_owned).collect();
+    let mut want_names: Vec<String> = manifest.files.iter().map(|f| f.name.clone()).collect();
+    want_names.push(MANIFEST_ENTRY.to_owned());
+    got_names.sort();
+    want_names.sort();
+    if got_names != want_names {
+        return Err(AppError::new(
+            "backup_package_invalid",
+            &format!(
+                "{} 里的条目与 manifest 点名的对不上（包内 {} 条，manifest 点名 {} 条）",
+                src.display(),
+                got_names.len(),
+                want_names.len()
+            ),
+            Some("这份包被改过，或者不是本工具导出的；别用它导入。只想看看里面有什么就用「检查备份包」"),
+        ));
+    }
+    // 只按 manifest 点名的那一个条目取（现在上一句已经保证没有别的条目了）⇒ zip-slip 的两道防线（spec §五）。
     let want = manifest
         .files
         .iter()
@@ -547,7 +572,6 @@ pub fn import(
         })?;
 
     Ok(ImportOutcome {
-        entries: manifest.files.len() as i64,
         schema_version: manifest.schema_version,
         pre_restore_path: pre.display().to_string(),
         counts: counts_before,

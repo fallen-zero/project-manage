@@ -29,7 +29,6 @@ export interface PackageInfo {
 }
 
 export interface ImportOutcome {
-  entries: number;
   schemaVersion: number;
   preRestorePath: string;
   counts: BackupCounts;
