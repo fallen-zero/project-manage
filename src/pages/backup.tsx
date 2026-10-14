@@ -111,6 +111,12 @@ export function BackupPage() {
         <h1 className="text-xl font-semibold">备份</h1>
         <p className="mt-1 text-xs text-muted-foreground">
           整库导成一个 zip 备份包 / 检查一个包 / 用包覆盖回来。包里只有数据库本体：文档索引不在包里。
+          {/* 注 5（D6 的 UI 半边）：这句刻意挂在**无条件**渲染的页头，而不是「inspect 成功之后」的分支里 ——
+              只点「导出备份」的人拿走的就是含明文列的包，那一刻屏幕上就必须有这句话。
+              列名清单与 src-tauri/src/backup.rs 的 warn_plaintext_columns() 逐字对齐（一份文本两处出），
+              不在这里另造一套。检查卡片里那条来自包内的 `plaintextWarning` 保留：它念的是**这份包**
+              自己声明的清单，与这句静态文案用途不同，不算重复。 */}
+          包内非 *_cipher 列为明文：项目名/编号/负责人/客户/联系人/合同号、服务器 ip 与堡垒机、各类 url、各表 note。备份包本体不密封，别把它当安全介质分发。
         </p>
       </div>
 
@@ -227,10 +233,21 @@ export function BackupPage() {
           )}
           {outcome && (
             <div className="flex flex-col gap-1 text-xs">
+              {/* 注 6：这里刻意**不**念 `outcome.entries`。那个字段是 Rust 侧的
+                  `manifest.files.len()`（src-tauri/src/backup.rs:490），而 manifest 只点名
+                  `backup.db` 一条 ⇒ 恒为 1，跟 zip 里实际有 2 个条目（`BackupSummary.entries`）
+                  不是一回事，念成「已导入 1 个条目」会被读成文件数。改念用户真正要核对的东西：
+                  包内库版本 + 应急包（撤销包）的完整路径。字段本身照旧留在类型与线格式里。 */}
               <div>
-                已导入 {outcome.entries} 个条目（schema v{outcome.schemaVersion}），
-                覆写前的现状已存为 {outcome.preRestorePath}
+                导入完成：用的这份包是 schema v{outcome.schemaVersion}。
               </div>
+              <div className="break-all">
+                覆写前的现状已自动存成应急包，随时可以再导回去撤销：{outcome.preRestorePath}
+              </div>
+              {/* `outcome.counts` 来自 Rust 侧 restore **之前**对当前库现数的 counts
+                  （backup.rs:449 的 `counts_before`），所以这七个数是「覆写前」的现数，
+                  不是导进来的新数 —— 时点必须念出来，否则用户会以为这是导入后的结果。 */}
+              <div>下面七张表是覆写前你库里的行数（万一导错了包，靠这组数认回原样）：</div>
               <div className="flex flex-wrap gap-x-3 gap-y-1">
                 {COUNT_ROWS.map(({ key, label }) => (
                   <span key={key}>
