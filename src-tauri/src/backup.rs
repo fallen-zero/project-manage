@@ -161,18 +161,34 @@ pub fn now_utc(conn: &rusqlite::Connection) -> AppResult<String> {
 /// 正被 SQLite 开着的 `ledger.db`，实测把落点指向活库会让文件长度当场归零、随即被 zip 覆掉，
 /// 用户唯一的持久库就此没了。所以必须在真正打开文件之前把这种落点拒掉。
 pub fn guard_destination(data_dir: &Path, dst: &Path) -> AppResult<()> {
-    // 规范化的是 dst 的**父目录**而不是文件本身：一次全新导出时目标文件还不存在，
-    // canonicalize(文件) 会 ENOENT；父目录必然存在，规范化又顺带吃掉 `..\`/`.` 回溯段，
-    // 让「指向数据目录内的相对/回溯形状」与绝对路径走同一判据。父目录也规范化不了
-    // （路径不存在等极端情形）就退回原始 dst 做前缀比对 —— 宁可多拒不漏拒。
+    // 规范化的是 dst 的**父目录**而不是文件本身：一次全新导出时目标文件还不存在，canonicalize(文件)
+    // 会 ENOENT；父目录存在时规范化又顺带吃掉 `..\`/`.` 回溯段，让「指向数据目录内的相对/回溯形状」
+    // 与绝对路径走同一判据。
     let parent = dst.parent().unwrap_or(dst);
-    let resolved_parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
-    let resolved = match dst.file_name() {
-        Some(name) => resolved_parent.join(name),
-        None => resolved_parent,
+    let canonical_parent = std::fs::canonicalize(parent).ok();
+    let canonical_dir = std::fs::canonicalize(data_dir).ok();
+    // 三档，每档只在自己那档里可比：
+    // ① 父子都能规范化 ⇒ 规范化 vs 规范化（挡住 `..\` 回溯与 junction 指回来的形状）。
+    // ② 父能规范化、数据目录不能（还没建出来）⇒ 退回裸串 vs 裸串。
+    // ③ 父规范化不了（那条路径本身不存在）⇒ 只能裸串 vs 裸串。
+    // 为什么不能把裸串比对无条件并列进去：`data\sub\..\..\x.zip` 折叠后其实**在目录外**，
+    // 裸串前缀却看得见 `data\` —— 无脑并列会把这种合法落点误拒（第 (e) 档就是钉这一条的，
+    // 控制方第一版就是这么写、被这条测试打回来的）。
+    // **残余窗口要如实写在这里**：③ 那一档候选串还是 `C:\…` 原形，而 ① 的基串一旦换成 `\\?\C:\…`
+    // 就按组件**永不命中** ⇒ 规范化彻底失败时判据实际是**放行**，不是「多拒」。那一档同时意味着
+    // 父目录不存在、`File::create` 本来也会失败，所以不是可利用的毁库路径；但别把它读成已经兜住了。
+    let inside = match (&canonical_parent, dst.file_name()) {
+        (Some(p), Some(name)) => match &canonical_dir {
+            Some(d) => p.join(name).starts_with(d),
+            None => dst.starts_with(data_dir),
+        },
+        (Some(p), None) => match &canonical_dir {
+            Some(d) => p.starts_with(d),
+            None => dst.starts_with(data_dir),
+        },
+        (None, _) => dst.starts_with(data_dir),
     };
-    let resolved_dir = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
-    if resolved.starts_with(&resolved_dir) {
+    if inside {
         return Err(AppError::new(
             "backup_destination_unsafe",
             &format!("导出目标 {} 落在应用的数据目录里，会被拒掉以免覆掉活库或应急包", dst.display()),
@@ -185,7 +201,7 @@ pub fn guard_destination(data_dir: &Path, dst: &Path) -> AppResult<()> {
 /// 导出一次备份包：快照 → 剥索引 → VACUUM → **先关快照连接** → 读字节 → 打 zip。
 ///
 /// 收 `&Connection` 而不开自己的连接：谁持有锁由调用方决定（spec D12）—— 普通导出用
-/// `data_dir` 现开的第二条连接（不占 `AppState.conn`，免得整条读包/校验/写盘期间让界面上每个读写
+/// `data_dir` 现开的第二条连接（不占 `AppState.conn`，免得整条快照/剥索引/写 zip 的期间让界面上每个读写
 /// 命令在那把 std Mutex 上无声排队），导入前的应急包则用 `AppState.conn` 本身（它要抓「即将被覆写
 /// 的那份库」的此刻状态）。占锁真正久的是 **import** 那一长串（读包 + 全库哈希 + 应急包导出 + restore），
 /// 不是 `VACUUM` —— `VACUUM` 只在一次性快照连接上跑（见下方块内），从不碰调用方连接。
@@ -1272,6 +1288,25 @@ mod tests {
         let back_outside = sub.join("..").join("..").join("escape.zip");
         guard_destination(&data, &back_outside)
             .expect("(e) 回溯后逃到数据目录外的相对形状必须放行");
+
+        // (f) 裸路径兜底比对那一支（终审复审带回的 Important）：`canonicalize(父目录)` 失败时
+        // （这里父目录根本不存在），候选串保持 `C:\…` 原形，而 `data_dir` 规范化后是 `\\?\C:\…`，
+        // 只留规范化比对会**永不命中** ⇒ 变成静默放行。第二条裸比对必须把它拒掉。
+        // 注：这一支在真机上多半也会因 `File::create` 自身失败而无害，它钉的是**判据的方向**
+        // （「宁可多拒不漏拒」这句注释的可证伪落点），不是那条窗口本身能不能被用户撞见。
+        let deep_missing = data.join("no-such-dir").join("pkg.zip");
+        assert!(
+            guard_destination(&data, &deep_missing).is_err(),
+            "(f) 父目录规范化失败时，裸路径仍落在数据目录内 ⇒ 必须拒（漏了裸串那一档就红）"
+        );
+
+        // (g) 数据目录本身规范化不了（还没建出来）那一档：三档里 ②/③ 都靠裸串比对兜，
+        // 判据仍然要把「落在这条将来的数据目录里」的落点拒掉 —— 摘掉 None 分支里那句 starts_with 就红。
+        let ghost_dir = dir.path().join("not-created-yet");
+        assert!(
+            guard_destination(&ghost_dir, &ghost_dir.join("ledger.db")).is_err(),
+            "(g) 数据目录规范化不了时，裸串前缀那一档必须仍然拒"
+        );
     }
 
     /// C1 的收口断言：走 `backup_export` 那条「守卫在前、export 在后」的顺序，落在数据目录里的既有文件
