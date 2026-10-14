@@ -160,12 +160,14 @@ pub fn now_utc(conn: &rusqlite::Connection) -> AppResult<String> {
 /// 切进 WAL 并跑 `migrate`，于是包里的 `schema_version` 会被本机版本悄悄改写 —— manifest 那句
 /// 「比本机新就拒」就失去意义（spec §六.4）。
 ///
-/// 本模块现在只剩三条 `dead_code` 豁免（这条 + T5 的 `inspect` + T6 的 `import`），归属都是 T7：`mod backup` 要到三条 IPC 命令
-/// 进 `generate_handler!` 才从 crate 根可达，在那之前 `export`/`inspect`/`import` 是树顶的三个入口。它们下面
-/// 那 11 件（两个条目名常量、`FORMAT_VERSION`、`warn_plaintext_columns`、`FileEntry`/`Counts`/
-/// `Manifest`/`BackupSummary`、`sha256_hex`/`count_one`/`read_counts`/`now_utc`）已被本函数接上，
-/// 而 `dead_code` 不沿调用链往下传（实测：只留这一条时 `cargo clippy --lib -- -D warnings` 仍 exit=0），
-/// 所以 T3 那 11 条逐件豁免可以删净，不必再抄一遍。
+/// `dead_code` 的机制结论（T3–T7 实测出来的，留给下一个读者）：它**不沿调用链下传** ⇒ 未接线的
+/// 入口件才是豁免的粒度，一条入口件 = 一条豁免，而不是它调用的每件各一条。它下面那 11 件
+/// （两个条目名常量、`FORMAT_VERSION`、`warn_plaintext_columns`、`FileEntry`/`Counts`/`Manifest`/
+/// `BackupSummary`、`sha256_hex`/`count_one`/`read_counts`/`now_utc`）在 `export` 接线后一条豁免都不
+/// 需要（T3 期间逐件挂的那 11 条即因此删净，实测：只留入口件豁免时 `cargo clippy --lib -- -D warnings`
+/// 仍 exit=0）。所以中间态只给未接线的**入口件**挂豁免就够。
+/// 本模块那三条（这条 + T5 的 `inspect` + T6 的 `import`）已随 T7 把三条 IPC 挂上 `generate_handler!`
+/// （`lib.rs:751-753`）删净；全仓现在只剩 `db.rs:30` 那一条既有豁免（结构门读数：`dead_code` 豁免 = 1）。
 pub fn export(conn: &rusqlite::Connection, dst: &Path) -> AppResult<BackupSummary> {
     let scratch = crate::scratch::Scratch::new("pfm-m8", "export")?;
     let snap = scratch.dir().join(DB_ENTRY);
@@ -357,7 +359,7 @@ fn read_package(src: &Path) -> AppResult<(Manifest, Vec<u8>)> {
 }
 
 /// 只读校验：不碰数据库、不落任何盘（临时文件只在 import 那条路上写，spec D3）。
-/// 豁免归属 T7（与 `export` 同批删）：`mod backup` 三条 IPC 命令进 `generate_handler!` 才可达。
+/// （曾挂在这条上的 `dead_code` 豁免随 T7 接上 IPC 已删，机制见 `export` 的 doc。）
 pub fn inspect(src: &Path) -> AppResult<PackageInfo> {
     let (m, db_bytes) = read_package(src)?;
     Ok(PackageInfo {
@@ -391,8 +393,8 @@ fn zip_read_entry(z: &mut zip::ZipArchive<std::fs::File>, name: &str) -> AppResu
 ///
 /// 除 `stamp` 外还要带一个**进程内唯一后缀**（T7 Step 0，控制方把 T6 评审 Minor 升级为必修）：
 /// `stamp` 只有秒级粒度，同秒连导两次时第二次会把第一次的撤销键 `File::create` 静默 truncate 掉 ——
-/// 那正好破掉 D1「覆盖永远可撤销」。唯一后缀复用 `Scratch` 那套（`std::process::id()` + epoch 纳秒，
-/// 见 `scratch.rs`），不新造随机源。
+/// 那正好破掉 D1「覆盖永远可撤销」。唯一后缀复用 `Scratch` 那套的**三段**写法（`std::process::id()`
+/// + 进程内自增 seq + epoch 纳秒，见 `scratch.rs:20-28`），不新造随机源。
 pub fn pre_restore_name(stamp: &str, unique: &str) -> String {
     format!("pre-restore-{stamp}-{unique}.zip")
 }
@@ -420,8 +422,8 @@ fn stamp(conn: &rusqlite::Connection) -> AppResult<String> {
 /// 应急包是唯一的撤销键，⑥⑦⑧ 每条错误的 hint 都必须把它的**完整路径**念出来（spec §三 表）。
 /// 本机无法廉价构造「灌到一半」的现场，那一档登记为有名缺口（spec §九），这里只保证失败点前移。
 ///
-/// 豁免归属 T7（与 `export`/`inspect` 同批删）：`mod backup` 三条 IPC 命令进 `generate_handler!`
-/// 才可达；被本函数使用的 `stamp`/`pre_restore_name` 不各自挂豁免（`dead_code` 不沿调用链下传，T4 实测）。
+/// （曾挂在这条上的 `dead_code` 豁免随 T7 接上 IPC 已删；被本函数使用的 `stamp`/`pre_restore_name`
+/// 本来就不需要各自挂豁免，理由见 `export` 的 doc 里那条「`dead_code` 不沿调用链下传」。）
 pub fn import(
     conn: &mut rusqlite::Connection,
     src: &Path,
@@ -432,12 +434,16 @@ pub fn import(
     // ⑤ 应急包：用**即将被覆写的那条连接**导出（D12：它抓的必须正是这份状态 —— 覆写前的现数）。
     let when = stamp(conn)?;
     // 进程内唯一后缀：`stamp` 只到秒，同秒连导两次会把前一份撤销键静默 truncate（T7 Step 0 / D1）。
-    // 写法复用 `scratch.rs`（pid + epoch 纳秒），不新造随机源。
+    // **三段**照 `scratch.rs:20-28`（pid + 进程内自增 seq + epoch 纳秒），不新造随机源。
+    // seq 不是可选的装饰：`duration_since` 在系统时钟早于 epoch 时返 Err、纳秒只能退化成同一个常量，
+    // 光靠 pid + 纳秒那两次就会拿到一模一样的串 —— 自增的 seq 才是「兜底也不可碰撞」那一段。
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    let unique = format!("{}-{}", std::process::id(), nanos);
+    let unique = format!("{}-{}-{}", std::process::id(), seq, nanos);
     let pre = data_dir.join(pre_restore_name(&when, &unique));
     let summary = export(conn, &pre)?;
     let counts_before = summary.counts;
@@ -1095,8 +1101,10 @@ mod tests {
     }
 
     /// T7 Step 0 收尾：应急包名带进程内唯一后缀 ⇒ 同一份数据目录上连导两次，两次的撤销键都必须在。
-    /// 断两个 `pre_restore_path` **不相等**只是第一半；更要紧的是**两个文件都还在** —— 只断路径字符串
-    /// 不同证不到「第一次那份没被第二次静默 truncate 掉」（那正是本条要防的破 D1 事故）。
+    /// 三半判据：① 剥掉 `pre-restore-<stamp>` 前缀后**唯一尾段非空且两次不同**（这条与「两次是否
+    /// 跨过秒界」无关，所以唯一后缀不会因 `stamp` 自己把名字分开而空过）② 两个 `pre_restore_path`
+    /// 不相等 ③ **两个文件都还在** —— 只断路径字符串不同证不到「第一次那份没被第二次静默 truncate 掉」
+    /// （那正是本条要防的破 D1 事故）。
     #[test]
     fn two_imports_in_a_row_keep_both_undo_copies() {
         let dir = tempfile::tempdir().unwrap();
@@ -1107,9 +1115,36 @@ mod tests {
         let pkg = dir.path().join("p2x.zip");
         export(&live, &pkg).unwrap();
 
-        // 连跑两次 import：两次大概率落在同一秒内，stamp 相同 ⇒ 名字只能靠唯一后缀分开。
+        // 连跑两次 import：两次**可能**落在同一秒内，但也可能刚好跨过秒界 —— 那样光 `stamp`
+        // 就把名字分开了，下面的 `assert_ne!` 会空过、唯一后缀那一段等于没被检验。
         let one = import(&mut live, &pkg, &data).unwrap();
         let two = import(&mut live, &pkg, &data).unwrap();
+        // 所以先做一条与秒界无关的判据：把名字里 `pre-restore-<stamp>` 这段前缀剥掉，剩下的
+        // 唯一尾段必须**非空**且**两次互不相同** —— 即「即使 `stamp` 完全相同，名字也必然不同」。
+        let unique_tail = |p: &str| -> String {
+            let file = std::path::Path::new(p)
+                .file_name()
+                .expect("应急包路径有文件名段")
+                .to_string_lossy()
+                .into_owned();
+            let rest = file
+                .strip_prefix("pre-restore-")
+                .expect("应急包名以 pre-restore- 起头");
+            // `stamp` 恒以 UTC 的 `Z` 收尾（strftime 里的字面量），`Z-` 之后那一段才是唯一后缀。
+            let (s, tail) = rest
+                .split_once("Z-")
+                .expect("stamp 的 Z 收尾与唯一后缀之间有 - 分隔");
+            assert!(!s.is_empty(), "stamp 段不该为空：{file}");
+            assert!(s.contains('T'), "stamp 段该是 `%Y-%m-%dT%H-%M-%SZ` 那一条：{file}");
+            let tail = tail.strip_suffix(".zip").expect("应急包名以 .zip 结尾");
+            assert!(!tail.is_empty(), "剥掉 pre-restore-<stamp> 后必须有非空唯一尾段：{file}");
+            tail.to_string()
+        };
+        assert_ne!(
+            unique_tail(&one.pre_restore_path),
+            unique_tail(&two.pre_restore_path),
+            "剥掉 stamp 前缀后两次连导的唯一尾段仍必须不同，否则同秒连导两次时第二次会把第一次那份撤销键静默覆掉"
+        );
         assert_ne!(
             one.pre_restore_path, two.pre_restore_path,
             "同秒连导两次的应急包名必须不同，否则第二次会把第一次那份静默覆掉"
