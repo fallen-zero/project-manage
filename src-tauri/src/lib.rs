@@ -602,6 +602,53 @@ fn libreoffice_install() -> AppResult<legacy_office::InstallOutcome> {
     legacy_office::start_install()
 }
 
+/// 索引轮在跑就不给导（两个写者争同一库的后果见 `backup_import_refuses_while_a_pass_is_running` 的注释：
+/// `restore` 灌页时索引 worker 正持着**第二条连接**写 `index_docs`，会出现「灌到一半被写回」，比报错难查）。
+/// 抽成独立可测函数：命令层用它，测试直接喂 `IndexShared` 置位后的旗就能验，不必起真机。
+fn not_indexing(shared: &index_job::IndexShared) -> AppResult<()> {
+    if shared.running.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(AppError::new(
+            "backup_busy",
+            "索引轮正在进行，此刻导入会两个写者争同一个库",
+            Some("先等这一轮结束，或在索引页点「取消」，再导入"),
+        ));
+    }
+    Ok(())
+}
+
+/// 导出备份包（M8 D1–D4）。**用现开的第二条连接**（D12）：`VACUUM` 可能是本轮最长的一步，
+/// 占着 `state.conn` 会让界面上每个读写命令在那把 std Mutex 上无声排队（不报错、纯等），
+/// 而仓库本就有第二条连接的生产先例（`index_job.rs:468` worker、`watch.rs:70` watcher）。
+/// 只读快照 ⇒ 与索引轮并发无害（WAL 读不阻写）。
+#[tauri::command(async)]
+fn backup_export(state: State<'_, AppState>, path: String) -> AppResult<backup::BackupSummary> {
+    let conn = db::open(&state.data_dir)?;
+    backup::export(&conn, std::path::Path::new(&path))
+}
+
+/// 覆盖前「看得见包里是什么」（D5 花第三条命令买的这一格）。不碰任何连接、不落任何盘。
+#[tauri::command(async)]
+fn backup_inspect(path: String) -> AppResult<backup::PackageInfo> {
+    backup::inspect(std::path::Path::new(&path))
+}
+
+/// 导入 = 整库覆写当前数据。同一把写锁内按 D13 顺序做完（闸门 → 应急包 → restore → migrate → WAL 现读），
+/// 于是「应急包早于覆写」是**结构**保证的，不是靠调用顺序碰运气。
+/// 收尾无条件清 `AppState.mk`：包里那份 `vault_meta` 的包裹可能出自换主密码之前，
+/// 用旧密钥去解新库只会当场报错 —— 让它明着要一次解锁，比悄悄错好（spec §三 密钥侧）。
+/// 本机无独占断言可钉「界面回未解锁态」（真机 §九.3 才看得到），故不为它编假断言。
+#[tauri::command(async)]
+fn backup_import(state: State<'_, AppState>, path: String) -> AppResult<backup::ImportOutcome> {
+    not_indexing(&state.index)?;
+    let mut conn = db(&state)?;
+    let out = backup::import(&mut conn, std::path::Path::new(&path), &state.data_dir)?;
+    drop(conn);
+    if let Ok(mut g) = state.mk.lock() {
+        *g = None;
+    }
+    Ok(out)
+}
+
 /// 建库并在**指定目录**打开（M5.5 D8）。把「开库 + WAL 读回」从 setup 里拆出来，是为了能喂 tempdir
 /// 单测它——`index_job::start` 要 AppHandle、本批不开 tauri::test，所以可测切分只能到这一步；
 /// 取默认数据目录的路径与起轮仍留在 setup。`db::open` 内部已做 `create_dir_all` 与 WAL 读回断言
@@ -700,7 +747,10 @@ pub fn run() {
             search_docs,
             search_all,
             doc_preview,
-            libreoffice_install
+            libreoffice_install,
+            backup_export,
+            backup_inspect,
+            backup_import
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
@@ -731,5 +781,45 @@ mod tests {
     #[test]
     fn libreoffice_install_command_takes_no_arguments() {
         const _: fn() -> crate::error::AppResult<crate::legacy_office::InstallOutcome> = libreoffice_install;
+    }
+
+    /// D13 的闸门单独抽成可测函数：`restore` 灌整库的时候，索引 worker 正持着**第二条连接**
+    /// （`index_job.rs:468`）写 `index_docs` —— 两个写者争同一库会出现「灌到一半被写回」，
+    /// 那比报错难查得多。所以 running 为真时必须当场拒，且错误码固定。
+    ///
+    /// 置位方式（控制方裁定 3）：`IndexShared.running` 是 pub 原子量，测试里直接
+    /// `shared.running.store(true, SeqCst)` 用的就是 `start` 里 swap 的同一把旗；**不**为此新增
+    /// `IndexShared::hold_for_test` 之类的 pub 函数（那等于给生产 API 开一个没人用的入口）。
+    #[test]
+    fn backup_import_refuses_while_a_pass_is_running() {
+        use std::sync::atomic::Ordering;
+        let shared = index_job::IndexShared::new();
+        assert!(not_indexing(&shared).is_ok(), "空闲时必须放行，否则上一条测试是恒红摆设");
+        shared.running.store(true, Ordering::SeqCst);
+        let e = not_indexing(&shared).expect_err("running 时必须红");
+        assert_eq!(e.code, "backup_busy");
+        // 简报原行 `e.hint.is_some_and(|h| ..)` 与同一断言消息里的 `e.hint` 撞 E0382（部分移动后复用），
+        // 与 T5 同形制改成 match：判据不变，回显面也不含包内字段值（红线④）。
+        match &e.hint {
+            Some(h) => assert!(h.contains("取消"), "hint 要指路到取消按钮：{h}"),
+            None => panic!("hint 要指路到取消按钮，实得 None"),
+        }
+    }
+
+    /// 三条命令的入参形状：**只有一个 `path: String`**，第二个参数都不许有。
+    /// M7 给 `libreoffice_install` 钉的是同一条守护（那格守的是「不给前端任意命令执行」），
+    /// 本轮守的是同一件事的另一面：命令只写用户当场选中的那一个路径（红线⑤）。
+    /// 给任何一条命令加参数（哪怕是「要不要剥索引」这种看着无害的开关）都会让这一行编不过。
+    #[test]
+    fn backup_commands_take_exactly_one_path_argument() {
+        const _: fn(String) -> crate::error::AppResult<backup::PackageInfo> = backup_inspect;
+        const _: for<'a> fn(
+            tauri::State<'a, AppState>,
+            String,
+        ) -> crate::error::AppResult<backup::BackupSummary> = backup_export;
+        const _: for<'a> fn(
+            tauri::State<'a, AppState>,
+            String,
+        ) -> crate::error::AppResult<backup::ImportOutcome> = backup_import;
     }
 }

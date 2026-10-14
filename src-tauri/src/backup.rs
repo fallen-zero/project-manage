@@ -166,7 +166,6 @@ pub fn now_utc(conn: &rusqlite::Connection) -> AppResult<String> {
 /// `Manifest`/`BackupSummary`、`sha256_hex`/`count_one`/`read_counts`/`now_utc`）已被本函数接上，
 /// 而 `dead_code` 不沿调用链往下传（实测：只留这一条时 `cargo clippy --lib -- -D warnings` 仍 exit=0），
 /// 所以 T3 那 11 条逐件豁免可以删净，不必再抄一遍。
-#[allow(dead_code)] // T7 挂 IPC 后删
 pub fn export(conn: &rusqlite::Connection, dst: &Path) -> AppResult<BackupSummary> {
     let scratch = crate::scratch::Scratch::new("pfm-m8", "export")?;
     let snap = scratch.dir().join(DB_ENTRY);
@@ -359,7 +358,6 @@ fn read_package(src: &Path) -> AppResult<(Manifest, Vec<u8>)> {
 
 /// 只读校验：不碰数据库、不落任何盘（临时文件只在 import 那条路上写，spec D3）。
 /// 豁免归属 T7（与 `export` 同批删）：`mod backup` 三条 IPC 命令进 `generate_handler!` 才可达。
-#[allow(dead_code)] // T7 挂 IPC 后删
 pub fn inspect(src: &Path) -> AppResult<PackageInfo> {
     let (m, db_bytes) = read_package(src)?;
     Ok(PackageInfo {
@@ -390,8 +388,13 @@ fn zip_read_entry(z: &mut zip::ZipArchive<std::fs::File>, name: &str) -> AppResu
 
 /// 应急包的文件名。**冒号换成 `-`**：`:` 在 Windows 文件名里非法（M7 的 profile URL `%20` 是同一类
 /// 「路径形状要到本机量」的教训，spec §三.17）。
-pub fn pre_restore_name(stamp: &str) -> String {
-    format!("pre-restore-{stamp}.zip")
+///
+/// 除 `stamp` 外还要带一个**进程内唯一后缀**（T7 Step 0，控制方把 T6 评审 Minor 升级为必修）：
+/// `stamp` 只有秒级粒度，同秒连导两次时第二次会把第一次的撤销键 `File::create` 静默 truncate 掉 ——
+/// 那正好破掉 D1「覆盖永远可撤销」。唯一后缀复用 `Scratch` 那套（`std::process::id()` + epoch 纳秒，
+/// 见 `scratch.rs`），不新造随机源。
+pub fn pre_restore_name(stamp: &str, unique: &str) -> String {
+    format!("pre-restore-{stamp}-{unique}.zip")
 }
 
 /// 本次覆写的时刻（不是包的导出时刻！manifest 的 `created_at` 走的是 `now_utc`，那个带冒号的形态
@@ -419,7 +422,6 @@ fn stamp(conn: &rusqlite::Connection) -> AppResult<String> {
 ///
 /// 豁免归属 T7（与 `export`/`inspect` 同批删）：`mod backup` 三条 IPC 命令进 `generate_handler!`
 /// 才可达；被本函数使用的 `stamp`/`pre_restore_name` 不各自挂豁免（`dead_code` 不沿调用链下传，T4 实测）。
-#[allow(dead_code)] // T7 挂 IPC 后删
 pub fn import(
     conn: &mut rusqlite::Connection,
     src: &Path,
@@ -429,7 +431,14 @@ pub fn import(
     let (manifest, db_bytes) = read_package(src)?;
     // ⑤ 应急包：用**即将被覆写的那条连接**导出（D12：它抓的必须正是这份状态 —— 覆写前的现数）。
     let when = stamp(conn)?;
-    let pre = data_dir.join(pre_restore_name(&when));
+    // 进程内唯一后缀：`stamp` 只到秒，同秒连导两次会把前一份撤销键静默 truncate（T7 Step 0 / D1）。
+    // 写法复用 `scratch.rs`（pid + epoch 纳秒），不新造随机源。
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let unique = format!("{}-{}", std::process::id(), nanos);
+    let pre = data_dir.join(pre_restore_name(&when, &unique));
     let summary = export(conn, &pre)?;
     let counts_before = summary.counts;
     // 撤销键：⑥⑦⑧ 三支 hint 共用的那句，必须带应急包的完整路径（裁定 2）。
@@ -1073,13 +1082,47 @@ mod tests {
     }
 
     /// 应急包的名字不许带冒号（Windows 文件名里 `:` 非法，M7 的 `%20` 教训同类：路径形状是实测项）。
+    /// T7 Step 0：名字多了进程内唯一后缀段（两参形状），仍必须不含 `:` 与其余非法字符。
     #[test]
     fn pre_restore_name_has_no_illegal_characters() {
-        let n = pre_restore_name("2026-10-13T21-30-12Z");
-        assert_eq!(n, "pre-restore-2026-10-13T21-30-12Z.zip");
+        let n = pre_restore_name("2026-10-13T21-30-12Z", "4242-1728000000123456789");
+        assert_eq!(n, "pre-restore-2026-10-13T21-30-12Z-4242-1728000000123456789.zip");
         for bad in ['"', '<', '>', '|', '?', '*'] {
             assert!(!n.contains(bad), "包名里不能有 {bad}：{n}");
         }
+        assert!(!n.contains(':'), "包名里不能有冒号：{n}");
         assert!(n.starts_with("pre-restore-") && n.ends_with(".zip"));
+    }
+
+    /// T7 Step 0 收尾：应急包名带进程内唯一后缀 ⇒ 同一份数据目录上连导两次，两次的撤销键都必须在。
+    /// 断两个 `pre_restore_path` **不相等**只是第一半；更要紧的是**两个文件都还在** —— 只断路径字符串
+    /// 不同证不到「第一次那份没被第二次静默 truncate 掉」（那正是本条要防的破 D1 事故）。
+    #[test]
+    fn two_imports_in_a_row_keep_both_undo_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data-2x");
+        std::fs::create_dir_all(&data).unwrap();
+        let mut live = crate::db::open(&data).unwrap();
+        seed_ledger(&live, 2);
+        let pkg = dir.path().join("p2x.zip");
+        export(&live, &pkg).unwrap();
+
+        // 连跑两次 import：两次大概率落在同一秒内，stamp 相同 ⇒ 名字只能靠唯一后缀分开。
+        let one = import(&mut live, &pkg, &data).unwrap();
+        let two = import(&mut live, &pkg, &data).unwrap();
+        assert_ne!(
+            one.pre_restore_path, two.pre_restore_path,
+            "同秒连导两次的应急包名必须不同，否则第二次会把第一次那份静默覆掉"
+        );
+        assert!(
+            std::path::Path::new(&one.pre_restore_path).exists(),
+            "第一次那份撤销键必须还在（没被第二次 truncate）：{}",
+            one.pre_restore_path
+        );
+        assert!(
+            std::path::Path::new(&two.pre_restore_path).exists(),
+            "第二次那份撤销键也要在：{}",
+            two.pre_restore_path
+        );
     }
 }
