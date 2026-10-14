@@ -616,12 +616,16 @@ fn not_indexing(shared: &index_job::IndexShared) -> AppResult<()> {
     Ok(())
 }
 
-/// 导出备份包（M8 D1–D4）。**用现开的第二条连接**（D12）：`VACUUM` 可能是本轮最长的一步，
-/// 占着 `state.conn` 会让界面上每个读写命令在那把 std Mutex 上无声排队（不报错、纯等），
-/// 而仓库本就有第二条连接的生产先例（`index_job.rs:468` worker、`watch.rs:70` watcher）。
-/// 只读快照 ⇒ 与索引轮并发无害（WAL 读不阻写）。
+/// 导出备份包（M8 D1–D4）。**用现开的第二条连接**（D12）：真正会占住 `state.conn`、让界面上每个读写
+/// 命令在那把 std Mutex 上无声排队（不报错、纯等）的是 **import** 那一长串（读包 + 全库哈希 + 应急包导出 +
+/// restore），不是 `VACUUM` —— `VACUUM` 只在一次性快照连接上跑（见 `backup::export`），从不碰调用方连接。
+/// 这里开第二条连接的用意是：整条导出（快照 → 剥索引 → VACUUM → 读字节 → 打 zip 文件 I/O）压根不占用户锁。
+/// 仓库本就有第二条连接的生产先例（`index_job.rs:468` worker、`watch.rs:70` watcher）。只读快照 ⇒ 与索引轮并发无害。
 #[tauri::command(async)]
 fn backup_export(state: State<'_, AppState>, path: String) -> AppResult<backup::BackupSummary> {
+    // 落点守卫必须早于任何文件写：`zip_out` 的 `File::create` 会 CREATE_ALWAYS 截断，把落点指进
+    // 数据目录（活库/应急包所在）等于毁掉用户唯一的持久库；判据与理由见 `backup::guard_destination`。
+    backup::guard_destination(&state.data_dir, std::path::Path::new(&path))?;
     let conn = db::open(&state.data_dir)?;
     backup::export(&conn, std::path::Path::new(&path))
 }
@@ -632,21 +636,51 @@ fn backup_inspect(path: String) -> AppResult<backup::PackageInfo> {
     backup::inspect(std::path::Path::new(&path))
 }
 
-/// 导入 = 整库覆写当前数据。同一把写锁内按 D13 顺序做完（闸门 → 应急包 → restore → migrate → WAL 现读），
-/// 于是「应急包早于覆写」是**结构**保证的，不是靠调用顺序碰运气。
-/// 收尾无条件清 `AppState.mk`：包里那份 `vault_meta` 的包裹可能出自换主密码之前，
-/// 用旧密钥去解新库只会当场报错 —— 让它明着要一次解锁，比悄悄错好（spec §三 密钥侧）。
-/// 本机无独占断言可钉「界面回未解锁态」（真机 §九.3 才看得到），故不为它编假断言。
+/// 判定导入失败后要不要清 `AppState.mk`：只有**库已被覆写之后**才可能报的三支码才清（此时 `mk` 里
+/// 那把旧密钥对包里的 `vault_meta` 已无意义，甚至可能出自换主密码之前）。`backup_restore_failed` 一并
+/// 算上 —— 控制方裁定：`restore` 中断大概率被 SQLite 自己的 `backup_finish` 回滚，但本机造不出这一支来
+/// 证实，而重锁是安全方向（三支 hint 都已叫用户重导应急包）。其余码都在动库**之前**就失败（闸门、验包、
+/// 写应急包），清 mk 只是白白锁一遍用户，故一律 false。抽成纯函数，好把「判真/判假」两个方向都单测到位。
+fn should_clear_mk_after_import(code: &str) -> bool {
+    matches!(code, "backup_migrate_failed" | "backup_wal_lost" | "backup_restore_failed")
+}
+
+/// 导入 = 整库覆写当前数据。D13 顺序（验包四道 → 应急包 → restore → migrate → WAL 现读）里，
+/// **结构**保证的是「应急包早于覆写」：应急包与 restore 同处 `backup::import` 内、且 restore 只在
+/// 四道验包与应急包写出都成功后才发起 —— 前三道任一失败库一字未动、也不落应急包（见 backup.rs import 注）。
+///
+/// `not_indexing` 这道闸门则**只是大幅收窄、不是互斥**：它在 `db(&state)?` 取写锁**之前**就判过了，
+/// 且 `index_job::start` 从不碰 `state.conn`（worker 在 `index_job.rs:468` 自开一条连接），所以把闸门
+/// 挪进锁里也关不掉这个窗口（spec D13 / HANDOFF 坑 7 的既有裁定）。后果有界：竞态只可能把索引行重新
+/// 写回，台账/`vault_meta`/`settings` 三张表 worker 从不写，下一轮索引自愈。
+///
+/// 收尾的 `AppState.mk`：成功路径无条件清；失败路径按 `should_clear_mk_after_import` 只清覆写之后的那几支。
+/// 包里那份 `vault_meta` 的包裹可能出自换主密码之前，用旧密钥解新库只会当场报错 —— 让它明着要一次解锁，
+/// 比悄悄错好（spec §三 密钥侧）。本机无独占断言可钉「界面回未解锁态」（真机 §九.3 才看得到），故不为它编假断言。
 #[tauri::command(async)]
 fn backup_import(state: State<'_, AppState>, path: String) -> AppResult<backup::ImportOutcome> {
     not_indexing(&state.index)?;
     let mut conn = db(&state)?;
-    let out = backup::import(&mut conn, std::path::Path::new(&path), &state.data_dir)?;
-    drop(conn);
-    if let Ok(mut g) = state.mk.lock() {
-        *g = None;
+    match backup::import(&mut conn, std::path::Path::new(&path), &state.data_dir) {
+        Ok(out) => {
+            drop(conn);
+            if let Ok(mut g) = state.mk.lock() {
+                *g = None;
+            }
+            Ok(out)
+        }
+        Err(e) => {
+            // 库已被覆写后才失败的臂（migrate/wal_lost/restore_failed）：mk 里那把旧钥对新库已无意义，
+            // 不清就是让界面继续报 unlocked:true（vault.rs:357-361 那句 field_decrypt_failed 会替它喊冤）。
+            // 其余臂库根本未动，原样返回、绝不清（白锁用户）。
+            if should_clear_mk_after_import(e.code) {
+                if let Ok(mut g) = state.mk.lock() {
+                    *g = None;
+                }
+            }
+            Err(e)
+        }
     }
-    Ok(out)
 }
 
 /// 建库并在**指定目录**打开（M5.5 D8）。把「开库 + WAL 读回」从 setup 里拆出来，是为了能喂 tempdir
@@ -821,5 +855,36 @@ mod tests {
             tauri::State<'a, AppState>,
             String,
         ) -> crate::error::AppResult<backup::ImportOutcome> = backup_import;
+    }
+
+    /// I1：`should_clear_mk_after_import` 的判真/判假两个方向都要钉死 —— 覆写之后的三支必须清、
+    /// 动库之前的各支必须不清。用 `assert!`/`assert!(!)` 而非 `assert_eq!(.., true/false)`：
+    /// 后者会撞 `clippy::bool_assert_comparison`（`-D warnings` 下打成红），前者同样是逐支精确判值。
+    #[test]
+    fn only_post_overwrite_import_failures_clear_the_master_key() {
+        // 覆写之后才可能报的三支：mk 里旧钥对新库已无意义，必须清（否则界面继续报 unlocked:true）。
+        for code in ["backup_migrate_failed", "backup_wal_lost", "backup_restore_failed"] {
+            assert!(should_clear_mk_after_import(code), "{code} 在库已覆写之后，判 false 就漏清、界面撒谎");
+        }
+        // 动库之前就失败的臂：库一字未动，清 mk 只是白白锁一遍用户，必须不清。
+        for code in [
+            "backup_busy",
+            "backup_schema_too_new",
+            "backup_hash_mismatch",
+            "backup_package_invalid",
+            "fs_failed",
+        ] {
+            assert!(!should_clear_mk_after_import(code), "{code} 发生在覆写之前，判 true 就是无谓锁定用户");
+        }
+        // wrong-value 型钉法（让 matches! 那支真的能变红）：把 restore_failed 从三支里漏掉 → 第一条红；
+        // 把 busy 误加进三支 → 第二条红。
+        assert!(
+            should_clear_mk_after_import("backup_restore_failed"),
+            "restore_failed 若从 matches! 那支漏掉，本行必须红（裁定：重锁是安全方向）"
+        );
+        assert!(
+            !should_clear_mk_after_import("backup_busy"),
+            "busy 若在 matches! 里被误加，本行必须红（闸门失败时库根本未动）"
+        );
     }
 }

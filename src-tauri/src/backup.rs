@@ -150,11 +150,45 @@ pub fn now_utc(conn: &rusqlite::Connection) -> AppResult<String> {
         })
 }
 
+/// 挡住「把导出落点指进应用自己的数据目录」这类自毁操作。
+///
+/// 判据不是「只有 `ledger.db` 危险」，而是**落在数据目录里的任何位置都拒**：那目录里除活库外还有
+/// `pre-restore-*.zip`（那是某次导入的撤销键，被覆掉等于毁掉别人的回滚），而且用户丢进去的包与应用
+/// 自己写出的包在形状上无法区分。用户面入口（`backup_export`）才守这一道 —— `import` 内部写应急包
+/// 到数据目录是合法路径（见 `import`，走的是同一条 `export`），不能套本守卫，否则撤销键就写不出去。
+///
+/// `zip_out` 用的是 `std::fs::File::create`（CREATE_ALWAYS + 截断）：Windows 共享规则**保护不了**
+/// 正被 SQLite 开着的 `ledger.db`，实测把落点指向活库会让文件长度当场归零、随即被 zip 覆掉，
+/// 用户唯一的持久库就此没了。所以必须在真正打开文件之前把这种落点拒掉。
+pub fn guard_destination(data_dir: &Path, dst: &Path) -> AppResult<()> {
+    // 规范化的是 dst 的**父目录**而不是文件本身：一次全新导出时目标文件还不存在，
+    // canonicalize(文件) 会 ENOENT；父目录必然存在，规范化又顺带吃掉 `..\`/`.` 回溯段，
+    // 让「指向数据目录内的相对/回溯形状」与绝对路径走同一判据。父目录也规范化不了
+    // （路径不存在等极端情形）就退回原始 dst 做前缀比对 —— 宁可多拒不漏拒。
+    let parent = dst.parent().unwrap_or(dst);
+    let resolved_parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    let resolved = match dst.file_name() {
+        Some(name) => resolved_parent.join(name),
+        None => resolved_parent,
+    };
+    let resolved_dir = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    if resolved.starts_with(&resolved_dir) {
+        return Err(AppError::new(
+            "backup_destination_unsafe",
+            &format!("导出目标 {} 落在应用的数据目录里，会被拒掉以免覆掉活库或应急包", dst.display()),
+            Some("请把备份包保存到数据目录以外的位置（数据目录里是活库和撤销用的应急包，覆盖会毁掉它们）"),
+        ));
+    }
+    Ok(())
+}
+
 /// 导出一次备份包：快照 → 剥索引 → VACUUM → **先关快照连接** → 读字节 → 打 zip。
 ///
 /// 收 `&Connection` 而不开自己的连接：谁持有锁由调用方决定（spec D12）—— 普通导出用
-/// `data_dir` 现开的第二条连接（不占 `AppState.conn`，免得 VACUUM 期间界面每个写命令都在锁上排队），
-/// 导入前的应急包则用 `AppState.conn` 本身（它要抓「即将被覆写的那份库」的此刻状态）。
+/// `data_dir` 现开的第二条连接（不占 `AppState.conn`，免得整条读包/校验/写盘期间让界面上每个读写
+/// 命令在那把 std Mutex 上无声排队），导入前的应急包则用 `AppState.conn` 本身（它要抓「即将被覆写
+/// 的那份库」的此刻状态）。占锁真正久的是 **import** 那一长串（读包 + 全库哈希 + 应急包导出 + restore），
+/// 不是 `VACUUM` —— `VACUUM` 只在一次性快照连接上跑（见下方块内），从不碰调用方连接。
 ///
 /// 快照那份文件**必须走 `rusqlite::Connection::open`，不能走 `db::open`**：后者会把快照也
 /// 切进 WAL 并跑 `migrate`，于是包里的 `schema_version` 会被本机版本悄悄改写 —— manifest 那句
@@ -180,7 +214,8 @@ pub fn export(conn: &rusqlite::Connection, dst: &Path) -> AppResult<BackupSummar
     })?;
 
     // 剥索引 + VACUUM + 现数 counts 全在这条短连接里做完，然后 drop ——
-    // 最后关闭时 SQLite 才把 WAL 收干净（`db.rs:479` 注释记的就是这条机制），
+    // 最后关闭时 SQLite 才把 WAL 收干净（`db.rs` 的 `side_file_unopenable_pins_the_readback_invariant`
+    // 注释记的就是这条机制；本仓行号会漂，故按名引、不按号引），
     // 不关就打包会拿到一个引用不存在 -wal 的 db（技术方案 line 175 明令避免的那件事）。
     let (db_bytes, counts, schema_version, created_at) = {
         // 快照走 `rusqlite::Connection::open`，**不走 `db::open`**（后者会切 WAL 并跑 migrate）。
@@ -202,7 +237,8 @@ pub fn export(conn: &rusqlite::Connection, dst: &Path) -> AppResult<BackupSummar
         let counts = read_counts(&s)?;
         let schema_version = schema_version_of(&s)?;
         let created_at = now_utc(&s)?;
-        // 必须在这里 drop：最后一个连接关闭时 SQLite 才把 WAL 收干净（`db.rs:479` 注释记的机制），
+        // 必须在这里 drop：最后一个连接关闭时 SQLite 才把 WAL 收干净（`db.rs` 的
+        // `side_file_unopenable_pins_the_readback_invariant` 注释记的机制；行号会漂故按名引），
         // 不关就 `fs::read` 打包会拿到一个引用不存在 -wal 的 db（技术方案 line 175 明令避免的事）。
         drop(s);
         (std::fs::read(&snap).map_err(|e| AppError::io(&snap, &e))?, counts, schema_version, created_at)
@@ -1185,5 +1221,86 @@ mod tests {
             "第二次那份撤销键也要在：{}",
             two.pre_restore_path
         );
+    }
+
+    // ---- 终审 C1：guard_destination（导出落点绝不许落在应用自己的数据目录里）----
+
+    /// (a)~(e) 五档落点判据。全部走 `tempfile::tempdir()`，绝不碰 `%APPDATA%\dev.zero.pfm\`（红线②）。
+    #[test]
+    fn guard_refuses_every_landing_spot_inside_the_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let sub = data.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // (a) 活库本体：backup_export 若把落点指这里，`File::create` 会先把用户唯一的持久库截断。
+        let ledger = data.join("ledger.db");
+        let e = guard_destination(&data, &ledger).expect_err("(a) 数据目录里的 ledger.db 必须被拒");
+        assert_eq!(e.code, "backup_destination_unsafe");
+        // 消息要点名 offending path（只念路径，不回显任何文件内容 —— 红线④）。
+        assert!(e.message.contains("ledger.db"), "消息必须念出被拒的落点：{}", e.message);
+        match &e.hint {
+            Some(h) => assert!(h.contains("数据目录以外"), "hint 要指路到数据目录之外：{h}"),
+            None => panic!("hint 必须告诉用户换到数据目录以外的位置，实得 None"),
+        }
+
+        // (b) 数据目录里一个还不存在的新包：形状与应用自写的 `pre-restore-*.zip` 无从区分，且可能覆掉别人的撤销键。
+        assert!(
+            guard_destination(&data, &data.join("pkg.zip")).is_err(),
+            "(b) 数据目录内的新包必须拒（撤销键覆写类，不只是 ledger.db）"
+        );
+
+        // (c) 数据目录的**子目录**里：同样在校内，一样拒。
+        assert!(
+            guard_destination(&data, &sub.join("pkg.zip")).is_err(),
+            "(c) 数据目录子目录内的落点必须拒"
+        );
+
+        // (d) 独立临时目录：正常导出落点，必须放行。
+        let other = tempfile::tempdir().unwrap();
+        guard_destination(&data, &other.path().join("out.zip"))
+            .expect("(d) 数据目录之外的落点必须放行");
+
+        // (e) `..` 回溯形状：规范化吃回溯段后，落进数据目录 → 拒，逃到数据目录外 → 放行。
+        // 用真实存在的 `sub` 当锚点：`sub\..\ledger.db` 规范化后正是 `data\ledger.db`。
+        let back_inside = sub.join("..").join("ledger.db");
+        assert!(
+            guard_destination(&data, &back_inside).is_err(),
+            "(e) 回溯后落进数据目录的相对形状必须拒"
+        );
+        let back_outside = sub.join("..").join("..").join("escape.zip");
+        guard_destination(&data, &back_outside)
+            .expect("(e) 回溯后逃到数据目录外的相对形状必须放行");
+    }
+
+    /// C1 的收口断言：走 `backup_export` 那条「守卫在前、export 在后」的顺序，落在数据目录里的既有文件
+    /// **绝不被动过**（守卫一旦 Err，`export`/`zip_out` 的 `File::create` 截断路径根本执行不到）。
+    /// 若有人把守卫摘掉，`export` 会先把哨兵文件截断再写成 zip ⇒ 本行必红（wrong-value 型，能变红）。
+    #[test]
+    fn guarded_export_never_truncates_an_existing_file_in_the_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let ledger = data.join("ledger.db");
+        // 哨兵是一串自造的测试字节，不是真实库/包内容（红线④：只比长度与相等，不回显字节）。
+        let sentinel = b"SIMULATED-LIVE-DB-BYTES-PLEASINGLY-LONG-ENOUGH".to_vec();
+        std::fs::write(&ledger, &sentinel).unwrap();
+        let len_before = ledger.metadata().unwrap().len();
+
+        // 复刻 lib.rs backup_export 的调用顺序：先 guard_destination，再 export。
+        let guarded = |dst: &Path| -> AppResult<BackupSummary> {
+            guard_destination(&data, dst)?;
+            // 守卫一旦返回 Err，下面两行根本不执行 —— 也就绝不触发 zip_out 的截断。
+            let live = crate::db::open_in_memory().unwrap();
+            export(&live, dst)
+        };
+
+        let e = guarded(&ledger).expect_err("落点指进数据目录必须被拒");
+        assert_eq!(e.code, "backup_destination_unsafe");
+        // 断「文件一字未动」而不是打印字节（红线④）。
+        let after = std::fs::read(&ledger).unwrap();
+        assert!(after == sentinel, "被拒后哨兵字节必须一字未变（export 从未被调用，绝不截断活库）");
+        assert_eq!(ledger.metadata().unwrap().len(), len_before, "被拒后长度必须不变");
     }
 }
