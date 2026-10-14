@@ -721,9 +721,9 @@ mod tests {
         let ver: i64 = conn
             .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
             .unwrap();
-        // db::TARGET_VERSION 是 db.rs 私有 const（lib.rs 够不着），这里写字面 4；
-        // 若哪天加迁移改了 TARGET_VERSION，这条会红 → 提醒同步改这里（与 spec「零新迁移」一致）。
-        assert_eq!(ver, 4, "= db.rs 的 TARGET_VERSION，M5.5 不加迁移");
+        // 提 pub(crate) 是给 M8 的验包判据用的，这条顺带改成直接引用它 ——
+        // 原来写字面 4 的那两句注释（「lib.rs 够不着」）已经不成立。
+        assert_eq!(ver, crate::db::TARGET_VERSION, "= db.rs 的 TARGET_VERSION，M8 不加迁移");
     }
 
     /// 第 42 条命令必须是**零参数**的（spec §四：这条命令能启动外部安装器，

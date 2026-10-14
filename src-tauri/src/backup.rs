@@ -71,6 +71,20 @@ pub struct BackupSummary {
     pub schema_version: i64,
 }
 
+/// 覆盖前「看得见包里是什么」的兑现物（D5 花第三条命令买的就是这一格）。
+/// 刻意**不**带 sha256 字符串：界面只念「校验通过」，念一串十六进制没有决策价值（红线④）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PackageInfo {
+    pub path: String,
+    pub created_at: String,
+    pub app_version: String,
+    pub schema_version: i64,
+    pub counts: Counts,
+    pub bytes: u64,
+    pub plaintext_warning: String,
+}
+
 /// 十六进制小写。手写，不为 hex 再加一个 crate（`Cargo.lock` 的门：不新增 `[[package]]`）。
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -135,8 +149,8 @@ pub fn now_utc(conn: &rusqlite::Connection) -> AppResult<String> {
 /// 切进 WAL 并跑 `migrate`，于是包里的 `schema_version` 会被本机版本悄悄改写 —— manifest 那句
 /// 「比本机新就拒」就失去意义（spec §六.4）。
 ///
-/// 本模块**唯一**还留着的 `dead_code` 豁免挂在这里，归属是 T7：`mod backup` 要到三条 IPC 命令
-/// 进 `generate_handler!` 才从 crate 根可达，在那之前 `export` 就是整棵树唯一的外部入口。它下面
+/// 本模块现在只剩两条 `dead_code` 豁免（这条 + T5 的 `inspect`），归属都是 T7：`mod backup` 要到三条 IPC 命令
+/// 进 `generate_handler!` 才从 crate 根可达，在那之前 `export`/`inspect` 是树顶的两个入口。它们下面
 /// 那 11 件（两个条目名常量、`FORMAT_VERSION`、`warn_plaintext_columns`、`FileEntry`/`Counts`/
 /// `Manifest`/`BackupSummary`、`sha256_hex`/`count_one`/`read_counts`/`now_utc`）已被本函数接上，
 /// 而 `dead_code` 不沿调用链往下传（实测：只留这一条时 `cargo clippy --lib -- -D warnings` 仍 exit=0），
@@ -264,6 +278,103 @@ fn zip_fail(dst: &Path, e: zip::result::ZipError) -> AppError {
 
 fn io_fail(dst: &Path, e: &std::io::Error) -> AppError {
     AppError::io(dst, e)
+}
+
+/// 解包 → 读 manifest → 比 `formatVersion` → 比 `schemaVersion` → 验 db 哈希。
+/// **顺序是判据的一部分**（见任务注）：版本判据必须先于哈希判据 —— 对同时违反版本与哈希的包，
+/// 必须拒在版本上（`inspect_refuses_a_package_from_a_newer_schema` 的双违反臂直钉这条顺序）；
+/// 顺序反过来会把错因推给 mismatch，版本拦截失去出手机会，而「只改 manifest」的包（db 原样、
+/// 哈希仍相符）两种顺序都能走到版本判据，单独用它测不出顺序。
+/// T6 的 import 也用它 —— 验包逻辑一份，不抄两遍。
+fn read_package(src: &Path) -> AppResult<(Manifest, Vec<u8>)> {
+    let file = std::fs::File::open(src).map_err(|e| AppError::io(src, &e))?;
+    let mut z = zip::ZipArchive::new(file).map_err(|e| {
+        AppError::new(
+            "backup_package_invalid",
+            &format!("解不开 {}：{e}", src.display()),
+            Some("它不是备份包，或者下载/拷贝时被截断了"),
+        )
+    })?;
+    let json = zip_read_entry(&mut z, MANIFEST_ENTRY)?;
+    let manifest: Manifest = serde_json::from_slice(&json).map_err(|e| {
+        AppError::new(
+            "backup_package_invalid",
+            &format!("读 {} 失败：{e}", MANIFEST_ENTRY),
+            Some("这份包的 manifest 坏了，不能用它导入"),
+        )
+    })?;
+    if manifest.format_version != FORMAT_VERSION {
+        return Err(AppError::new(
+            "backup_package_invalid",
+            &format!("这份包的格式版本是 {}，本版本只读得动 {}", manifest.format_version, FORMAT_VERSION),
+            Some("用导出它的那个版本打开，或在新版本应用里导入"),
+        ));
+    }
+    if manifest.schema_version > crate::db::TARGET_VERSION {
+        return Err(AppError::new(
+            "backup_schema_too_new",
+            &format!("包里的库是 schema v{}，本机只认到 v{}", manifest.schema_version, crate::db::TARGET_VERSION),
+            Some("先升级应用再导入；别拿旧版本覆盖新版本的库"),
+        ));
+    }
+    // 只按 manifest 点名的那一个条目取，包内其它条目一律忽略 ⇒ zip-slip 一次性防掉（spec §五）。
+    let want = manifest
+        .files
+        .iter()
+        .find(|f| f.name == DB_ENTRY)
+        .ok_or_else(|| AppError::new(
+            "backup_package_invalid",
+            &format!("manifest 里没有 {DB_ENTRY} 这个条目"),
+            Some("这份包不完整，重新导出一次"),
+        ))?;
+    let db_bytes = zip_read_entry(&mut z, DB_ENTRY)?;
+    if db_bytes.len() as u64 != want.size {
+        return Err(AppError::new(
+            "backup_hash_mismatch",
+            &format!("{DB_ENTRY} 大小不符（manifest 说 {}，实得 {}）", want.size, db_bytes.len()),
+            Some("包已损坏"),
+        ));
+    }
+    let got = sha256_hex(&db_bytes);
+    if got != want.sha256 {
+        return Err(AppError::new(
+            "backup_hash_mismatch",
+            &format!("{DB_ENTRY} 的 SHA-256 与 manifest 不符（本机算出 {got}）"),
+            Some("包已损坏或被改过；别用它导入。若这是你刚导出的包，重导一次"),
+        ));
+    }
+    Ok((manifest, db_bytes))
+}
+
+/// 只读校验：不碰数据库、不落任何盘（临时文件只在 import 那条路上写，spec D3）。
+/// 豁免归属 T7（与 `export` 同批删）：`mod backup` 三条 IPC 命令进 `generate_handler!` 才可达。
+#[allow(dead_code)] // T7 挂 IPC 后删
+pub fn inspect(src: &Path) -> AppResult<PackageInfo> {
+    let (m, db_bytes) = read_package(src)?;
+    Ok(PackageInfo {
+        path: src.display().to_string(),
+        created_at: m.created_at,
+        app_version: m.app_version,
+        schema_version: m.schema_version,
+        counts: m.counts,
+        bytes: db_bytes.len() as u64,
+        plaintext_warning: m.plaintext_warning,
+    })
+}
+
+/// 按条目名取字节。包内名字**永远是本模块写死的两个常量之一**，绝不拿它拼路径。
+fn zip_read_entry(z: &mut zip::ZipArchive<std::fs::File>, name: &str) -> AppResult<Vec<u8>> {
+    use std::io::Read as _;
+    let mut entry = z.by_name(name).map_err(|e| {
+        AppError::new(
+            "backup_package_invalid",
+            &format!("包里没有 {name}：{e}"),
+            Some("这份包不完整，重新导出一次"),
+        )
+    })?;
+    let mut buf = Vec::new();
+    entry.read_to_end(&mut buf).map_err(|e| AppError::io(Path::new(name), &e))?;
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -557,5 +668,156 @@ mod tests {
         assert_eq!(manifest.schema_version, sum.schema_version);
         assert_eq!(manifest.format_version, FORMAT_VERSION);
         assert_eq!(manifest.app_version, env!("CARGO_PKG_VERSION"));
+    }
+
+    // ---- T5：inspect（只读验包：formatVersion → schemaVersion → 哈希，顺序即判据）----
+
+    /// 测试辅助件：读出 src 的全部条目，只按 `keep` 列出的名字重写进 dst。
+    /// 本格的 `keep = [DB_ENTRY]` 用来造「manifest 整个没了」的包。
+    fn zip_write_entries(src: &Path, dst: &Path, keep: &[&str]) {
+        use std::io::{Read as _, Write as _};
+        let file = std::fs::File::open(src).unwrap();
+        let mut z = zip::ZipArchive::new(file).unwrap();
+        let out = std::fs::File::create(dst).unwrap();
+        let mut w = zip::ZipWriter::new(out);
+        for name in keep {
+            // 条目借用 `z` 且 Drop 时还要用它 ⇒ 取完字节就出块，别横跨下一次 `by_name`。
+            let mut bytes = Vec::new();
+            {
+                let mut entry = z.by_name(name).unwrap();
+                entry.read_to_end(&mut bytes).unwrap();
+            }
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            w.start_file(*name, opts).unwrap();
+            w.write_all(&bytes).unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    /// 测试辅助件：只翻 `backup.db` 一个字节、manifest **原样**重写（前置②的臂：
+    /// 包里 db 与 manifest 的哈希说法不一致，其它判据都必须仍是通过的）。
+    fn flip_one_db_byte(src: &Path, dst: &Path) {
+        let (manifest, mut db_bytes) = zip_read_all(src);
+        // 偏移 100 落在 SQLite 首页的数据区里，翻它不影响文件长度 ⇒ 大小判据仍过，红在哈希上。
+        db_bytes[100] ^= 0xFF;
+        zip_out(dst, &manifest, &db_bytes).unwrap();
+    }
+
+    /// 测试辅助件：只改 manifest 里的 `schemaVersion`、db 字节**原样**（前置③的臂）。
+    /// db 原样 ⇒ manifest 记的哈希对这种包**仍然通过**（这正是「互不遮蔽」的要求），
+    /// 所以它单独测不出两条判据的先后 —— 顺序由本测试末尾的双违反臂直钉（见 `read_package` 注释）。
+    fn bump_schema_in_manifest(src: &Path, dst: &Path, version: i64) {
+        let (mut manifest, db_bytes) = zip_read_all(src);
+        manifest.schema_version = version;
+        zip_out(dst, &manifest, &db_bytes).unwrap();
+    }
+
+    /// 测试辅助件：只改 manifest 里的 `formatVersion`、db 字节原样。
+    fn set_format_version(src: &Path, dst: &Path, version: u32) {
+        let (mut manifest, db_bytes) = zip_read_all(src);
+        manifest.format_version = version;
+        zip_out(dst, &manifest, &db_bytes).unwrap();
+    }
+
+    /// happy：T4 造出来的包必须能原样验通，且念出来的数字与导出时同源。
+    #[test]
+    fn inspect_reads_back_what_export_wrote() {
+        let live = crate::db::open_in_memory().unwrap();
+        seed_ledger(&live, 2);
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("a.zip");
+        let sum = export(&live, &dst).unwrap();
+        let info = inspect(&dst).unwrap();
+        assert_eq!(info.counts, sum.counts, "inspect 念出来的数必须与导出时同源：{:?}", info.counts);
+        assert_eq!(info.schema_version, sum.schema_version);
+        assert!(!info.plaintext_warning.is_empty(), "明文告警必须随包走（D6 的兑现物）");
+    }
+
+    /// 前置①：不是 zip / manifest 缺失，都归 backup_package_invalid，且不许 panic。
+    #[test]
+    fn inspect_rejects_non_zip_and_missing_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let junk = dir.path().join("junk.zip");
+        std::fs::write(&junk, b"this is not a zip archive at all").unwrap();
+        let e = inspect(&junk).expect_err("非 zip 字节必须红");
+        assert_eq!(e.code, "backup_package_invalid");
+
+        let good = dir.path().join("good.zip");
+        let live = crate::db::open_in_memory().unwrap();
+        seed_ledger(&live, 1);
+        export(&live, &good).unwrap();
+        // 辅助件 `zip_write_entries(src, dst, keep)`：读出 src 的全部条目，只按 `keep` 列出的
+        // 名字重写进 dst（本格 keep = [DB_ENTRY]，于是 manifest 整个没了）。
+        let no_manifest = dir.path().join("nm.zip");
+        zip_write_entries(&good, &no_manifest, &[DB_ENTRY]);
+        let e2 = inspect(&no_manifest).expect_err("缺 manifest 必须红");
+        assert_eq!(e2.code, "backup_package_invalid");
+    }
+
+    /// 前置②：翻 db 一个字节 ⇒ 必须报**是哪个文件**损坏（技术方案 line 177 那句「说明是哪个文件」的兑现）。
+    #[test]
+    fn inspect_reports_which_file_is_corrupt() {
+        let live = crate::db::open_in_memory().unwrap();
+        seed_ledger(&live, 2);
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("g.zip");
+        export(&live, &good).unwrap();
+        let flipped = dir.path().join("f.zip");
+        flip_one_db_byte(&good, &flipped);
+        let e = inspect(&flipped).expect_err("哈希不符必须红");
+        assert_eq!(e.code, "backup_hash_mismatch");
+        assert!(e.message.contains(DB_ENTRY), "消息要点名是哪个文件：{}", e.message);
+    }
+
+    /// 前置③：包比本机新 ⇒ 拒在写库之前（D5 花第三条命令买到的就是这一格）。
+    #[test]
+    fn inspect_refuses_a_package_from_a_newer_schema() {
+        let live = crate::db::open_in_memory().unwrap();
+        seed_ledger(&live, 1);
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.zip");
+        export(&live, &real).unwrap();
+        let newer = dir.path().join("newer.zip");
+        bump_schema_in_manifest(&real, &newer, crate::db::TARGET_VERSION + 1);
+        let e = inspect(&newer).expect_err("更新的 schema 必须拒");
+        assert_eq!(e.code, "backup_schema_too_new");
+        // 简报原行 `e.hint.is_some_and(|h| h.contains("升级"))` 与同一断言里的 `{:?}, e.hint`
+        // 撞 E0382（部分移动后复用），改成 match：判据不变，且回显面不含包内字段值（红线④）。
+        match &e.hint {
+            Some(h) => assert!(h.contains("升级"), "hint 要指路「先升级应用」"),
+            None => panic!("hint 要指路「先升级应用」，实得 None"),
+        }
+
+        // 反面对照：同一份包把版本号改回 TARGET_VERSION 就验得通 —— 证明上一条不是恒红。
+        let same = dir.path().join("same.zip");
+        bump_schema_in_manifest(&real, &same, crate::db::TARGET_VERSION);
+        assert!(inspect(&same).is_ok(), "等于本机版本必须放行（否则上一条断言是恒真摆设）");
+
+        // 顺序的直钉臂：`newer.zip`（只改 manifest）里 db 字节原样、哈希仍相符 ⇒ 单独调成
+        // 「先哈希后版本」它也过版本判据、测不出顺序（简报 Step 6② 的预期在自家夹具上不成立，
+        // 见本格报告）。所以再加一份**同时违反版本与哈希**的包：按 ①②③④ 的正确顺序它必须
+        // 红在版本判据上；谁把哈希挪到版本之前，这里就会红在 mismatch 上。
+        let both = dir.path().join("both.zip");
+        let (m_bumped, mut bytes) = zip_read_all(&newer);
+        bytes[100] ^= 0xFF;
+        zip_out(&both, &m_bumped, &bytes).unwrap();
+        let e3 = inspect(&both).expect_err("双违反的包必须红");
+        assert_eq!(e3.code, "backup_schema_too_new", "顺序即判据：版本判据必须先于哈希判据");
+    }
+
+    /// `formatVersion` 不是 1 的包不承诺读得动（spec §五 末尾那条 YAGNI），要指名道姓地拒。
+    #[test]
+    fn inspect_refuses_an_unknown_format_version() {
+        let live = crate::db::open_in_memory().unwrap();
+        seed_ledger(&live, 1);
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("r.zip");
+        export(&live, &real).unwrap();
+        let weird = dir.path().join("w.zip");
+        set_format_version(&real, &weird, 7);
+        let e = inspect(&weird).expect_err("未知包格式版本必须红");
+        assert_eq!(e.code, "backup_package_invalid");
+        assert!(e.message.contains("7"), "消息要念出它读到的版本号：{}", e.message);
     }
 }

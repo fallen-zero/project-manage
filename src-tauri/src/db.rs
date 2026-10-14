@@ -94,7 +94,8 @@ fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
 }
 
 /// 线性版本迁移：一个版本一段 DDL，只追加不改历史，便于备份包跨版本恢复。
-const TARGET_VERSION: i64 = 4;
+/// 提 `pub(crate)` 是给 M8 的验包判据比：包里的库比本机新就该拒（`backup::read_package`）。
+pub(crate) const TARGET_VERSION: i64 = 4;
 
 /// `pub(crate)` 是 M8 加的：`backup_import` 灌完包内库要能重放迁移（包里可能是旧版本）。
 pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
