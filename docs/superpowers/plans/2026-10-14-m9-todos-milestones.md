@@ -2557,3 +2557,5 @@ git ls-remote --heads origin | grep m9      # 远端 SHA 与本地逐字一致
 
 
 
+
+8. **Step 6 那段 `groupByProject` 已被落地代码取代**（T4 实现者带回、控制方裁定）：简报原文用码点序比项目名，而 `乙`(U+4E59) 排在 `甲`(U+7532) 之前 —— 与同格那条断言「组按项目名排 ⇒ 甲先」自相矛盾，照抄会得恒红测试。落地写法是 `new Intl.Collator("zh")`。**风险两处**：① 全仓现在有两个依赖 ICU 排序数据的落点（这里 + `due-warning` 的同名 tiebreaker），Node 与 WebView2 都带 full-icu（T4 已核），但**没有测试覆盖**次序本身 ⇒ 交 T7 真机第 5 格看分组实际次序；② `DUE_HORIZON_DAYS = 7` 只被测试按符号引用，漂成 14 现有测试全绿 ⇒ 已在 T7 变异清单补 M⑦（先补 `assert.equal` 再取证）。
