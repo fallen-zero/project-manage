@@ -2023,27 +2023,37 @@ export function TodosPage() {
     [todos, milestones, projects],
   );
 
-  const visible = useMemo(() => {
-    const scoped = filter === ALL_PROJECTS ? todos : todos.filter((t) => t.projectId === filter);
-    return view === "byProject" ? groupByProject(scoped, projects, view) : null;
-  }, [todos, projects, filter, view]);
+  // 筛选只做一次，两个视图共用（原写法把同一段 filter 逐字抄了两遍，正是会漂的形态 —— T5 评审 Minor #3）
+  const scoped = useMemo(
+    () => (filter === ALL_PROJECTS ? todos : todos.filter((t) => t.projectId === filter)),
+    [todos, filter],
+  );
 
-  const flat = useMemo(() => {
-    const scoped = filter === ALL_PROJECTS ? todos : todos.filter((t) => t.projectId === filter);
-    return sortTodos(scoped, view);
-  }, [todos, filter, view]);
+  const visible = useMemo(
+    () => (view === "byProject" ? groupByProject(scoped, projects, view) : null),
+    [scoped, projects, view],
+  );
 
-  const run = async (fn: () => Promise<unknown>) => {
+
+  const flat = useMemo(() => sortTodos(scoped, view), [scoped, view]);
+
+  // run 必须回报成败：它把异常吞进 state、promise 永不 reject，
+  // 所以任何 `.then(清理)` 都会无条件执行 —— T5 评审据此打回两条 Important（失败的新增照样清空输入、
+  // 失败的保存退出编辑态看起来像成功）。调用方一律 `if (ok)` 再清理。
+  const run = async (fn: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true);
     try {
       await fn();
       await reload();
+      return true;
     } catch (e) {
       setError(toAppError(e));
+      return false;
     } finally {
       setBusy(false);
     }
   };
+
 
   return (
     <div className="space-y-4">
@@ -2157,13 +2167,16 @@ export function TodosPage() {
   );
 
   function add() {
-    return run(() => createTodo({ projectId: newProject, title: newTitle.trim(), dueDate: dueOrNull(newDue) })).then(
-      () => {
-        setNewTitle("");
-        setNewDue("");
-      },
-    );
+    if (busy || newTitle.trim() === "" || newProject === "") return; // Enter 键绕过按钮 disabled，这里补齐同一道门
+    return run(() =>
+      createTodo({ projectId: newProject, title: newTitle.trim(), dueDate: dueOrNull(newDue) }),
+    ).then((ok) => {
+      if (!ok) return; // 被后端拒了就留着用户刚敲的内容
+      setNewTitle("");
+      setNewDue("");
+    });
   }
+
 
   function row(t: Todo) {
     const editing = editingId === t.id;
@@ -2185,7 +2198,9 @@ export function TodosPage() {
         onSave={() =>
           void run(() =>
             updateTodo(t.id, { title: draftTitle.trim(), dueDate: dueOrNull(draftDue), done: t.done }),
-          ).then(() => setEditingId(null))
+          ).then((ok) => {
+            if (ok) setEditingId(null); // 失败留在编辑态，草稿别丢
+          })
         }
         onCancel={() => setEditingId(null)}
         onToggle={(x) => void run(() => updateTodo(x.id, { title: x.title, dueDate: x.dueDate, done: !x.done }))}
