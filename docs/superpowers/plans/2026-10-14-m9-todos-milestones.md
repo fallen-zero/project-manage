@@ -1632,6 +1632,8 @@ test("按项目分组：组按项目名排、组内保持视图序", () => {
 });
 ```
 
+> **终审 N2 的认账（2026-10-14 修复波，计划文本自己漏了）**：上面那条测试的名字写着「未完成的在前」，但简报里那四行夹具**全是 `done: false`** ⇒ `sortTodos` 的 `if (a.done !== b.done)` 那一支从来没被走到过 = 死代码。而这一支本身是**超出项**：需求原文（`思维导图.md:38-45`）只要「按截止日期排序」，spec §六 的排序判据也没有「勾掉的沉底」。裁定 = **保留行为 + 补真断言**（改产品语义的代价比认账大），落地见 `tests/todo-view.test.ts`：夹具加一行 `done: true` 且截止日期**最早**的行，摘掉那一支它当场排到第一 ⇒ 断言才有牙。同一认账写进 spec §十一。
+
 - [ ] **Step 4: 跑一遍确认它红在「模块不存在」**
 
 Run: `node --test "tests/**/*.test.ts" > /tmp/n4.log 2>&1; echo "exit=$?"; grep -E "^# (tests|pass|fail)|Cannot find" /tmp/n4.log | head -6`
@@ -2426,6 +2428,10 @@ export function MilestonePanel({ projectId }: { projectId: string }) {
 
 Run: `npm run build > /tmp/nb3.log 2>&1; echo "build=$?"; grep -c "error TS" /tmp/nb3.log; node --test "tests/**/*.test.ts" > /tmp/n7.log 2>&1; echo "node=$?"; cd src-tauri && cargo test -j 1 --lib > /tmp/t6.log 2>&1; echo "cargo=$?"; grep "test result" /tmp/t6.log`
 Expected：`build=0` / `error TS` **0** / node **25-25-0** / cargo **254 passed / exit=0**（本格零 Rust 变动）。
+
+> **终审 I4 的裁定回写（2026-10-14 修复波）**：本任务交付的面板只有**增 / 删 / 勾选完成**，**没有「改」的界面**，而 Task 3 的命令面 `milestone_update` 却收 `MilestoneEdit { stage, plan_date, note, done }` 四个可改字段 —— 计划与 spec §六 那条「增删改」的措辞把这件事说成了已交付。**不补内联编辑**（裁定：与「改归属只能删重建」同口径，删了重建可用），口径改成明写：**改 = 勾选完成；纠正一个错值 = 删了重建**。⇒ `stage/plan_date/note` 三字段今天只有 Rust 单测消费者（`milestone.rs::update_sets_done_without_touching_the_project`），**没有任何界面消费者**，这是有意的取舍、不是漏做。同一口径写进 spec §六/§十一 与技术方案 §九 的 M9 行。
+>
+> 同一格另外两条（同轮落地）：面板徽标的黄档实际颜色是 `outline`（描边），仓内没有 amber/warning 设计令牌 ⇒ 面板与待办页两处文案统一写「红=已逾期，描边=今天起 7 天内」（I5）；面板 `记一笔` **成功之后**才清 `planDate`/`note`（I3，`run(): Promise<boolean>` 的第一个真消费点，原先连点两次会插重复行）；面板那个单行判据从「自己写第二份字符串比较」改成转调 `due-warning` 的 `dueStateOf`（I2，M⑥ 从此可红）。
 
 - [ ] **Step 4: 提交**
 

@@ -114,6 +114,8 @@ Milestone { id, projectId, stage, planDate: Option<String>, note: String, done: 
 
 结构门（本轮终态，**全部现取不写死**）：`generate_handler!` **53**、`tauri::command(async)` 仍 **4**、`TARGET_VERSION` **5**、全仓 `dead_code` 豁免仍 **1**（`db.rs:30`）、`Cargo.lock` **零新 `[[package]]`**（零新依赖）、`SUPPORTED`/`index_*` 等检索门不受影响。
 
+**偏差登记（终审 N10，代码不改）**：`milestone_list` 的实测 `ORDER BY` 是 `plan_date IS NULL, plan_date, created_at, id`，而上面那张表写的是「同 `todo_list`」⇒ 它比 `todo_list` 多排了「计划日期升序 + 空日期落最后」。这一形更合理（面板不必自己再排），但**没有单独授权**，故在此记一句偏差而不改代码。两张表末尾那个 `id` tiebreaker 是终审 N3 补的（`datetime('now')` 只到秒，同秒建的行原先全靠 rowid 给序），两侧各有一条多行次序断言守着，摘掉即红。
+
 ## 五、失败面（写入侧五道，全在 Rust）
 
 按顺序，每道都有正反两支测试（判据一律写成**吃参数的纯函数**，这样命令层才有可测落点 —— M8 终审 C1 的教训③）：
@@ -152,6 +154,11 @@ export function buildDueWarnings(
 ```
 
 判据（每条都能被固定 `today` 证伪）：① 只算日期非空的行；② 日期不匹配 `^\d{4}-\d{2}-\d{2}$` 的行**跳过并计入 `unparsed`**，界面写「N 条日期无法解析」—— 响亮而不是静默（M8.1 ④b 同口径）。**这条不是纵深，对 `deadline` 类它是唯一防线**：`projects.delivery_deadline` 从来是自由文本（写入只走 `project.rs:125` 的 `normalize`，那只 trim 不校形状；界面是 `project-form.tsx:27` 那一格普通 input，placeholder 写着 `2026-06-30` 但不强制），库里完全可能躺着「10月底前」「Q4」这类值，而预警比的是字典序 —— 那种值参与比较会**静默排错**，不是报错。对 `todos`/`milestones` 两表它才是纵深（§五 第 4 道已在写入侧挡掉）；③ **`todo`/`milestone` 两类过 `done` 判据，勾掉的算完成、不进预警**；④ `date < today` ⇒ `overdue`，`today <= date <= today + horizonDays` ⇒ `soon`；⑤ `deadline` 那一类只取项目的 `deliveryDeadline`，且**跳过 `status === "归档"` 的项目**（归档 = 不再催事；这一类没有 `done` 勾选态，用「未归档」当它的等价门）。
+
+**本文件实际导出的东西（终审 I2/I1 落地后补全，此前只写了 `buildDueWarnings` 一件）**：
+
+- `dueStateOf(date, today, horizonDays?)` —— **判据④ 的唯一实现**（返回 `{ state, days }`，形状不对或超出 horizon 返回 `null`）。`milestone-panel.tsx` 的那个徽标转调它，不再自己写第二份比较：原先面板写的是「字符串 `m.planDate < today` + 自备 `shiftDate`」的第二份实现，把那里的 `<` 改成 `<=` **谁也不会红**（T7 变异 M⑥ 打不红就是这条的读数）；共用之后它落进 `node --test` 的射程（新读数见 `.superpowers/sdd/2026-10-14-m9-todos-milestones/mutation-evidence.txt`）。**这一改推翻了执行期「不合并两处实现」的裁定**（那条只对「不为一个小徽标去跑三来源汇总」成立，终审把「判据」这一半翻回来了）。副产物：形状对但历法错的值（`2026-09-45`）过去是「页面判黄、面板判红」的真分叉，现在两处同判 `soon`。
+- `scopeDueInput(input, projectId | null)` —— 把 `todos/milestones/projects` **三份一起**按项目筛小（终审 I1）。预警块与「共 N 条未完成」那行原先吃的是未筛选的全量，只有列表行走过 scoped ⇒ 筛到甲项目仍看见乙/丙的红黄与全局 `unparsed`。抽成纯函数不是为了复用，是为了让这一格有可红的断言（页面本身只有 `tsc` + `vite build` 两道门，没有组件测试网）。
 **输入即已过滤**：软删项目/软删行在 SQL 侧挡掉（§四），前端**不再重复判**（这条防线只有一处，见 §十二 风险 3）。
 排序：`overdue` 在前，再按 `date` 升序，再按 `projectLabel` 升序（稳定）。
 
@@ -159,8 +166,10 @@ export function buildDueWarnings(
 
 - `src/components/app-shell.tsx:8-13` 的 `nav` 数组加第 5 格 `{ to: "/todos", label: "待办" }`；
 - `src/router.tsx`：新 `todosRoute`（照 `backupRoute` 那三行形制），加进 `routeTree.addChildren`（`router.tsx:42`）；
-- `src/pages/todos.tsx`：顶部预警块（红/黄两组 + 计数 + `unparsed` 那句）→ 视图切换（全部 / 按项目分组 / 按截止排序，纯前端排，先例 `search-order.ts`）→ 项目筛选下拉（数据来自 `listProjects()`）→ 新增/编辑/勾选/删除；
-- `src/pages/project-detail.tsx`：加里程碑区（列该项目 `milestone_list`、增删改、勾选 `done`、命中预警的行标色）；
+- `src/pages/todos.tsx`：顶部预警块（红/描边两组 + 计数 + `unparsed` 那句）→ 视图切换（全部 / 按项目分组 / 按截止排序，纯前端排，先例 `search-order.ts`）→ 项目筛选下拉（数据来自 `listProjects()`）→ 新增/编辑/勾选/删除；**预警块、`unparsed` 那句与「共 N 条未完成」都吃 `scopeDueInput` 筛过的三份**（终审 I1：筛到某项目时不许还看见别项目的红黄）；
+- `src/pages/project-detail.tsx`：加里程碑区（列该项目 `milestone_list`、**增 / 删 / 勾选 `done`**、命中预警的行标色）。
+  **这里刻意没有「改」的界面（终审 I4 裁定，不许留沉默）**：**改 = 勾选完成**（面板上唯一的「改」就是翻 `done`，走 `milestone_update`）；**纠正一个错值 = 删了重建**（记错日期或挑错阶段就删掉那行再记一笔）。这与 §十一「改归属只能删重建」同口径，也和 `todos` 编辑表单不给改归属一致。⇒ `MilestoneEdit { stage, plan_date, note, done }` 里**只有 `done` 有界面消费者**，那三个字段今天仅由 Rust 单测消费（`milestone.rs::update_sets_done_without_touching_the_project`）：命令面按线格式送全字段、界面只用其中一格，是有意的取舍而不是漏做。
+  **黄档那一档的实际颜色是 `outline`（描边），不是 amber/warning**（仓内没有该设计令牌）⇒ 面板与待办页两处文案一律写「红=已逾期，描边=今天起 7 天内」（终审 I5：不新增设计令牌，改文案）。
 - `src/lib/api.ts`：八个 camelCase 封装（照 `listProjects`/`createEnv` 那族的 `invoke<T>("命令名", { … })` 写法，注意 Tauri 的 JS 参数是 camelCase、Rust 侧参数 snake_case，照现成写法别自创）；
 - `src/types/todo.ts`、`src/types/milestone.ts`（照 `src/types/backup.ts`）。
 
@@ -206,7 +215,7 @@ tests/due-warning.test.ts    node --test 覆盖判据①-⑤与排序
 3. `/todos` 预警块读数：黄含「上线（3 天内）」与待办（3 天内），红含昨天那条待办；**未勾选的历史里程碑（如已过 40 天的「立项」）本来就该亮红**——判据④ 就是这么定的，**D5 的兑现点是「勾掉 `done` 之后它从预警消失」**，不是「过去的自动不亮」。（本条原文写的是「过去日期的里程碑不亮红」，是控制方写规格时的判据文字错误；真机按原话打成了「NO(误红!)」，代码无错，2026-10-14 按实测读数改准。）
 4. 勾掉那条「立项」⇒ 预警不出现；勾掉未来的「上线」⇒ 黄色项当场消失。
 5. 三视图切换读数（全部 / 按项目分组 / 按截止排序），`dueDate` 空的行落最后。
-6. 筛选某一项目 ⇒ 预警块同步只剩该项目。
+6. 筛选某一项目 ⇒ 预警块同步只剩该项目。（**2026-10-14 终审修复波的实态**：这一格在代码里本就没兑现 —— 预警块与计数吃的是未筛选的全量，只有列表行走过 scoped ⇒ 已按 I1 修成 `scopeDueInput` 三份一起缩，并补了 `node --test` 那侧的断言；**页面接线本身仍无自动化网**（只有 `tsc` + `vite build`），真机也从未跑到这一格 ⇒ 登记在 `docs/开发进度.md`「没能自动验证」。）
 7. 删除其中一条待办 ⇒ 列表与预警同时消失；软删整个项目 ⇒ 它的待办与里程碑从预警消失，`todo_list` 跨项目也读不到，但**库里行还在**（D8 的兑现点：直查 `SELECT COUNT(*) FROM todos WHERE project_id=…` 非 0）。
 8. 把日期字段手填成 `2026-10-14` 形状（走 `invoke` 绕开 `<input type="date">`）⇒ 界面显示 `invalid_input` 那句 hint。
 9. 底栏 `schema=5`、`journal_mode=wal`。
@@ -217,6 +226,8 @@ tests/due-warning.test.ts    node --test 覆盖判据①-⑤与排序
 - **维保/域名/证书三类到期字段**（需求原文 `:73` 括号里那三类，一个也没建）⇒ 仍归 M11，回写时要点名。
 - **待办的正文不进任何检索通路**：本轮不加进 `search_local`（库内字段检索，`思维导图.md:34` 那格列的是项目名/客户/网址/备注/联系人/日报内容，**没有待办**），也不进全文索引 `index_docs`（那张表按磁盘文件建行，待办是库内行）。⇒ 「待办内容能不能被搜到」在 M9 的答案是**不能**，需求原文没要求，别当漏做，也别顺手加。
 - **待办/里程碑改归属**（update 的 input 不含 `project_id`，照 `EnvInput` 先例）。要挪就删了重建；登记在这里，别当 bug 报。
+- **里程碑的「改」没有界面**（终审 I4 的裁定，正文在 §六 那条界面落点里）：**改 = 勾选完成**，**纠正错值 = 删了重建**。`MilestoneEdit` 的 `stage/plan_date/note` 三个字段只有 Rust 单测消费、无界面消费者。不补内联编辑不算漏做，补了才是偏离（与本节的「改归属只能删重建」同口径）。
+- **「按截止排序」里「勾掉的沉到最后」这一条是超出项**（终审 N2 认账）：需求原文（`思维导图.md:38-45`）只说「按截止日期排序」，spec §六 的排序判据也没写这一条 —— 它是 `src/lib/todo-view.ts` 的 `sortTodos` 在实现期多出来的行为。裁定：**保留行为**（改产品语义的代价比认账大），但补上真正能红的那条断言（`tests/todo-view.test.ts` 里加一行 `done: true` 且截止日期最早的行；原来四行全 `done: false`，那条分支是死代码，终审数出来的）。
 - **不把 `project-form.tsx:27` 那格「交付截止」换成日期控件**：那是 M1 的表单契约，且旧值里非 ISO 的那批换了控件也显示不出来。本轮只在预警侧「解析不了就跳过并计数」（见 §十二 风险 8）。
 - 待办重复/提醒推送/通知（个人单机工具，无定时器，产品边界同 M0–M8）。
 - 父子项目关联、`思维导图.md:45`（M11）、多工作区隔离（M11）、操作日志（M11）。
