@@ -13,18 +13,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { createMilestone, deleteMilestone, listMilestones, updateMilestone } from "@/lib/api";
-import { localToday, DUE_HORIZON_DAYS } from "@/lib/due-warning";
+import { dueStateOf, localToday, type DueState } from "@/lib/due-warning";
 import { toAppError, type AppErrorShape } from "@/lib/ipc";
 import { MILESTONE_STAGES, type Milestone } from "@/types/milestone";
 
 // 与 todos 页同形的 dateOrNull：两格逻辑一样但文件不同，不为两行代码跨模块引用来引用过去。
 // 后端 norm_date 会把空白折成 NULL（不是拒收空串）；这里显式折一次，为了不把 "" 送进请求。
 const dateOrNull = (raw: string): string | null => (raw.trim() === "" ? null : raw.trim());
-
-function shiftDate(iso: string, days: number): string {
-  const ms = Date.parse(`${iso}T00:00:00Z`) + days * 86_400_000;
-  return new Date(ms).toISOString().slice(0, 10);
-}
 
 export function MilestonePanel({ projectId }: { projectId: string }) {
   const [rows, setRows] = useState<Milestone[]>([]);
@@ -48,8 +43,9 @@ export function MilestonePanel({ projectId }: { projectId: string }) {
   }, [reload]);
 
   // run 必须回报成败：它把异常吞进 state、promise 永不 reject，
-  // 所以任何 `.then(清理)` 都会无条件执行 —— 与 todos.tsx 的同名 helper 保持同一份契约（T5 评审据此打回两条 Important），
-  // 本格没有成功后的清输入动作，返回值一律 void 掉，但形状不许分叉成两份。
+  // 所以任何 `.then(清理)` 都会无条件执行 —— 与 todos.tsx 的同名 helper 保持同一份契约（T5 评审据此打回两条 Important）。
+  // 终审 I3 给了它第一个真正的消费点：记一笔**成功**之后才清 planDate/note，
+  // 失败时留着用户刚敲的内容（原先连点两次「记一笔」会插重复行，因为输入框从来没清过）。
   const run = async (fn: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true);
     try {
@@ -64,22 +60,22 @@ export function MilestonePanel({ projectId }: { projectId: string }) {
     }
   };
 
-  // 与预警块同一套判据、同一份 today：这里只判「这一行自己」是不是命中，不重新汇总三来源。
-  // 这是刻意保留的第二份实现（spec/裁定）：面板手里只有本项目的里程碑，为一个徽标去跑三来源汇总是绕远；
-  // 共享的是 localToday 与 DUE_HORIZON_DAYS 两个常量，比较的三行各写各的（T7 变异 M④ 会把两处各自打红一次）。
+  // 与预警块**同一份**单行判据（终审 I2 抽成 `dueStateOf` 之前这里是第二份实现：字符串比较 + 自己的 shiftDate，
+  // 把 `<` 写成 `<=` 谁也不会红）。面板手里只有本项目的里程碑，所以只判「这一行自己」是不是命中，
+  // 不去跑三来源汇总 —— 共享的是判据本身，不是汇总。
   const today = localToday();
-  const stateOf = (m: Milestone): "overdue" | "soon" | null => {
+  const stateOf = (m: Milestone): DueState | null => {
     if (m.done || m.planDate === null) return null;
-    if (m.planDate < today) return "overdue";
-    if (m.planDate <= shiftDate(today, DUE_HORIZON_DAYS)) return "soon";
-    return null;
+    return dueStateOf(m.planDate, today)?.state ?? null;
   };
 
   return (
     <div>
       <div className="mb-1 flex items-center justify-between">
         <h2 className="text-sm font-medium">项目里程碑</h2>
-        <span className="text-xs text-muted-foreground">阶段固定五段；勾掉=已完成，不再进预警</span>
+        <span className="text-xs text-muted-foreground">
+          阶段固定五段；勾掉=已完成，不再进预警。徽标与预警块同判据：红=已逾期，描边=今天起 7 天内
+        </span>
       </div>
 
       {error && (
@@ -112,7 +108,15 @@ export function MilestonePanel({ projectId }: { projectId: string }) {
         <Button
           size="sm"
           disabled={busy}
-          onClick={() => void run(() => createMilestone({ projectId, stage, planDate: dateOrNull(planDate), note: note.trim() === "" ? null : note.trim() }))}
+          onClick={() =>
+            void run(() =>
+              createMilestone({ projectId, stage, planDate: dateOrNull(planDate), note: note.trim() === "" ? null : note.trim() }),
+            ).then((ok) => {
+              if (!ok) return; // 被后端拒了就留着用户刚敲的日期与备注（终审 I3）
+              setPlanDate("");
+              setNote("");
+            })
+          }
         >
           <Plus /> 记一笔
         </Button>

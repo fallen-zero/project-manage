@@ -86,6 +86,9 @@ fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
 
 /// 与 `todo::list` 同一条 SQL 形状：一条语句同时管「跨项目全部」与「按项目筛」，
 /// 且 `p.deleted_at IS NULL` 在这张表上同样只有这一处（D8）。
+/// `ORDER BY` 里那个 `, m.id`（终审 N3）：`datetime('now')` 只到秒，同日期同秒的两行必须有确定次序。
+/// **与 spec §四 那句「同 `todo_list`」有偏差**（多排了 plan_date）：更合理但没授权，
+/// 已按裁定在 spec §四 记一句，代码不改（N10）。
 pub fn list(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<Milestone>> {
     let mut stmt = conn.prepare(
         &format!(
@@ -93,7 +96,7 @@ pub fn list(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<Milest
                FROM milestones m
                JOIN projects p ON p.id = m.project_id AND p.deleted_at IS NULL
               WHERE m.deleted_at IS NULL AND (?1 IS NULL OR m.project_id = ?1)
-              ORDER BY m.plan_date IS NULL, m.plan_date, m.created_at"
+              ORDER BY m.plan_date IS NULL, m.plan_date, m.created_at, m.id"
         ),
     )?;
     let rows = stmt.query_map(params![project_id], map_milestone)?;
@@ -228,8 +231,32 @@ mod tests {
         let err = create(&conn, &input("p1", "上线", Some("2026.10.14"), None)).unwrap_err();
         assert_eq!(err.code, "invalid_input");
         assert!(err.message.contains("计划日期"), "错误文本要点名是哪一列：{}", err.message);
+        // 终审 N9：norm_date 是两张表共用的那一份（D7），换了 hint 这里同步钉住。
+        assert_eq!(err.hint.as_deref(), Some("日期要用 YYYY-MM-DD"), "hint 实际：{:?}", err.hint);
         let m = create(&conn, &input("p1", "上线", Some("2026-10-14"), None)).unwrap();
         assert_eq!(m.plan_date.as_deref(), Some("2026-10-14"));
+    }
+
+    /// 终审 N3：`ORDER BY plan_date IS NULL, plan_date, created_at` 三键全没有可红的守卫
+    /// （`create_then_list_roundtrip_keeps_note_and_done` 只断到「有日期在无日期前」）。
+    /// 这里用「同一天 + 同一秒 + 插入顺序与 id 序相反」的三行钉死 `, m.id`：**摘掉它当场红**。
+    /// 直写 INSERT 而不走 `create()`：uuid 主键给不出可控的 id 次序。
+    #[test]
+    fn list_orders_dated_rows_first_then_undated_and_breaks_ties_by_id() {
+        let conn = db::open_in_memory().unwrap();
+        seed(&conn, "p1");
+        for (id, plan) in [("m-2", Some("2026-10-20")), ("m-1", Some("2026-10-20")), ("m-3", None)] {
+            conn.execute(
+                "INSERT INTO milestones (id, project_id, stage, plan_date, created_at)
+                  VALUES (?1, 'p1', '上线', ?2, '2026-10-14 09:00:00')",
+                params![id, plan],
+            )
+            .unwrap();
+        }
+        let ids: Vec<String> = list(&conn, None).unwrap().into_iter().map(|m| m.id).collect();
+        // æ­è¨ç¨ `join` èä¸æ¯ `vec![...to_owned()...]`ï¼æ¬è½®åçææåä¸ä¸ª `.to_owned()` çæ¬å·ææäºä¸ä¸ªå¼å·
+        // ï¼æ¬æºæ¾ç¤ºå±ä¹ä¼æå­èå°æå«çå­ç¬¦ â è¿ç§å½¢ç¶å°ä¸å¤ï¼å¤éªåªè½æç ç¹ãï¼
+        assert_eq!(ids.join(","), "m-1,m-2,m-3", "ææ¥æçå¨åãåæ¥ææ id ååºãç©ºæ¥æè½æåï¼æå¥é¡ºåºæ¯ m-2ãm-1ãm-3");
     }
 
     #[test]

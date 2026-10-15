@@ -4,12 +4,12 @@ import { groupByProject, sortTodos } from "../src/lib/todo-view.ts";
 import type { Todo } from "../src/types/todo.ts";
 import type { Project } from "../src/types/project.ts";
 
-const t = (id: string, projectId: string, dueDate: string | null, createdAt: string, title = id): Todo => ({
+const t = (id: string, projectId: string, dueDate: string | null, createdAt: string, title = id, done = false): Todo => ({
   id,
   projectId,
   title,
   dueDate,
-  done: false,
+  done,
   createdAt,
   updatedAt: createdAt,
 });
@@ -30,16 +30,23 @@ const project = (id: string, name: string): Project => ({
   dirs: [],
 });
 
+// 终审 N2：这条名字写着「未完成的在前」，但原来所有行都是 `done: false`
+// ⇒ `sortTodos` 里那一条「done 沉底」的分支是**死代码**，谁也不会红。
+// 补一行 done:true、并且给它**最早的截止日期**：分支被摘掉时它会排到最前，断言当场红。
+// （裁定：行为保留、不改产品语义 —— 这条沉底本就是 spec 与需求都没要的超出项，已在 spec §十一 与计划里认账。）
 test("按截止排序：未完成的在前、空日期落最后、同键按 createdAt 稳定", () => {
   const rows = [
     t("a", "p1", null, "2026-10-05 00:00:00"),
     t("b", "p1", "2026-10-20", "2026-10-01 00:00:00"),
     t("c", "p1", null, "2026-10-02 00:00:00"),
     t("d", "p1", "2026-10-10", "2026-10-01 00:00:00"),
+    // 勾掉的：截止日期是全场最早的一条，但它必须沉到最后
+    t("e", "p1", "2026-10-01", "2026-10-01 00:00:00", "已勾掉但日期最早", true),
   ];
   assert.deepEqual(
     sortTodos(rows, "byDue").map((x) => x.id),
-    ["d", "b", "c", "a"],
+    ["d", "b", "c", "a", "e"],
+    "done:true 的那条必须排在最后（摘掉 `a.done !== b.done` 那一支它会因日期最早排到第一）",
   );
 });
 

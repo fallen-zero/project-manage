@@ -56,13 +56,43 @@ export function projectLabel(p: Project): string {
   return p.code ? `${p.name}（${p.code}）` : p.name;
 }
 
+/** 单行判据（spec §六 判据④）：形状对且落在 horizon 之内 ⇒ 返回档位与距今天的日历日数，否则 null。
+ *  **这一份是 `buildDueWarnings` 与 `milestone-panel` 共用的**（终审 I2 从两处比较里抽出来的）：
+ *  面板原先自己写第二份（字符串比较 + 自己的 `shiftDate`），把那里的 `<` 改成 `<=` 现有测试全绿
+ *  ⇒ T7 变异 M⑥ 打不红、面板徽标没有任何自动化网。共用之后它落进 `node --test` 的射程。
+ *  顺带了结一处真分叉：形状对但历法错的值（`2026-09-45`）过去是「页面判黄、面板判红」
+ *  （`Date.UTC` 把它滚成 10-15 vs 字符串比较直接判小于今天），现在两处同判 soon。
+ *  历法有效性仍**不在本轮**（spec §十二 风险 5：引历法库就破「零新依赖」）。 */
+export function dueStateOf(
+  date: string,
+  today: string,
+  horizonDays: number = DUE_HORIZON_DAYS,
+): { state: DueState; days: number } | null {
+  if (!ISO_DATE.test(date)) return null;
+  const days = toDayNumber(date) - toDayNumber(today);
+  if (days > horizonDays) return null;
+  return { state: days < 0 ? "overdue" : "soon", days };
+}
+
+/** 项目筛选把三份输入**一起**缩小（终审 I1）。抽成纯函数不是为了复用，是为了让那一格有可红的断言：
+ *  页面本身没有组件测试网（门只有 `tsc` + `vite build`），原先预警块与「共 N 条」那行吃的是未筛选的全量
+ *  ⇒ 用户筛到甲项目时仍看见乙/丙的红黄与全局 `unparsed` 数，而且没人守得住。
+ *  `projectId === null` = 全部项目，原样返回。 */
+export function scopeDueInput(input: DueInput, projectId: string | null): DueInput {
+  if (projectId === null) return input;
+  return {
+    todos: input.todos.filter((t) => t.projectId === projectId),
+    milestones: input.milestones.filter((m) => m.projectId === projectId),
+    projects: input.projects.filter((p) => p.id === projectId),
+  };
+}
+
 export function buildDueWarnings(
   input: DueInput,
   today: string,
   horizonDays: number = DUE_HORIZON_DAYS,
 ): DueReport {
   const byId = new Map(input.projects.map((p) => [p.id, p]));
-  const todayDay = toDayNumber(today);
   let unparsed = 0;
   const items: DueItem[] = [];
 
@@ -72,8 +102,8 @@ export function buildDueWarnings(
       unparsed += 1;
       return;
     }
-    const days = toDayNumber(raw) - todayDay;
-    if (days > horizonDays) return;
+    const hit = dueStateOf(raw, today, horizonDays);
+    if (hit === null) return;
     const p = byId.get(projectId);
     items.push({
       kind,
@@ -82,8 +112,8 @@ export function buildDueWarnings(
       projectLabel: p ? projectLabel(p) : "（项目缺失）",
       label,
       date: raw,
-      days,
-      state: days < 0 ? "overdue" : "soon",
+      days: hit.days,
+      state: hit.state,
     });
   };
 

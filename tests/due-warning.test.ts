@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildDueWarnings, localToday, DUE_HORIZON_DAYS } from "../src/lib/due-warning.ts";
+import { buildDueWarnings, dueStateOf, localToday, scopeDueInput, DUE_HORIZON_DAYS } from "../src/lib/due-warning.ts";
 import type { Todo } from "../src/types/todo.ts";
 import type { Milestone } from "../src/types/milestone.ts";
 import type { Project } from "../src/types/project.ts";
@@ -156,6 +156,80 @@ test("horizonDays 传 0 ⇒ 只算今天与已逾期", () => {
     0,
   );
   assert.deepEqual(r.items.map((i) => i.id), ["t0"]);
+});
+
+// ── 终审 N1：上面那条排序用例四个日期全不同 ⇒ 永远走不到「再按项目名」那一级。
+// 甲 U+7532 / 乙 U+4E59：码点序是「乙先」，拼音序（`localeCompare(…, "zh")`）是「甲先」⇒ 两条相反，
+// 所以这一格的断言是有牙的（把 sort 里那行换回 `<` 码元比较就红）。
+test("同一天两条 ⇒ 第三级键走项目名的拼音序，不是码点序", () => {
+  assert.ok("乙".charCodeAt(0) < "甲".charCodeAt(0), "码点序里乙在前：这条用例的存在理由就是它与拼音序相反");
+  const r = buildDueWarnings(
+    {
+      todos: [
+        todo({ id: "t-yi", projectId: "py", dueDate: iso(2), title: "乙项目那条" }),
+        todo({ id: "t-jia", projectId: "pj", dueDate: iso(2), title: "甲项目那条" }),
+      ],
+      milestones: [],
+      projects: [project({ id: "py", name: "乙项目", code: null }), project({ id: "pj", name: "甲项目", code: null })],
+    },
+    TODAY,
+  );
+  assert.deepEqual(
+    r.items.map((i) => `${i.projectLabel}/${i.label}`),
+    ["甲项目/甲项目那条", "乙项目/乙项目那条"],
+    `同日期同档位时要按项目名（拼音序）排，实际：${JSON.stringify(r.items.map((i) => i.projectLabel))}`,
+  );
+});
+
+// ── 终审 I2：面板那个徽标与预警块**共用**下面这份单行判据（`milestone-panel.tsx` 的 `stateOf` 就是转调它）。
+// 抽出来之前面板自己写第三份比较（字符串 `<` + 自己的 shiftDate），把 `<` 改成 `<=` 现有测试全绿
+// ⇒ T7 变异 M⑥「打不红」；共用之后 M⑥ 有了可红处，读数见 `.superpowers/sdd/…/mutation-evidence.txt`。
+test("dueStateOf 单行判据：昨天 overdue、今天 soon、第 7 天含边界、第 8 天不命中", () => {
+  assert.deepEqual(dueStateOf(iso(-1), TODAY), { state: "overdue", days: -1 });
+  // 今天算 soon 不算 overdue —— 这一行就是 M④/M⑥ 共用的靶点（`days < 0` 写成 `days <= 0` 当场红）
+  assert.deepEqual(dueStateOf(TODAY, TODAY), { state: "soon", days: 0 });
+  assert.deepEqual(dueStateOf(iso(DUE_HORIZON_DAYS), TODAY), { state: "soon", days: 7 });
+  assert.equal(dueStateOf(iso(DUE_HORIZON_DAYS + 1), TODAY), null);
+  assert.deepEqual(dueStateOf(TODAY, TODAY, 0), { state: "soon", days: 0 }, "horizon 传 0 时今天仍命中、明天不命中");
+  assert.equal(dueStateOf(iso(1), TODAY, 0), null);
+});
+
+test("dueStateOf 对形状不对的值返回 null ⇒ 面板不许给它亮徽标", () => {
+  for (const bad of ["", "2026.10.14", "2026-1-4", "10月底前", "2026-10-14 ", "2026/10/14"]) {
+    assert.equal(dueStateOf(bad, TODAY), null, `「${bad}」不是 YYYY-MM-DD，不该有档位`);
+  }
+});
+
+test("dueStateOf 把「形状对、历法错」的日期滚进下一档（I2 之后页面与面板同一读数）", () => {
+  // `2026-09-45` 过 ISO_DATE 的形状检查，`Date.UTC(2026,8,45)` 把它滚成 2026-10-15 ⇒ days=1、soon。
+  // 修面板之前这里是真分叉：面板的字符串比较判 overdue（红）、本函数判 soon（黄）。
+  // 账本 Task 6 那条「/todos 显黄、面板无徽标」的旧描述方向反了，按这句实测改准（终审 triage #14）。
+  assert.deepEqual(dueStateOf("2026-09-45", TODAY), { state: "soon", days: 1 });
+  // 经 `<input type="date"> 录入不可达该值：浏览器只发 YYYY-MM-DD，且后端 norm_date 还挡形状。
+});
+
+// ── 终审 I1：预警块与计数原先吃的是未筛选的全量（只有列表行走过 scoped）。
+// 页面本身没有组件测试网（门只有 `tsc` + `vite build`），所以把「三份一起缩」抽成纯函数来守这一格。
+test("scopeDueInput：三份一起缩 ⇒ 别项目的行既不出现、也不计进 unparsed", () => {
+  const input = {
+    todos: [
+      todo({ id: "t-jia", projectId: "pj", dueDate: iso(-1) }),
+      todo({ id: "t-yi", projectId: "py", dueDate: iso(-1) }),
+    ],
+    milestones: [milestone({ id: "m-yi", projectId: "py", planDate: iso(-1) })],
+    projects: [
+      project({ id: "pj", name: "甲项目", code: null }),
+      project({ id: "py", name: "乙项目", code: null, deliveryDeadline: "10月底前" }),
+    ],
+  };
+  const all = buildDueWarnings(input, TODAY);
+  assert.equal(all.items.length, 3, "不筛时三行都该在（下面那半条的对照读数）");
+  assert.equal(all.unparsed, 1, "乙项目那个「10月底前」在全量口径里计 unparsed");
+
+  const scoped = buildDueWarnings(scopeDueInput(input, "pj"), TODAY);
+  assert.deepEqual(scoped.items.map((i) => [i.kind, i.id]), [["todo", "t-jia"]], "筛到甲项目 ⇒ 预警只剩甲的行");
+  assert.equal(scoped.unparsed, 0, "别的项目的坏日期不该记进当前筛选的 unparsed 数");
+  assert.equal(scopeDueInput(input, null), input, "null = 全部项目，原样返回同一份引用");
 });
 
 test("localToday 回本机日历日的 ISO 形状", () => {

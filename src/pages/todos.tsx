@@ -23,7 +23,7 @@ import {
   listTodos,
   updateTodo,
 } from "@/lib/api";
-import { buildDueWarnings, localToday, projectLabel, type DueItem } from "@/lib/due-warning";
+import { buildDueWarnings, localToday, projectLabel, scopeDueInput, type DueItem } from "@/lib/due-warning";
 import { groupByProject, sortTodos, type TodoView } from "@/lib/todo-view";
 import { toAppError, type AppErrorShape } from "@/lib/ipc";
 import { dueOrNull, type Todo } from "@/types/todo";
@@ -156,23 +156,22 @@ export function TodosPage() {
     return (id: string) => byId.get(id) ?? "（项目缺失）";
   }, [projects]);
 
-  const due = useMemo(
-    () => buildDueWarnings({ todos, milestones, projects }, localToday()),
-    [todos, milestones, projects],
+  // 筛选只做一次，而且**三份数据一起缩**（终审 I1）：原先预警块与「共 N 条未完成」那行吃的是未筛选的全量，
+  // 只有列表行走过 scoped ⇒ 用户筛到甲项目时仍看见乙/丙的红黄与全局的 unparsed 数。
+  // 缩的动作抽成 `scopeDueInput`（纯函数），这一格才有可红的断言 —— 页面本身只有 `tsc` + `vite build` 两道门。
+  const scoped = useMemo(
+    () => scopeDueInput({ todos, milestones, projects }, filter === ALL_PROJECTS ? null : filter),
+    [todos, milestones, projects, filter],
   );
 
-  // 筛选只做一次，两个视图共用（原写法把同一段 filter 逐字抄了两遍，正是会漂的形态 —— T5 评审 Minor #3）
-  const scoped = useMemo(
-    () => (filter === ALL_PROJECTS ? todos : todos.filter((t) => t.projectId === filter)),
-    [todos, filter],
-  );
+  const due = useMemo(() => buildDueWarnings(scoped, localToday()), [scoped]);
 
   const visible = useMemo(
-    () => (view === "byProject" ? groupByProject(scoped, projects, view) : null),
-    [scoped, projects, view],
+    () => (view === "byProject" ? groupByProject(scoped.todos, scoped.projects, view) : null),
+    [scoped, view],
   );
 
-  const flat = useMemo(() => sortTodos(scoped, view), [scoped, view]);
+  const flat = useMemo(() => sortTodos(scoped.todos, view), [scoped, view]);
 
   // run 必须回报成败：它把异常吞进 state、promise 永不 reject，
   // 所以任何 `.then(清理)` 都会无条件执行 —— T5 评审据此打回两条 Important（失败的新增照样清空输入、
@@ -196,7 +195,7 @@ export function TodosPage() {
       <section className="rounded-xl border bg-background p-4">
         <h2 className="text-sm font-medium">到期预警</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          三处一起算：未完成的待办截止、未勾选的里程碑计划日期、未归档项目的交付截止。红=已逾期，黄=今天起 7 天内。
+          三处一起算：未完成的待办截止、未勾选的里程碑计划日期、未归档项目的交付截止。红=已逾期，描边=今天起 7 天内。
         </p>
         {due.unparsed > 0 && (
           <p className="mt-2 text-xs text-destructive">
@@ -232,7 +231,7 @@ export function TodosPage() {
       <section className="rounded-xl border bg-background p-4">
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <h2 className="text-sm font-medium">待办</h2>
-          <span className="text-xs text-muted-foreground">共 {todos.length} 条未完成 {todos.filter((t) => !t.done).length}</span>
+          <span className="text-xs text-muted-foreground">共 {scoped.todos.length} 条未完成 {scoped.todos.filter((t) => !t.done).length}</span>
           <div className="ml-auto flex items-center gap-2">
             {VIEWS.map((v) => (
               <Button
@@ -288,7 +287,11 @@ export function TodosPage() {
 
         <Separator className="mb-2" />
 
-        {todos.length === 0 && <p className="py-6 text-center text-sm text-muted-foreground">还没有待办。</p>}
+        {scoped.todos.length === 0 && (
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            {filter === ALL_PROJECTS ? "还没有待办。" : "这个项目下还没有待办。"}
+          </p>
+        )}
 
         {view === "byProject" && visible
           ? visible.map((g) => (

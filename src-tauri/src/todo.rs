@@ -40,13 +40,18 @@ pub(crate) fn is_iso_date(s: &str) -> bool {
 }
 
 /// `column` 进错误文本：同一条判据两张表共用，用户要能看出是哪一格填错了。
+/// hint 用 spec D7 点名的那一句（终审 N9）：原先日期形状的拒绝把话全写在 message 里、
+/// hint 还是泛泛的「检查表单必填项」⇒ 界面拼出来是「…（检查表单必填项）」，等于没说。
+/// **只有这一支换 hint**，code 仍是 `invalid_input`（零新错误码，D7 的硬门）。
 pub(crate) fn norm_date(column: &str, value: Option<String>) -> AppResult<Option<String>> {
     match norm(value) {
         None => Ok(None),
         Some(s) if is_iso_date(&s) => Ok(Some(s)),
-        Some(s) => Err(invalid(&format!(
-            "「{column}」要写成 YYYY-MM-DD（如 2026-06-30），收到「{s}」"
-        ))),
+        Some(s) => Err(AppError::new(
+            "invalid_input",
+            &format!("「{column}」要写成 YYYY-MM-DD（如 2026-06-30），收到「{s}」"),
+            Some("日期要用 YYYY-MM-DD"),
+        )),
     }
 }
 
@@ -108,6 +113,8 @@ fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
 /// `?1 IS NULL OR t.project_id = ?1` 这一形是故意的：**只有一条 SQL**。
 /// 拆成两条字符串再 `format!` 拼接，就会有人改了一条忘另一条（spec §十二 风险 3 的成因形状）。
 /// `JOIN projects … AND p.deleted_at IS NULL` 是 D8 的兑现点：软删项目的待办读不到，但行留着。
+/// `ORDER BY t.created_at, t.id` 里那个 `, t.id`（终审 N3，T2 就以 deferred minor 挂着的那一条）：
+/// `datetime('now')` 只到秒，同秒建的两行光按 created_at 排等于全凭 rowid 的心情 ⇒ 补一个确定的 tiebreaker。
 pub fn list(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<Todo>> {
     let mut stmt = conn.prepare(
         &format!(
@@ -115,7 +122,7 @@ pub fn list(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<Todo>>
                FROM todos t
                JOIN projects p ON p.id = t.project_id AND p.deleted_at IS NULL
               WHERE t.deleted_at IS NULL AND (?1 IS NULL OR t.project_id = ?1)
-              ORDER BY t.created_at"
+              ORDER BY t.created_at, t.id"
         ),
     )?;
     let rows = stmt.query_map(params![project_id], map_todo)?;
@@ -220,6 +227,8 @@ mod tests {
         assert!(is_iso_date("2026-13-45"), "历法有效性不在本轮，这一格不许顺手加");
         // 下面每一档各自单独都能把这条打红：点分隔、空格分隔、日月年倒序、月日不补零、
         // 带尾空格、无分隔、长度超、含非数字（恒绿断言就是这么来的）。
+        // 「斜杠分隔」那一档（终审 N5，spec §八 判据 4 点名的形状）本机输出层会把 `/` 印成 `-`
+        // ⇒ 别用眼睛确认，用 `[hex(ord(c))]` 复验码点是 U+002F。
         for bad in [
             "",
             "2026.06.30",
@@ -230,6 +239,7 @@ mod tests {
             "20260630",
             "2026-06-300",
             "20a6-06-30",
+            "2026/06/30",
         ] {
             assert!(!is_iso_date(bad), "「{bad}」不该被当成 YYYY-MM-DD");
         }
@@ -247,6 +257,13 @@ mod tests {
         let err = norm_date("计划日期", Some("2026.06.30".to_owned())).unwrap_err();
         assert_eq!(err.code, "invalid_input", "D7：不许出现新错误码");
         assert!(err.message.contains("计划日期"), "错误文本要点名是哪一列：{}", err.message);
+        // 终审 N9：hint 必须是 D7 点名的那一句，不能继续吃泛泛的「检查表单必填项」。
+        assert_eq!(
+            err.hint.as_deref(),
+            Some("日期要用 YYYY-MM-DD"),
+            "日期形状这一支的 hint 要单独，实际：{:?}",
+            err.hint
+        );
         assert_eq!(norm_date("截止日期", Some("2026-06-30".to_owned())).unwrap().as_deref(), Some("2026-06-30"));
     }
 
@@ -277,8 +294,35 @@ mod tests {
         seed(&conn, "p1");
         let err = create(&conn, &input("p1", "甲", Some("2026.06.30"))).unwrap_err();
         assert_eq!(err.code, "invalid_input");
+        // 终审 N4：原先这里只断 code，没断错误文本点名是哪一列（milestone 侧断了）⇒ 两格现在同强度。
+        assert!(err.message.contains("截止日期"), "错误文本要点名「截止日期」：{}", err.message);
+        assert_eq!(err.hint.as_deref(), Some("日期要用 YYYY-MM-DD"), "终审 N9：hint 不再是「检查表单必填项」");
         let t = create(&conn, &input("p1", "乙", Some("2026-06-30"))).unwrap();
         assert_eq!(t.due_date.as_deref(), Some("2026-06-30"));
+    }
+
+    /// 终审 N3：`ORDER BY t.created_at` 原先没有**任何**可红的守卫，而 `datetime('now')` 只到秒
+    /// ⇒ 同秒建的两行谁在前全凭 rowid。加了 `, t.id` 之后，这里用「插入顺序与 id 序故意相反」的三行钉死次序：
+    /// **摘掉 `, t.id` 这条当场红**（读数见 `.superpowers/sdd/2026-10-14-m9-todos-milestones/mutation-evidence.txt`）。
+    /// 直写 INSERT 而不是走 `create()`：uuid 主键给不出可控的 id 次序，同一秒的 `created_at` 也只能手写。
+    #[test]
+    fn list_orders_by_created_at_and_breaks_same_second_ties_by_id() {
+        let conn = db::open_in_memory().unwrap();
+        seed(&conn, "p1");
+        for (id, created) in [
+            ("t-2", "2026-10-14 09:00:00"),
+            ("t-1", "2026-10-14 09:00:00"),
+            ("t-0", "2026-10-14 08:00:00"),
+        ] {
+            conn.execute(
+                "INSERT INTO todos (id, project_id, title, created_at) VALUES (?1, 'p1', ?2, ?3)",
+                params![id, id, created],
+            )
+            .unwrap();
+        }
+        let ids: Vec<String> = list(&conn, None).unwrap().into_iter().map(|t| t.id).collect();
+        // åä¸ï¼æ­è¨ç¨ `join`ï¼å«äººå¤éªè¿ä¸æ ¼æ¶åªéè¦çä¸è¡ãä¹å°ä¸å¤åçå½¢ç¶é£é©ã
+        assert_eq!(ids.join(","), "t-0,t-1,t-2", "åæ created_atï¼t-0 ææ©ï¼ï¼åç§åæ id ååºï¼æå¥é¡ºåºæ¯ t-2ãt-1ãt-0");
     }
 
     #[test]
