@@ -13,6 +13,7 @@ mod project;
 mod scratch;
 mod search;
 mod tokenize;
+mod todo;
 mod vault;
 mod watch;
 
@@ -27,6 +28,7 @@ use crate::ledger::{
     CredentialInput, EnvInput, Ledger, LinkInput, NoteInput, ServerInput,
 };
 use crate::project::{DirInput, Project, ProjectInput};
+use crate::todo::{Todo, TodoEdit, TodoInput};
 use crate::vault::MasterKey;
 
 struct AppState {
@@ -683,6 +685,34 @@ fn backup_import(state: State<'_, AppState>, path: String) -> AppResult<backup::
     }
 }
 
+/// 待办四条命令（M9 Task 2，形制照 `ledger_env_create`）：全部同步、函数体零 `await` ——
+/// `db(&state)?` 取回的 `MutexGuard` 不是 `Send`，给它们加 async 标记会直接编不过（M8 spec D11）。
+/// 勾选完成走 `todo_update` 的 `done` 字段（D12：不单开一条命令）。
+/// `project_id` 的 JS 侧要显式传 `null`（缺键与 null 的行为别赌）。
+#[tauri::command]
+fn todo_list(state: State<'_, AppState>, project_id: Option<String>) -> AppResult<Vec<todo::Todo>> {
+    let conn = db(&state)?;
+    todo::list(&conn, project_id.as_deref())
+}
+
+#[tauri::command]
+fn todo_create(state: State<'_, AppState>, input: TodoInput) -> AppResult<Todo> {
+    let conn = db(&state)?;
+    todo::create(&conn, &input)
+}
+
+#[tauri::command]
+fn todo_update(state: State<'_, AppState>, id: String, input: TodoEdit) -> AppResult<()> {
+    let conn = db(&state)?;
+    todo::update(&conn, &id, &input)
+}
+
+#[tauri::command]
+fn todo_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    let conn = db(&state)?;
+    todo::delete(&conn, &id)
+}
+
 /// 建库并在**指定目录**打开（M5.5 D8）。把「开库 + WAL 读回」从 setup 里拆出来，是为了能喂 tempdir
 /// 单测它——`index_job::start` 要 AppHandle、本批不开 tauri::test，所以可测切分只能到这一步；
 /// 取默认数据目录的路径与起轮仍留在 setup。`db::open` 内部已做 `create_dir_all` 与 WAL 读回断言
@@ -784,7 +814,11 @@ pub fn run() {
             libreoffice_install,
             backup_export,
             backup_inspect,
-            backup_import
+            backup_import,
+            todo_list,
+            todo_create,
+            todo_update,
+            todo_delete
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
@@ -807,7 +841,7 @@ mod tests {
             .unwrap();
         // 提 pub(crate) 是给 M8 的验包判据用的，这条顺带改成直接引用它 ——
         // 原来写字面 4 的那两句注释（「lib.rs 够不着」）已经不成立。
-        assert_eq!(ver, crate::db::TARGET_VERSION, "= db.rs 的 TARGET_VERSION，M8 不加迁移");
+        assert_eq!(ver, crate::db::TARGET_VERSION, "= db.rs 的 TARGET_VERSION，链头已随 M9 V5 走到 5");
     }
 
     /// 第 42 条命令必须是**零参数**的（spec §四：这条命令能启动外部安装器，
