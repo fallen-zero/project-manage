@@ -10,6 +10,7 @@ const nav = [
   { to: "/projects", label: "项目" },
   { to: "/index", label: "索引" },
   { to: "/backup", label: "备份" },
+  { to: "/todos", label: "待办" },
 ];
 
 export function AppShell() {
