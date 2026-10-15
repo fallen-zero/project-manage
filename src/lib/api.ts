@@ -17,6 +17,8 @@ import type {
 } from "@/types/ledger";
 import type { DocHit, DocRow, IndexOverview, IndexProgress } from "@/types/index";
 import type { BackupSummary, ImportOutcome, PackageInfo } from "@/types/backup";
+import type { Todo, TodoInput, TodoEdit } from "@/types/todo";
+import type { Milestone, MilestoneInput, MilestoneEdit } from "@/types/milestone";
 
 export const listProjects = () => invoke<Project[]>("project_list");
 export const getProject = (id: string) => invoke<Project>("project_get", { id });
@@ -70,6 +72,23 @@ export async function pickPackagePath(): Promise<string | null> {
 export const backupExport = (path: string) => invoke<BackupSummary>("backup_export", { path });
 export const backupInspect = (path: string) => invoke<PackageInfo>("backup_inspect", { path });
 export const backupImport = (path: string) => invoke<ImportOutcome>("backup_import", { path });
+
+// —— M9 待办与里程碑：八个封装（lib.rs 里 todo_*/milestone_* 四对命令的前端接线口）——
+// list 的 projectId 传显式 `null` 而不是省键：后端形参是 Option<String>，
+// 省键要依赖 Tauri 对缺失参数落 None 的行为，本仓没有先例，别赌。
+export const listTodos = (projectId: string | null) =>
+  invoke<Todo[]>("todo_list", { projectId });
+export const createTodo = (input: TodoInput) => invoke<Todo>("todo_create", { input });
+export const updateTodo = (id: string, input: TodoEdit) => invoke<void>("todo_update", { id, input });
+export const deleteTodo = (id: string) => invoke<void>("todo_delete", { id });
+
+export const listMilestones = (projectId: string | null) =>
+  invoke<Milestone[]>("milestone_list", { projectId });
+export const createMilestone = (input: MilestoneInput) =>
+  invoke<Milestone>("milestone_create", { input });
+export const updateMilestone = (id: string, input: MilestoneEdit) =>
+  invoke<void>("milestone_update", { id, input });
+export const deleteMilestone = (id: string) => invoke<void>("milestone_delete", { id });
 
 // 走 Tauri 的原生剪贴板而不是 navigator.clipboard：后者要求文档处于焦点态，
 // 窗口刚失焦就会静默抛错，而"一键复制路径/密码"正是这个软件的核心动作。

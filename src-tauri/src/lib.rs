@@ -991,4 +991,24 @@ mod tests {
             "守卫必须早于任何写盘：本函数里守卫在第 {guard_at} 字节、写盘在第 {write_at} 字节"
         );
     }
+
+    /// 五个阶段词在三个地方各存一份（V5 的 CHECK、`milestone.rs` 的 `STAGES`、
+    /// `src/types/milestone.ts` 的 `MILESTONE_STAGES`）。CHECK 那条已由
+    /// `v5_milestone_stage_check_refuses_words_outside_the_five` 按行为钉死；剩下两份是**文本**，
+    /// 最容易漂，漂一个字的后果不是编译错而是「前端能选、后端当场拒」。这条把 Rust 与前端钉在一起。
+    /// 坑 33 说 include_str! 的 needle 要用 concat! 拼，那是针对「在同一文件里数出现次数」的写法；
+    /// 这里是拿 lib.rs 的门去比**另一个文件**的字面量，数不到自己头上，所以用普通字面量。
+    #[test]
+    fn stage_words_are_identical_in_rust_and_the_frontend_type() {
+        assert_eq!(
+            crate::milestone::STAGES,
+            ["立项", "评审", "联调", "上线", "验收"],
+            "Rust 侧词表被改了：V5 的 CHECK 与前端常量要一起改"
+        );
+        let ts = include_str!("../../src/types/milestone.ts");
+        assert!(
+            ts.contains("立项\", \"评审\", \"联调\", \"上线\", \"验收"),
+            "前端 MILESTONE_STAGES 那五个词的引号/顺序/字面与 Rust 侧不一致"
+        );
+    }
 }
