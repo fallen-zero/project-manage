@@ -20,7 +20,7 @@ pub const MANIFEST_ENTRY: &str = "manifest.json";
 /// D6 的代价不粉饰：库里只封四列 `*_cipher`，其余全是明文列，一个没加密的包 ≈ 一份内网入口清单。
 /// 界面念的是这一句，manifest 里存的也是这一句 —— 一份文本，两处出（别抄两遍再漂）。
 pub fn warn_plaintext_columns() -> &'static str {
-    "包内非 *_cipher 列为明文：项目名/编号/负责人/客户/联系人/合同号、服务器 ip 与堡垒机、各类 url、各表 note。"
+    "包内非 *_cipher 列为明文：项目名/编号/负责人/客户/联系人/合同号、服务器 ip 与堡垒机、各类 url、各表 note、待办内容、里程碑备注。"
 }
 
 /// manifest 里的一条文件记录 `{name,size,sha256}`：`size`/`sha256` 都打在条目的**原始字节**上。
@@ -657,6 +657,14 @@ mod tests {
             "counts 七张表：{:?}", c.keys().collect::<Vec<_>>()
         );
         assert!(c.contains_key("ledgerCredentials"), "counts 必须出 camelCase：{:?}", c.keys().collect::<Vec<_>>());
+    }
+
+    /// 包里躺着什么明文，这句必须念全 —— M9 加了两张明文表，漏念就是「用户以为没泄露」。
+    #[test]
+    fn plaintext_warning_names_the_two_m9_tables() {
+        let warn = warn_plaintext_columns();
+        assert!(warn.contains("待办内容"), "漏了待办的明文列：{warn}");
+        assert!(warn.contains("里程碑备注"), "漏了里程碑的明文列：{warn}");
     }
 
     /// 计数从库里现数，且必须与 V2/V3 建的表**逐张对上**。
