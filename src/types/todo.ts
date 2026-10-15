@@ -23,5 +23,6 @@ export interface TodoEdit {
   done: boolean;
 }
 
-/** 表单里空串要折成 null，否则后端把 "" 当非法形状拒掉。 */
+/** 表单里的空串在这里折成 null。注意后端 `norm_date` 是「先 trim、空白折成 NULL」而不是拒收空串；
+ *  显式折一次是为了让发出的值与线格式（`string | null`）一致，不把 `""` 送进请求。 */
 export const dueOrNull = (raw: string): string | null => (raw.trim() === "" ? null : raw.trim());

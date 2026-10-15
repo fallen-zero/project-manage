@@ -18,7 +18,7 @@ import { toAppError, type AppErrorShape } from "@/lib/ipc";
 import { MILESTONE_STAGES, type Milestone } from "@/types/milestone";
 
 // 与 todos 页同形的 dateOrNull：两格逻辑一样但文件不同，不为两行代码跨模块引用来引用过去。
-// 后端把空串日期判成坏形状，所以发送前必须折成 null。
+// 后端 norm_date 会把空白折成 NULL（不是拒收空串）；这里显式折一次，为了不把 "" 送进请求。
 const dateOrNull = (raw: string): string | null => (raw.trim() === "" ? null : raw.trim());
 
 function shiftDate(iso: string, days: number): string {

@@ -161,3 +161,9 @@ test("horizonDays 传 0 ⇒ 只算今天与已逾期", () => {
 test("localToday 回本机日历日的 ISO 形状", () => {
   assert.match(localToday(), /^\d{4}-\d{2}-\d{2}$/);
 });
+
+// 阈值必须钉**值**：第7天/第8天那两条是按符号引用的，常量漂成 14 它们照样绿
+// （T4 评审带回，T7 变异 M⑦ 打的就是这条 —— 没有这条断言，M⑦ 无处可红）。
+test("DUE_HORIZON_DAYS 钉死为 7", () => {
+  assert.equal(DUE_HORIZON_DAYS, 7);
+});
