@@ -8,6 +8,7 @@ mod index_scan;
 mod index_store;
 mod ledger;
 mod legacy_office;
+mod milestone;
 mod ocr;
 mod project;
 mod scratch;
@@ -27,6 +28,7 @@ use crate::error::{AppError, AppResult};
 use crate::ledger::{
     CredentialInput, EnvInput, Ledger, LinkInput, NoteInput, ServerInput,
 };
+use crate::milestone::{Milestone, MilestoneEdit, MilestoneInput};
 use crate::project::{DirInput, Project, ProjectInput};
 use crate::todo::{Todo, TodoEdit, TodoInput};
 use crate::vault::MasterKey;
@@ -713,6 +715,37 @@ fn todo_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
     todo::delete(&conn, &id)
 }
 
+/// 里程碑四条命令（M9 Task 3，形制照上面 `todo_*` 那四条）：全部同步、函数体零 `await` ——
+/// `db(&state)?` 取回的 `MutexGuard` 不是 `Send`，给它们加 async 标记会直接编不过（M8 spec D11）。
+/// 勾选完成走 `milestone_update` 的 `done` 字段（D12：不单开命令）；`MilestoneEdit` 不含
+/// `project_id`，改归属不在本轮（spec §十一）。`project_id` 的 JS 侧要显式传 `null`（缺键与 null 的行为别赌）。
+#[tauri::command]
+fn milestone_list(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> AppResult<Vec<milestone::Milestone>> {
+    let conn = db(&state)?;
+    milestone::list(&conn, project_id.as_deref())
+}
+
+#[tauri::command]
+fn milestone_create(state: State<'_, AppState>, input: MilestoneInput) -> AppResult<Milestone> {
+    let conn = db(&state)?;
+    milestone::create(&conn, &input)
+}
+
+#[tauri::command]
+fn milestone_update(state: State<'_, AppState>, id: String, input: MilestoneEdit) -> AppResult<()> {
+    let conn = db(&state)?;
+    milestone::update(&conn, &id, &input)
+}
+
+#[tauri::command]
+fn milestone_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    let conn = db(&state)?;
+    milestone::delete(&conn, &id)
+}
+
 /// 建库并在**指定目录**打开（M5.5 D8）。把「开库 + WAL 读回」从 setup 里拆出来，是为了能喂 tempdir
 /// 单测它——`index_job::start` 要 AppHandle、本批不开 tauri::test，所以可测切分只能到这一步；
 /// 取默认数据目录的路径与起轮仍留在 setup。`db::open` 内部已做 `create_dir_all` 与 WAL 读回断言
@@ -818,7 +851,11 @@ pub fn run() {
             todo_list,
             todo_create,
             todo_update,
-            todo_delete
+            todo_delete,
+            milestone_list,
+            milestone_create,
+            milestone_update,
+            milestone_delete
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
