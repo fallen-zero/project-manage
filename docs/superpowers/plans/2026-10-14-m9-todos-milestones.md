@@ -800,7 +800,7 @@ mod tests {
 - [ ] **Step 2: 跑一遍确认 RED**
 
 Run: `cd src-tauri && cargo test -j 1 --lib -- --nocapture todo > /tmp/t2.log 2>&1; echo "exit=$?"; grep -E "^error|cannot find|test result" /tmp/t2.log | head`
-Expected：`exit=101`（或编译期 `error[E0432]`/`unresolved module`），因为 `mod todo;` 还没进 `lib.rs`。**这一步的红是编译层的红，不是断言层的红** —— 按本仓口径（坑 10 + 「简报里的测试必须可证伪」），编译层 RED 之后要在 Step 4 用**变异取证**补上「断言真的有牙」那格，不许拿「编不过」当 RED 就收工。
+Expected：`exit=101`（`error[E0425]` 一类，未实现的那几个函数）。**落法：先 `mod todo;` + 只落类型与测试骨架。**不要照「文件先写着、还没进 `lib.rs` 就编不过」去做 —— 孤儿 `.rs` 根本不参与编译，那样跑是 exit=0、会把「没证过」读成「红过了」（T2 实现者实测带回，控制方 2026-10-14 订正，账本有 `Ruling（简报文本缺陷）`）。**这一步的红是编译层的红，不是断言层的红** —— 按本仓口径（坑 10 + 「简报里的测试必须可证伪」），编译层 RED 之后要在 Step 4 用**变异取证**补上「断言真的有牙」那格，不许拿「编不过」当 RED 就收工。
 
 - [ ] **Step 3: 落 `todo.rs`，并在同一格里把待办四条命令接上线**
 
@@ -1237,7 +1237,7 @@ mod tests {
 - [ ] **Step 2: 跑一遍确认 RED（编译层）**
 
 Run: `cd src-tauri && cargo test -j 1 --lib milestone > /tmp/t3.log 2>&1; echo "exit=$?"; grep -E "^error|unresolved module|test result" /tmp/t3.log | head`
-Expected：`exit=101`，报在 `unresolved module`/`couldn't read src/milestone.rs`。
+Expected：`exit=101`（未实现那几个函数的 `error[E0425]`）。**落法同 T2：先 `mod milestone;` + 只落类型与测试骨架**；别指望「文件没进 `lib.rs` 就编不过」—— 孤儿 `.rs` 不参与编译，那样跑是 exit=0（T2 实测订正）。
 
 - [ ] **Step 3: 落 `milestone.rs` 并接四条命令上线（同格必须，理由与 T2 Step 3 完全相同：只落模块会逼出第二条 `dead_code` 豁免）**
 
