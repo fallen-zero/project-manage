@@ -183,17 +183,26 @@
     }
 
     /// D5：`done` 只吃 0/1。写 2 必须报错 —— 否则「布尔」只是约定。
+    /// 两张表的列集不同（`todos` 无 `stage`、`milestones` 无 `title`），必须**各写各的 INSERT**：
+    /// 共用一支含全部列的 INSERT 会先报 `no such column`，`CHECK constraint failed` 永远等不到 ——
+    /// 那是恒红断言。控制方 2026-10-14 按 T1 实现者回报 + 评审复核订正，账本 `Task 1: complete` 有裁定。
     #[test]
     fn v5_done_column_check_refuses_values_other_than_zero_and_one() {
         let conn = open_in_memory().unwrap();
         seed_project(&conn, "p-done");
-        for table in ["todos", "milestones"] {
+        let cases = [
+            (
+                "todos",
+                "INSERT INTO todos (id, project_id, title, done) VALUES ('x', 'p-done', 't', 2)",
+            ),
+            (
+                "milestones",
+                "INSERT INTO milestones (id, project_id, stage, done) VALUES ('x', 'p-done', '立项', 2)",
+            ),
+        ];
+        for (table, sql) in cases {
             let err = conn
-                .execute(
-                    &format!("INSERT INTO {table} (id, project_id, title, stage, done) \
-                               VALUES ('x', 'p-done', 't', '立项', 2)"),
-                    [],
-                )
+                .execute(sql, [])
                 .expect_err("两张表的 done 都不许收 2");
             assert!(
                 err.to_string().contains("CHECK constraint failed"),
@@ -202,9 +211,6 @@
         }
     }
 
-    /// D8 的前提事实：`PRAGMA foreign_keys=ON` 真的在挡外键。
-    /// 这条不是装饰 —— 它是「软删项目不会被 CASCADE 删掉子行」的另一半证明
-    /// （另一半在 T2/T3 的 cross_project 测试里：行还在、只是读不到）。
     #[test]
     fn v5_both_new_tables_enforce_the_project_foreign_key() {
         let conn = open_in_memory().unwrap();
@@ -358,6 +364,13 @@ pub fn warn_plaintext_columns() -> &'static str {
         assert!(warn.contains("里程碑备注"), "漏了里程碑的明文列：{warn}");
     }
 ```
+
+- [ ] **Step 5.5: 把既有 `v4_seeds_index_settings_with_the_documented_limits` 里写死的链头改成引用常量**
+
+那条既有测试断言 `MAX(version)` 等于**写死的字面 4**，V5 一加就假红。改法照 `lib.rs:810` 的现成形制：
+`assert_eq!(ver, TARGET_VERSION, ...)`，注释写明「钉的是迁移链真跑到链头，链头的具体值由
+`v5_schema_meta_reaches_target_version_five` 钉」。**不要**把字面 4 顺手改成 5 —— 那两处会各自漂，
+正是本仓「版本/计数不写死」那条坑的形态（账本里 `Ruling（预检漏格）` 记的就是这一条）。
 
 - [ ] **Step 6: 跑全量 + 两条 clippy，确认零回归**
 
@@ -827,6 +840,9 @@ fn todo_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
 
 4. `generate_handler!` 列表**末尾**追加四条，并保持「只有最后一条不带尾逗号」的现有形状（即给 `backup_import` 补逗号、`todo_delete` 作末条）⇒ 本格终态 **49 条**，现取：`sed -n '/generate_handler/,/^      \]/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"`（逗号必须可选，写死 `,$` 会漏算末条 —— 坑 21）。
 
+5. 顺手把 `lib.rs:810` 那条断言的**注释文案**（「`= db.rs 的 TARGET_VERSION，M8 不加迁移`」）改准 ——
+   V5 之后「M8 不加迁移」是陈旧措辞（T1 记的 deferred minor）。**只改注释文本，断言本身不动。**
+
 `project_id: Option<String>` 的 JS 侧要显式传 `null`（`api.ts` 里写 `{ projectId }`，调用方传 `null` 而不是 `undefined`），别赌缺键的行为。
 
 - [ ] **Step 4: 跑测试确认绿**
@@ -1278,7 +1294,13 @@ git commit -m "feat(m9): milestone.rs 的阶段白名单与四操作（五段词
 ## Task 4: 前端契约层（线类型 + 八个封装 + 预警与视图两个纯函数 + 词表一致性门）
 
 **Files:**
-- Create: `src/types/todo.ts`、`src/types/milestone.ts`、`src/lib/due-warning.ts`、`src/lib/todo-view.ts`、`tests/due-warning.test.ts`、`tests/todo-view.test.ts`
+- Modify: `src/pages/backup.tsx:119` —— **删掉那份手抄的明文列清单**（T1 评审转交的 Important）
+  那句静态页头与 `backup.rs` 的 `warn_plaintext_columns()` 是两份文本；M9 改了 Rust 那句之后它少念「待办内容、里程碑备注」，
+  而**没有任何断言守着**。页头注 5 写的「一份文本两处出」前提本身就是假的（自 M8 起就是两份）。
+  **修法是消灭这个不变量而不是同步它**：静态页头只说「包内非 `*_cipher` 列为明文，完整清单见「检查」卡片里那份随包走的声明
+  （`plaintextWarning`）」，列名枚举只留 Rust 那一份；注 5 的注释同步改准。**不要**为此加跨语言文本门（只剩一处，没得钉）。
+- Create: `src/types/todo.ts`、`src/types/milestone.ts`、`src/lib/due-warning.ts`
+、`src/lib/todo-view.ts`、`tests/due-warning.test.ts`、`tests/todo-view.test.ts`
 - Modify: `src/lib/api.ts`（八个封装）、`src-tauri/src/lib.rs`（一条词表一致性文本门测试）
 
 **Interfaces:**
