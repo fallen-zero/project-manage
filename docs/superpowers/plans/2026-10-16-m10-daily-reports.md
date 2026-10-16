@@ -40,11 +40,11 @@
 | 4 | 前端契约与聚合 | `types/daily-report.ts` + 4 个 api 包装 + `hours-summary.ts` | node +10 |
 | 5 | 日报页 | `/daily-reports` 页面 + nav 第 6 格 + 路由 | 0（靠真机） |
 | 6 | Excel 导出 | `write_xlsx` + `daily_report_export`（async）+ 落点守卫 + 页面按钮 | cargo +4，async 门 4→5 |
-| 7 | Excel 导入 | `read_rows` + preview/apply（async）+ 两段式 UI | cargo +17，async 门 5→7 |
+| 7 | Excel 导入 | `read_rows` + preview/apply（async）+ 两段式 UI | cargo +18，async 门 5→7 |
 | 8 | 门禁与取证 | 全量门 + 八条变异 + 真机十六格（spec 十四格 + 两格人手 Excel） | 0 |
 | 9 | 活文档回写 | 技术方案 / 开发进度 / HANDOFF / M9 spec 反转 | 0 |
 
-**基线读数（2026-10-16 在 `feat/m10-daily-reports` = spec 提交 `5386d2b` 上现跑）**：`cargo test -j 1 --lib` **256 passed / 0 failed**，`node --test "tests/**/*.test.ts"` **tests 31 / pass 31 / fail 0**。按本文实际写出的测试条数累加，本轮终态应为 **cargo 300 / node 41**（cargo：+3 +18 +2 +4 +17；node：+10）。这三个数是用脚本从本文的 `#[test]` / `test(` 块实数点出来的（控制方 2026-10-16 落盘后复点，Task 7 原写 16、实数 17 已改准），不是估的；派发每一格时仍要用现跑读数对账 —— 同一格若被别人改过，聚合数会整条漂（HANDOFF 坑 21）。
+**基线读数（2026-10-16 在 `feat/m10-daily-reports` = spec 提交 `5386d2b` 上现跑）**：`cargo test -j 1 --lib` **256 passed / 0 failed**，`node --test "tests/**/*.test.ts"` **tests 31 / pass 31 / fail 0**。按本文实际写出的测试条数累加，本轮终态应为 **cargo 301 / node 41**（cargo：+3 +18 +2 +4 +18；node：+10）。这三个数是用脚本从本文的 `#[test]` / `test(` 块实数点出来的（控制方 2026-10-16 落盘后复点，Task 7 原写 16、实数 17 已改准），不是估的；派发每一格时仍要用现跑读数对账 —— 同一格若被别人改过，聚合数会整条漂（HANDOFF 坑 21）。
 
 **派发顺序不是纯线性的**：T3 依赖 T2 的表；T5 依赖 T4；T6/T7 依赖 T2 的表与 T5 的页面存在（按钮挂在页上）。T1→T2→T3→T4→T5→T6→T7 单线走最稳，同一 worktree **只允许一个会提交的实现者**。
 
@@ -1977,7 +1977,7 @@ git commit -m "feat(m10): /daily-reports 页 + nav 第 6 格 —— 汇总在上
 
 ---
 
-### Task 6: Excel 导出 —— `write_xlsx` + 第一条 async 命令
+### Task 6: Excel 导出 —— `write_xlsx` + 本轮第一条 async 命令（全仓第 5 条）
 
 **Files:**
 - Modify: `src-tauri/Cargo.toml`（`rust_xlsxwriter` 从 `[dev-dependencies]` 提到 `[dependencies]`）
@@ -2015,12 +2015,42 @@ cd src-tauri && cargo build --lib                 # 期望 exit=0（extract.rs �
 ```rust
     /// 读回用 calamine（与本任务的写同一把库），**不经 `extract::sheet_text`**：
     /// 那个函数把所有格子拼成一串文本，看不出「这一格是日期单元还是文本」，而那是 §六.1 的判据。
+    ///
+    /// **但 `to_string()` 也分不出类型**（控制方按包缓存核过）：`Data::Float(7.5)` 与
+    /// `Data::String("7.5")` 都印成 `7.5`（`calamine-0.36.1/src/datatype.rs:212-216`），
+    /// `Data::DateTime(e)` 走 `ExcelDateTime` 的 Display，而它印的就是裸 `self.value`
+    /// （`datatype.rs:986-990`）—— 序列号 `46311`，**不带时分秒**。
+    /// 所以凡要钉「这一格是数字还是文本」的判据，必须另按**变体**断（下面的 `read_typed`），
+    /// 只比字符串会得到一条打不红的假守护（Task 6 复审就是这么打回第一版的）。
     fn read_cells(path: &std::path::Path) -> Vec<Vec<String>> {
         use calamine::Reader as _;
         let mut book = calamine::open_workbook_auto(path).unwrap();
         let names = book.sheet_names();
         let range = book.worksheet_range(&names[0]).unwrap();
         range.rows().map(|r| r.iter().map(|c| c.to_string()).collect()).collect()
+    }
+
+    /// 按**变体**读回：字符串读法证不了类型，这一支才证得了（复审 Important）。
+    fn read_typed(path: &std::path::Path) -> Vec<Vec<calamine::Data>> {
+        use calamine::Reader as _;
+        let mut book = calamine::open_workbook_auto(path).unwrap();
+        let names = book.sheet_names();
+        let range = book.worksheet_range(&names[0]).unwrap();
+        range.rows().map(|r| r.to_vec()).collect()
+    }
+
+    /// calamine 对数值单元可能给 `Float` 也可能给 `Int`（取决于它解析出什么），
+    /// 所以「是数字」的判据走 `DataType::as_f64()`，而不是 `matches!(.., Data::Float(_))`。
+    fn is_numeric(d: &calamine::Data) -> bool {
+        use calamine::DataType as _;
+        d.as_f64().is_some() && !matches!(d, calamine::Data::String(_))
+    }
+
+    /// 工作表名也要能断到（`read_cells`/`read_typed` 都是盲取 `names[0]`）。
+    fn first_sheet_name(path: &std::path::Path) -> String {
+        use calamine::Reader as _;
+        let book = calamine::open_workbook_auto(path).unwrap();
+        book.sheet_names().first().cloned().unwrap_or_default()
     }
 
     fn export_row(name: &str, code: Option<&str>) -> ExportRow {
@@ -2044,10 +2074,23 @@ cd src-tauri && cargo build --lib                 # 期望 exit=0（extract.rs �
         assert_eq!(cells.len(), 3, "表头 + 两行数据");
         assert_eq!(cells[1].join("|"), "2026-10-16|P-01|甲项目|联调第三方接口|7.5");
         assert_eq!(cells[2][1], "", "编号为 None 要落成空格，不是字面 \"None\"");
+        // **按变体**钉两条刻意决定的类型（复审 Important：只比字符串这两条都打不红）：
+        // 工时要是数字单元（用户在 Excel 里要能求和），日期要文本（这条环不经过序列号）。
+        let typed = read_typed(&p);
+        assert!(is_numeric(&typed[1][4]), "工时列必须是数字单元，实际：{:?}", typed[1][4]);
+        assert!(
+            matches!(typed[1][0], calamine::Data::String(_)),
+            "日期列必须是文本单元，实际：{:?}",
+            typed[1][0]
+        );
+        // 工作表名也是 spec 钉住的值（§六.1「工作表名 日报」），Task 7 只读第一个 sheet，名字错了没人报。
+        assert_eq!(first_sheet_name(&p), "日报");
     }
 
-    /// §六.1：日期写成**文本**。钉的是「导出 → 用户编辑 → 再导回来」这条环不经过 Excel 序列号 ——
-    /// 日期单元读回来是 `Data::DateTime`，`to_string()` 带时分秒，与文本分支不同形状。
+    /// §六.1：日期写成**文本**。钉的是「导出 → 用户编辑 → 再导回来」这条环不经过 Excel 序列号。
+    /// **形状分不出来**（Task 6 复审核包缓存改准了原先这句：`ExcelDateTime` 的 `Display` 印的是裸
+    /// `self.value`，也就是序列号 `46311`，与 `Data::Float` 的印法一样，`datatype.rs:986-990`）——
+    /// 字符串比对在这里确实能红（`2026-10-16` ≠ `46311`），但**类型要靠上面那条 `matches!(.., Data::String(_))`**。
     #[test]
     fn export_writes_the_date_as_text_not_a_date_cell() {
         let dir = tempfile::tempdir().unwrap();
@@ -2149,7 +2192,7 @@ pub fn write_xlsx(path: &Path, rows: &[ExportRow]) -> AppResult<usize> {
 ```
 
 Run: `cd /e/zero/demo/2026/project-files-manage/src-tauri && cargo test -j 1 --lib daily_report`
-Expected: `20 passed; 0 failed`（Task 2 的 16 + 本格 4）。
+Expected: 聚焦过滤 `--lib daily_report` 会连带匹配 `db.rs`/`search.rs` 里含 `daily_report` 的既有测试，**实测 22 条**（本格新增 4 条 + Task 2 的 16 条 + 另两处同名各 1 条）；全量 `cargo test -j 1 --lib` 应为 **283 passed**。别把聚焦数当聚合数用。
 
 - [ ] **Step 4: 第三条 async 命令与注册表**
 
@@ -2292,7 +2335,7 @@ git commit -m "feat(m10): 日报导出真 .xlsx + 第一条 async 命令（57→
 ### Task 7: Excel 导入 —— `read_rows` + 预检 + 事务落库（两段式，D5）
 
 **Files:**
-- Modify: `src-tauri/src/daily_report.rs`（`Cell`/`SheetRow`/`Reject`/`ReadyRow`/`ProjectRow` + `to_cell`/`text_of`/`date_of_cell`/`hours_of_cell`/`project_of_cells`/`validate_row`/`read_rows`/`locate_columns`/`load_projects`/`existing_keys`/`preview`/`apply` + `ImportPreview`/`ImportOutcome` + 17 条测试）
+- Modify: `src-tauri/src/daily_report.rs`（`Cell`/`SheetRow`/`Reject`/`ReadyRow`/`ProjectRow` + `to_cell`/`text_of`/`date_of_cell`/`hours_of_cell`/`project_of_cells`/`validate_row`/`read_rows`/`locate_columns`/`load_projects`/`existing_keys`/`preview`/`apply` + `ImportPreview`/`ImportOutcome` + 18 条测试）
 - Modify: `src-tauri/src/daily_report.rs` 顶部 `use`：`use crate::todo::req_date;` 改成 `use crate::todo::{is_iso_date, req_date};`（本任务起 `date_of_cell` 要用形状判据；**不许在这文件里再写一份形状判断**）
 - Modify: `src-tauri/src/lib.rs`（两条 async 命令 + 注册表 58→60、async 门 5→7）
 - Modify: `src/types/daily-report.ts`（`ImportReject`/`ImportPreview`/`ImportOutcome`）、`src/lib/api.ts`（`pickXlsxOpenPath`/`importPreview`/`importApply`）、`src/pages/daily-reports.tsx`（导入区）
@@ -2301,7 +2344,7 @@ git commit -m "feat(m10): 日报导出真 .xlsx + 第一条 async 命令（57→
 - Consumes: `EXPORT_HEADERS`（Task 6，**列定位的唯一依据**）、`check_hours`/`MAX_HOURS_PER_ROW`（Task 2）、`todo::is_iso_date`、`calamine::{Data, Reader}`（用法先例 `extract.rs:176-182`）、`Range::start() -> Option<(u32,u32)>`（绝对 0-based 左上角，本任务用它算 Excel 绝对行号）、`rust_xlsxwriter` 造夹具（形制照 `extract.rs:419-422`）。
 - Produces: `pub fn daily_report::preview(conn: &Connection, path: &Path) -> AppResult<ImportPreview>`、`pub fn daily_report::apply(conn: &mut Connection, path: &Path) -> AppResult<ImportOutcome>`、`pub const MAX_IMPORT_ROWS: usize = 2000`；命令 `daily_report_import_preview(path)` / `daily_report_import_apply(path)`；前端 `pickXlsxOpenPath()`、`importDailyReportsPreview(path)`、`importDailyReportsApply(path)`。
 
-- [ ] **Step 1: 写 17 条失败测试（RED：编译层，缺的类型与函数一整套）**
+- [ ] **Step 1: 写 18 条失败测试（RED：编译层，缺的类型与函数一整套）**
 
 `daily_report.rs` 的 `mod tests` 末尾追加。**夹具手法**：文本/数字单元用 `rust_xlsxwriter` 直接写（本机就能造）；日期格式单元造不出来（要给 number format），所以 `Cell::DateTime` 那一支走**纯函数直喂**（`date_of_cell` 收 `Cell`，不经过文件），端到端只验文本/数字/空三类。这条限制写进 Step 6 的残余记录，不许假装测过。
 
@@ -2374,6 +2417,44 @@ git commit -m "feat(m10): 日报导出真 .xlsx + 第一条 async 命令（57→
         let rows = read_rows(&dir.path().join("in.xlsx")).unwrap();
         let lines: Vec<u32> = rows.iter().map(|r| r.line).collect();
         assert_eq!(lines, vec![2, 3, 4], "实际：{lines:?}");
+    }
+
+    /// **这一支是本计划原先记为「只能靠真机第 15 格」的那格，Task 6 的 M④ 变异证明本机造得出来**
+    /// （`write_number` 一个序列号 + `set_num_format("yyyy\\-mm\\-dd")` 就是 Excel 手填日期的形状），
+    /// 所以它回到单测里。它同时是「calamine 到底把日期样式归成哪个 `Data` 臂」的端到端追问：
+    /// 若这里红在 `Cell::Number(46311.0)`，说明样式没被认出来，就要在 `to_cell` 里补序列号分支
+    /// （基准 1899-12-30），并回来改 spec §三.2 那句「序列号换算是库内部的事」——
+    /// 两种结果都算这条测试赢了，因为它把一个原本只能靠人眼的问题变成了一次读数。
+    #[test]
+    fn read_rows_recognizes_a_date_formatted_cell() {
+        use rust_xlsxwriter::{Format, Workbook};
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("serial.xlsx");
+        {
+            let mut wb = Workbook::new();
+            let ws = wb.add_worksheet();
+            for (c, h) in EXPORT_HEADERS.iter().enumerate() {
+                ws.write(0, c as u16, *h).unwrap();
+            }
+            let dfmt = Format::new().set_num_format("yyyy\\-mm\\-dd");
+            ws.write_with_format(1, 0, 46311.0_f64, &dfmt).unwrap(); // 46311 = 2026-10-16 的序列号
+            ws.write(1, 1, "P-01").unwrap();
+            ws.write(1, 2, "甲项目").unwrap();
+            ws.write(1, 3, "联调第三方接口").unwrap();
+            ws.write(1, 4, "7.5").unwrap();
+            wb.save(&p).unwrap();
+        }
+        let rows = read_rows(&p).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].date,
+            Cell::DateTime(2026, 10, 16, 0, 0, 0),
+            "日期样式必须走 DateTime 臂，实际：{:?}",
+            rows[0].date
+        );
+        let (date, truncated) = date_of_cell(&rows[0].date, 2).unwrap();
+        assert_eq!(date, "2026-10-16");
+        assert!(!truncated, "纯日期样式（时分秒全 0）不该报截断");
     }
 
     #[test]
@@ -3039,7 +3120,7 @@ fn daily_report_import_apply(state: State<'_, AppState>, path: String) -> AppRes
 注册表：给 `daily_report_export` 补逗号，追加两条，末项不带逗号。`lib.rs` 的 `use crate::daily_report::{...}` 补 `ImportPreview, ImportOutcome`。
 
 > **本格的三处已知残余（写进 Task 9 的开发进度「没能自动验证」，不许含糊）**：
-> ① `to_cell` 的 `Data::DateTime` 一支没有端到端测试 —— 测试里造不出「被 Excel 认定为日期格式」的单元（要 number format 配合），本机验证过的方式是拿真 Excel 手填一份导回来（Task 8 真机第 15 格）。它的逻辑本身由 `date_of_cell` 的五条纯函数断言覆盖，适配器只有三行直拷贝，签名由编译器守。
+> ① `to_cell` 的 `Data::DateTime` 一支**有端到端测试了**（`read_rows_recognizes_a_date_formatted_cell`）：Task 6 的 M④ 变异证明「序列号 + `set_num_format`」本机就能造出日期格式单元，所以本计划原先记的「这一支只能靠真机」不成立。这条测试同时负责追问 calamine 把它归成哪个 `Data` 臂 —— 若归成 `Float`，测试会红在 `Cell::Number(46311.0)`，那时要在 `to_cell` 补序列号分支（基准 1899-12-30）并回来改 spec §三.2 那句「换算是库内部的事」。
 > ② `ReadyRow` **不带**行号字段（只有 `Reject` 带）：写库那一步不需要知道是第几行，带上就是一枚没人读的字段，会多逼出一条 `allow(dead_code)` 豁免。全仓豁免数本轮**保持 1**（只有 `db.rs:30`）。
 > ③ 导入期间文件被人改动（两步之间不锁文件）是 D5 当次接受的代价，不是缺陷。
 
@@ -3172,7 +3253,7 @@ export const importDailyReportsApply = (path: string) =>
 
 ```bash
 cd /e/zero/demo/2026/project-files-manage/src-tauri
-cargo test -j 1 --lib                        # 期望 300 passed（283 + 17）
+cargo test -j 1 --lib                        # 期望 301 passed（283 + 18）
 cargo clippy --lib -- -D warnings            # exit=0
 cargo clippy --lib --all-targets -- -D warnings
 cd /e/zero/demo/2026/project-files-manage
@@ -3226,7 +3307,7 @@ git diff --stat master..HEAD -- src-tauri/Cargo.lock                     # 期�
 git diff --stat master..HEAD -- src-tauri/Cargo.toml                     # 期望只有 rust_xlsxwriter 那一行移动
 ```
 
-Expected（**全部现跑核对**，下面这串是本计划按逐格列名加出来的数）：`test=0` + **300 passed / 0 failed**（基线 256 + T1 3 + T2 18 + T3 2 + T6 4 + T7 17）；两个 clippy `exit=0` 且 0 warning；`build=0`；node **41 / 41 / 0**；`npm=0` 且 `error TS` **0**；结构门 **60 / 7 / 6 / 1 / 616**（命令数 / async 属性 / TARGET_VERSION / dead_code 豁免 / Cargo.lock 包数）。
+Expected（**全部现跑核对**，下面这串是本计划按逐格列名加出来的数）：`test=0` + **301 passed / 0 failed**（基线 256 + T1 3 + T2 18 + T3 2 + T6 4 + T7 18）；两个 clippy `exit=0` 且 0 warning；`build=0`；node **41 / 41 / 0**；`npm=0` 且 `error TS` **0**；结构门 **60 / 7 / 6 / 1 / 616**（命令数 / async 属性 / TARGET_VERSION / dead_code 豁免 / Cargo.lock 包数）。
 
 **若某个数对不上**：先怀疑「有人少写/多写了一条测试」或「有一格被回退」，按 `cargo test --lib daily_report` / `--lib search` / `--lib db` 分模块取数定位，**不许**为了凑数放宽断言，也不许把聚合数改成实际读数了事而不解释差异。
 
@@ -3246,7 +3327,7 @@ Expected（**全部现跑核对**，下面这串是本计划按逐格列名加�
 
 **取证口径**（照 M8/M9）：每处跑完把命令、`test result` 行、红的测试名与断言原文（含 `file:line`）追加进 `mutation-evidence.txt`；还原用 `cp` 备份 + `cmp` 验字节一致，**不要**用 `git checkout --`（同 worktree 可能有别的未提交内容）；八处跑完复跑一次全量，读数必须回到 Step 1 那串数。
 
-**已知打不红、要如实记为无自动化网的一格**（不许当已证）：`to_cell` 的 `Data::DateTime` 一支 —— 测试里造不出「被 Excel 认定为日期格式」的单元，变异它没有断言会红。兜法只有真机第 15 格（人手用真 Excel 填一份导回来），记进 Task 9 的「没能自动验证」。
+**Task 8 开局要先结掉的一格**：`to_cell` 的 `Data::DateTime` 一支原先记为「无自动化网、只能真机第 15 格」，Task 6 复审后已由 `read_rows_recognizes_a_date_formatted_cell` 端到端覆盖（Task 7 落地时跑红跑绿都算有读数）。T7 若红在 `Cell::Number(46311.0)`，说明 calamine 没认出该样式 ⇒ 按 Task 7 计划文本补 `to_cell` 的序列号分支，别把它记成环境失败。
 
 - [ ] **Step 3: 真机十六格（沙盒 `dev.zero.pfm.m10test`，一次性 identifier；真实目录只读）**
 
@@ -3268,7 +3349,7 @@ spec §十 的十四格一条别省，另加两格 Excel 专用：
 12. 手写一份 xlsx 夹具（用 `rust_xlsxwriter` 在 `%TEMP%` 造，含一行坏日期、一行不存在的项目）⇒ `preview` 报出两个**绝对行号**与各自原因、`ok=1`；`apply` 只写 1 条。
 13. 把同一文件再 `apply` 一次 ⇒ 仍成功（重复只提示），库里 2 倍；此时 `preview` 的 `duplicates` 要报出那些行。
 14. 故意留一行不合格再 `apply` ⇒ 库里**一条都没多**（M⑦ 的真机对照面）。
-15. **人手格**：用 Excel 双击打开第 10 格导出的文件 ⇒ 表格能开、表头五列齐、日期列是文本形状、冻结首行生效。这一格 CDP 代不了，也没有任何自动化能证（`to_cell` 的日期单元支就靠它）。
+15. **人手格**：用 Excel 双击打开第 10 格导出的文件 ⇒ 表格能开、表头五列齐、日期列显示成日期而不带「数字存成文本」的绿三角、工时列**能直接求和**（这是「日期写文本、工时写数字」那个类型分工在真 Excel 里的唯一读数）。`to_cell` 的日期单元那一半已经由 Task 7 的端到端测试接管，不再依赖这一格。
 16. **人手格**：点界面上的「导出当前范围 / 从 Excel 导入」两个**原生对话框**真走一遍（save 与 open 各一次）。这与 M8 欠的那四格同类：原生对话框点不通 ⇒ 唯一入口只能人眼验。
 
 **要如实记为「没验到」的**（不许假称通过，坑 11）：第 15、16 格若当轮没人手点，就写「未点」；`backup::guard_destination` 在日报导出上的第 11 格取的是**沙盒**数据目录，不等于真实数据目录那一格的对照。
@@ -3324,7 +3405,7 @@ cmp /dev/null /dev/null && echo "还原自检：下面这条若列出任何 M.* 
 - 为什么导出命令收行而不收查询条件（避免 SQL 里第二份日期比较），以及为什么所属项目列写 `name` 不写 `projectLabel`。
 - 为什么 `async` 门从 4 变 7 不是破例（那 4 条本就是碰文件的一家，函数体一律零 await）。
 
-「没能自动验证」逐条列（**至少**这六条，取 Task 8 实态）：① 页面接线无自动化网（判据在前端 ⇒ `cargo test` 不再守住它，取证面在 `node --test`，而页面本身只有 `tsc` + `vite build` + 人眼）；② `to_cell` 的 `Data::DateTime` 一支无夹具可造，只有真机第 15 格；③ 两条原生对话框（save/open）若本轮没人手点就是未验；④ 排序与周归属的实际渲染只由真机读数兜；⑤ 导入 2000 行上限没有真实性能取证（上限是给内存兜底的，不是量出来的）；⑥ `guard_destination` 第 11 格取的是沙盒数据目录，不等于真实目录那一格。另记一条**结构性事实**而非缺测：全仓 `dead_code` 豁免本轮仍是 1 条，没为 `ReadyRow` 开行号字段因此没开新豁免（下轮若有人数对不上，别以为是漏改）。
+「没能自动验证」逐条列（**至少**这六条，取 Task 8 实态）：① 页面接线无自动化网（判据在前端 ⇒ `cargo test` 不再守住它，取证面在 `node --test`，而页面本身只有 `tsc` + `vite build` + 人眼）；② 若 Task 7 的 `read_rows_recognizes_a_date_formatted_cell` 走了「补序列号分支」那条岔路，spec §三.2「换算是库内部的事」那句要跟着改准；③ 两条原生对话框（save/open）若本轮没人手点就是未验；④ 排序与周归属的实际渲染只由真机读数兜；⑤ 导入 2000 行上限没有真实性能取证（上限是给内存兜底的，不是量出来的）；⑥ `guard_destination` 第 11 格取的是沙盒数据目录，不等于真实目录那一格。另记一条**结构性事实**而非缺测：全仓 `dead_code` 豁免本轮仍是 1 条，没为 `ReadyRow` 开行号字段因此没开新豁免（下轮若有人数对不上，别以为是漏改）。
 
 - [ ] **Step 3: HANDOFF 四格 + M9 spec 的指针行**
 
@@ -3350,7 +3431,7 @@ cmp /dev/null /dev/null && echo "还原自检：下面这条若列出任何 M.* 
 ```bash
 cd /e/zero/demo/2026/project-files-manage
 git add docs/技术方案.md docs/开发进度.md docs/HANDOFF.md docs/superpowers/specs/2026-10-14-m9-todos-milestones-design.md
-git commit -m "docs(m10): 活文档回写 —— 技术方案 §四 补 daily_reports 一行与 §九 M10 实际口径（点名台账导出整格推 M11、M9「待办不进检索」被 D4 反转）；开发进度补 M10 表行（现跑读数 + 八条变异的红项名）与「没能自动验证」六条（页面接线无网、to_cell 日期单元支无夹具、两条原生对话框、排序与周归属靠人眼、2000 行上限无量能取证、守卫只在沙盒对照）；HANDOFF §0/§3/§4-A/§6 三个门数字改到 60/7/6（dead_code 仍 1，本轮没开新豁免）、卡点改 M11、新坑登记「斜杠被印成连字符 ⇒ 拒收样本必须按码点确认」；M9 spec 顶部只加一行反转指针，历史裁定原文不动"
+git commit -m "docs(m10): 活文档回写 —— 技术方案 §四 补 daily_reports 一行与 §九 M10 实际口径（点名台账导出整格推 M11、M9「待办不进检索」被 D4 反转）；开发进度补 M10 表行（现跑读数 + 八条变异的红项名）与「没能自动验证」六条（页面接线无网、日期单元若需补序列号分支要回写 spec、两条原生对话框、排序与周归属靠人眼、2000 行上限无量能取证、守卫只在沙盒对照）；HANDOFF §0/§3/§4-A/§6 三个门数字改到 60/7/6（dead_code 仍 1，本轮没开新豁免）、卡点改 M11、新坑登记「斜杠被印成连字符 ⇒ 拒收样本必须按码点确认」；M9 spec 顶部只加一行反转指针，历史裁定原文不动"
 ```
 
 ---
