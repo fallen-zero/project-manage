@@ -1186,9 +1186,13 @@ test("日桶用原串、月桶取前七位", () => {
   assert.equal(monthKey("2026-01-05"), "2026-01");
 });
 
-test("sumHours 整数化求和：十条 0.1 得 1 而不是 1.0000000000000002", () => {
+test("sumHours 整数化求和：0.1 十条得 1，0.07 三条得 0.21", () => {
   const rows = Array.from({ length: 10 }, (_, i) => row({ id: `d${i}`, hours: 0.1 }));
   assert.equal(sumHours(rows), 1, "别改成 toBeCloseTo，那样恒绿");
+  // **0.1 那一组单独是证不了整数化的**（控制方实测：摘掉 `Math.round` 后十条 0.1 仍加出正好 1 ——
+  // 每步的 1.78e-15 在量级 100 处被浮点间距吸收了）。真正有牙的是这一组：
+  const three = Array.from({ length: 3 }, (_, i) => row({ id: `e${i}`, hours: 0.07 }));
+  assert.equal(sumHours(three), 0.21, "摘掉 Math.round 会得到 0.21000000000000005，这一条当场红（M⑤ 的靶心）");
   assert.equal(sumHours([]), 0, "空数组得 0，不是 NaN");
 });
 
