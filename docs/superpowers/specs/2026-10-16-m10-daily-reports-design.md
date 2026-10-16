@@ -30,7 +30,7 @@
 这几条不写下来，后面的人会以为它们要新写：
 
 1. **Excel 读写两把库早就在树里**。`calamine 0.36.1` 是**直接依赖**，`extract.rs:176` 已经在用它抽 xlsx 正文；`rust_xlsxwriter 0.99.1` 已在 `Cargo.lock:3870`，只是落在 `[dev-dependencies]`（`extract.rs:419` 拿它造 xlsx 测试夹具）。本轮唯一的依赖动作是把后者从 dev 提到直接依赖，按 M8 `sha2` 那格的既有写法在 `Cargo.toml` 注明「不新增下载、不新增编译单元」。**`Cargo.lock` 的 `[[package]]` 616 保持不变**，这条要有断言位。
-2. **Excel 序列号换算不用自己写，`chrono` 不用引**。calamine 的 `Data::DateTime` 装的是它自己的 `ExcelDateTime`（`datatype.rs:690` 起），公开方法 `to_ymd_hms_millis() -> (u16,u8,u8,u8,u8,u8,u16)` 直接给年月日，1900/1904 日期系统与序列号偏移都是库内部的事。本仓因此**不引 `chrono`**，「日期只存形状、SQL 不解释日期」的口径不必为 Excel 破例。注意 `datatype.rs:791` 那个 `as_datetime()` 返回 `chrono::NaiveDateTime` —— **不许用它**，一用就把 chrono 拖进我们的代码面。
+2. **Excel 序列号换算不用自己写，`chrono` 不用引**。calamine 的 `Data::DateTime` 装的是它自己的 `ExcelDateTime`（`datatype.rs:690` 起），公开方法 `to_ymd_hms_milli() -> (u16,u8,u8,u8,u8,u8,u16)` 直接给年月日，1900/1904 日期系统与序列号偏移都是库内部的事。本仓因此**不引 `chrono`**，「日期只存形状、SQL 不解释日期」的口径不必为 Excel 破例。注意 `datatype.rs:791` 那个 `as_datetime()` 返回 `chrono::NaiveDateTime` —— **不许用它**，一用就把 chrono 拖进我们的代码面。
 3. **台账全局检索不是 FTS，是六条同形状的 per-table LIKE**。`search.rs:181-259` 六次 `collect(source, sql, conn, pattern)` 往一个 `Vec<FieldHit>` 里追加，每条都是 `JOIN projects p ... AND p.deleted_at IS NULL WHERE x.deleted_at IS NULL AND (col LIKE ?1 ESCAPE '\\') ORDER BY updated_at DESC LIMIT ?2`。日报进检索 = 加第七条、`source` 字面量多一个，**不走 `index_docs`/`index_docs_fts`、不碰 `backup::strip_index`、不需要任何重建通路**。
 4. **搜索结果的跳转是免费的**。`search-bundle.tsx:22-28` 把每个 `FieldHit` 一律渲染成 `Link to="/projects/$projectId"`，日报行有 `projectId` ⇒ 点一条日报命中就跳它的所属项目详情页，零新代码。
 5. **导出落点守卫是 `pub fn`**。`backup::guard_destination(data_dir, dst)`（`backup.rs:162`）直接可调，失败码 `backup_destination_unsafe` 复用不改名（§八）。
@@ -120,7 +120,8 @@ SQL 里出现任何 `p.status` 判断都算缺陷。这一格有自己可红的�
 
 - 工作表名 `日报`，表头五列固定：`日期`｜`项目编号`｜`所属项目`｜`工作内容`｜`时长（小时）`。第二行起是数据。
 - 日期写成**文本 `YYYY-MM-DD`**，不写成 Excel 日期单元。理由：本仓的日期口径就是「只存形状」，写成文本可以让「导出 → 用户编辑 → 再导回来」这条环不经过序列号，从源头少一个可错点。
-- 「下载模板」= 同一条命令传空 `rows`，只有表头 + 一行灰底示例（示例行的项目名写成占位文本，导回时会被 preview 明确拒掉并说清是示例行）。
+- 「下载模板」= 同一条命令传空 `rows`，只有表头 + 冻结首行。**原先这里写的是「附一行灰底示例」，本轮撤掉**（2026-10-16 写计划时发现）：示例行会被用户忘记删，导回来就是一条挂在不存在项目上的假日报 —— 预检能拒它，但那是让界面自己造一条注定被拒的数据。
+- 导出的「所属项目」列写 **`projects.name` 原值**，不是界面上的 `projectLabel`（后者在有编号时是「名（编号）」）。这一列是导入的名称匹配对象，拼过编号就对不上。
 - **命令只收行、不收查询条件**：`daily_report_export(path, rows)`。这不是省事，是不能再造第二份日期比较 —— `report_date` 是 TEXT，SQL 里的 `BETWEEN` 和前端用的形状判断迟早分叉（M9 终审 I2 就是分叉的账）。导出因此严格是所见即所得。
 - 入参 `rows` 来自客户端，反序列化要拒异常形状（沿用 M9 N5 的口径：按码点复验，不接受数组塞进标量字段）。
 - 落点先过 `backup::guard_destination` 再碰文件：`File::create` 是 CREATE_ALWAYS 截断，把落点指进 `%APPDATA%\dev.zero.pfm\` 会覆盖真库（`backup_export` 里那句注释写的同一个坑）。
@@ -129,7 +130,7 @@ SQL 里出现任何 `p.status` 判断都算缺陷。这一格有自己可红的�
 
 - `calamine::open_workbook_auto` 取第一个工作表的 `Range`（用法先例 `extract.rs:176-178`，必须 `use calamine::Reader as _`）。多 sheet 只读第一个，不做 sheet 选择 UI。
 - **按表头文字定位列，不按列序硬数**：用户在模板里插一列不该错位。认不出必需列 ⇒ `invalid_input`，错误文本点名缺哪一列。
-- 日期单元格：`Data::DateTime(e)` ⇒ `e.to_ymd_hms_millis()` 取年月日、截断时分秒（截断这件事在 preview 里记一条提示，不静默）；`Data::String(s)` ⇒ 走 `is_iso_date`；`Data::Float(_)` 出现在日期列 ⇒ 按具名行号拒绝。
+- 日期单元格：`Data::DateTime(e)` ⇒ `e.to_ymd_hms_milli()` 取年月日、截断时分秒（截断这件事在 preview 里记一条提示，不静默）；`Data::String(s)` ⇒ 走 `is_iso_date`；`Data::Float(_)` 出现在日期列 ⇒ 按具名行号拒绝。
 - 时长单元格：`Float` 直接收；`String` 按 `f64` parse 并拒千分位与全角；**`DateTime`（用户在 Excel 里写成 `8:30` 时间格式）不换算成小时**，按行号报错「时长要填小时数（8.5），不要用时间格式（8:30）」。
 - 项目匹配两级：**先按 `项目编号` 精确匹配，命中即用；否则按 `所属项目` 名称精确匹配**。`SELECT id, code, name FROM projects WHERE deleted_at IS NULL` 拉回后在 Rust 侧比，匹配 0 个 ⇒ 报「第 X 行：项目「…」找不到」；匹配 ≥2 个同名 ⇒ 报「第 X 行：项目名「…」重名 2 个，请填项目编号」。`code` 为空的行走不进编号那一级，属正常降级。
 - **行号一律是 Excel 里的绝对行号**（含表头偏移），不是数组下标 —— 用户看的是 Excel，报 0-based 下标等于没报。
@@ -156,9 +157,19 @@ SQL 里出现任何 `p.status` 判断都算缺陷。这一格有自己可红的�
 
 ## 八、错误码
 
-沿用 CRUD 家族的两个既有码，**不新增码名**：`invalid_input`（日期形状、日期空白、工时越界/精度、内容为空、表头认不出、行超限、项目匹配不上/重名、`rows` 形状异常），`not_found`（按 id 改/删不存在的日报）。
+**本轮一个新码都不开**（下表五个全是本仓在用的码）。
 
-导出落点复用 `backup_destination_unsafe`。这个名字里的 `backup` 是 M8 的历史命名，语义到本轮已经是「任何写文件命令的落点守卫」——本 spec 明写这一点，免得下轮以为是日报专用的第四个域。
+| 码 | 用在哪 | 出处 |
+|---|---|---|
+| `invalid_input` | 日期形状与日期空白、工时越界/精度、内容为空、表头认不出、行超限、项目匹配不上或重名、`rows` 形状异常 | CRUD 家族既有码 |
+| `not_found` | 按 id 改/删不存在的日报；`project_id` 指向不存在或已软删的项目 | 同上 |
+| `backup_destination_unsafe` | 导出落点落在数据目录里 | `backup.rs:162` 的 `guard_destination`，本来就是 `pub fn` |
+| `fs_failed` | 写 `.xlsx` 失败（磁盘满、没权限、路径被占用） | `error.rs:21` 的 `AppError::io(path, e)`，文案已是「访问 X 失败 / 确认该路径存在且可读写」 |
+| `extract_failed` | 打开 `.xlsx` 失败（损坏、受密码保护、伪装成表格的其它格式） | 与 `extract.rs:179` 同码同文案：同一个「这份表打不开」在两条通路上不该有两种说法 |
+
+`backup_destination_unsafe` 这个名字里的 `backup` 是 M8 的历史命名，语义到本轮已经是「任何写文件命令的落点守卫」——本 spec 明写这一点，免得下轮以为是日报专用的第四个域。
+
+本节原先写的是「错误码只有三个」，那是控制方漏算了文件读写这一档：`fs_failed` 与 `extract_failed` 都是既有码，不需要批准，但也不许假装它们不存在（2026-10-16 写计划时核实并改准）。
 
 ## 九、撞上的既有不变量（逐条裁定）
 
