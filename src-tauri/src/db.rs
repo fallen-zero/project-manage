@@ -43,23 +43,10 @@ pub fn open_in_memory() -> AppResult<Connection> {
 /// 只有内存库允许没有 WAL：它不承载任何用户数据。
 fn after_open(conn: &Connection, durable: bool) -> AppResult<()> {
     if durable {
+        // 请求 WAL 之后必须读回来判（pragma_update 的 Ok 不代表真落到 WAL）。拆出去的那半段
+        // 见 assert_wal —— 本行的 side effect 留在 after_open，判据留在 assert_wal，M8 只调判据。
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
-        let mode: String = conn
-            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
-            .map_err(|e| {
-                AppError::new(
-                    "db_pragma_failed",
-                    &format!("读取 journal_mode 失败：{e}"),
-                    Some("确认数据目录可写、ledger.db 未损坏（必要时从备份恢复），或把数据目录换到本地磁盘"),
-                )
-            })?;
-        if !mode.eq_ignore_ascii_case("wal") {
-            return Err(AppError::new(
-                "db_pragma_failed",
-                &format!("无法把数据库切换为 WAL 模式（当前为 {mode}）"),
-                Some("数据库所在路径不支持 WAL（网络盘或被安全软件拦截常见），请把数据目录换到本地磁盘"),
-            ));
-        }
+        assert_wal(conn)?;
     } else {
         // 内存库的 journal_mode 只能是 MEMORY/OFF，这次请求会被 SQLite 直接忽略，拿不到 WAL 是无害的。
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
@@ -69,6 +56,31 @@ fn after_open(conn: &Connection, durable: bool) -> AppResult<()> {
     pragma(conn, "foreign_keys", "ON")?;
     pragma(conn, "busy_timeout", "5000")?;
     migrate(conn)
+}
+
+/// 现读 `PRAGMA journal_mode` 并断它等于 wal。M0 那条「不信 `pragma_update` 的 Ok、必须读回」
+/// 硬门的读回半段；从 `after_open` 拆出来是给 M8 导入收尾复用的 —— `Connection::restore` 灌的是
+/// **已打开**的连接，根本不经过 `after_open`，不现读一次就留下「库内容整库换过、WAL 从没在这份
+/// 内容上被断过」的状态（spec §七 那条判据）。错误码与措辞一字不改，`durable_open_really_runs_in_wal`
+/// 与 `side_file_unopenable_pins_the_readback_invariant` 钉的就是这两条错误的形状。
+pub fn assert_wal(conn: &Connection) -> AppResult<()> {
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .map_err(|e| {
+            AppError::new(
+                "db_pragma_failed",
+                &format!("读取 journal_mode 失败：{e}"),
+                Some("确认数据目录可写、ledger.db 未损坏（必要时从备份恢复），或把数据目录换到本地磁盘"),
+            )
+        })?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(AppError::new(
+            "db_pragma_failed",
+            &format!("无法把数据库切换为 WAL 模式（当前为 {mode}）"),
+            Some("数据库所在路径不支持 WAL（网络盘或被安全软件拦截常见），请把数据目录换到本地磁盘"),
+        ));
+    }
+    Ok(())
 }
 
 fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
@@ -82,9 +94,11 @@ fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
 }
 
 /// 线性版本迁移：一个版本一段 DDL，只追加不改历史，便于备份包跨版本恢复。
-const TARGET_VERSION: i64 = 4;
+/// 提 `pub(crate)` 是给 M8 的验包判据比：包里的库比本机新就该拒（`backup::read_package`）。
+pub(crate) const TARGET_VERSION: i64 = 5;
 
-fn migrate(conn: &Connection) -> AppResult<()> {
+/// `pub(crate)` 是 M8 加的：`backup_import` 灌完包内库要能重放迁移（包里可能是旧版本）。
+pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_meta (
              version    INTEGER NOT NULL,
@@ -106,6 +120,7 @@ fn migrate(conn: &Connection) -> AppResult<()> {
             2 => V2,
             3 => V3,
             4 => V4,
+            5 => V5,
             _ => "",
         };
         apply_version(conn, target, ddl)?;
@@ -312,9 +327,49 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
     ('index_max_files_per_project', '50000');
 ";
 
+/// v5：待办清单 + 项目里程碑（M9，spec §三）。
+/// 三处是「照需求写」而不是「照方便写」，别顺手改：
+/// 1. `stage` 的五个词是 `思维导图.md:35-36` 原文（立项/评审/联调/上线/验收）。它与
+///    `projects.status` 那八段**是两套词**、共有「立项」「上线」两个同形词而语义不同（spec D4）：
+///    status 是「项目当前在哪」，stage 是「过程节点」。别统一，别让一个下拉喂两个字段。
+/// 2. `done` 用 INTEGER + CHECK 而不是裸布尔约定：SQLite 没有布尔列，而 CHECK 挡住「直写库的人」，
+///    serde 侧仍然出 `bool`（`rusqlite` 的 `bool` ToSql/FromSql 走 0/1）。
+/// 3. 日期列**只由写入侧保证形状**（`todo::is_iso_date`），SQL 里不做任何日期解释：
+///    `strftime('now')` 是 UTC，用它比日期会把本机「今天到期」算错一天（spec D1）。
+const V5: &str = "
+CREATE TABLE todos (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title      TEXT NOT NULL,
+    due_date   TEXT,
+    done       INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0,1)),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT
+);
+
+CREATE TABLE milestones (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    stage      TEXT NOT NULL CHECK (stage IN ('立项','评审','联调','上线','验收')),
+    plan_date  TEXT,
+    note       TEXT NOT NULL DEFAULT '',
+    done       INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0,1)),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT
+);
+
+CREATE INDEX ix_todo_project ON todos(project_id);
+CREATE INDEX ix_milestone_project ON milestones(project_id);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 测试体按简报走 `db::` 全路径调用（与 M8 `backup_import` 实际调用 `db::assert_wal` 的形状一致），
+    // 而 edition 2021 下模块自身不进入子模块作用域，故显式把 `crate::db` 引进来。
+    use crate::db;
     use rusqlite::params;
 
     /// index_docs.project_id 有 REFERENCES projects(id) 外键，而 after_open 里
@@ -415,6 +470,9 @@ mod tests {
         );
         assert_eq!(read("index_max_file_bytes"), "20971520", "spec 定的单文件 20 MB");
         assert_eq!(read("index_max_files_per_project"), "50000");
+        // 引用 TARGET_VERSION 而非写字面 4：本断言钉的是「迁移链真的跑到了链头并写下版本号」，
+        // 写死 4 会在每次加版本时假红（与 lib.rs 的 `bootstrap_data...` 同一形制）。链头具体==5
+        // 已由 `v5_schema_meta_reaches_target_version_five` 钉死，这里不与之重复。
         assert_eq!(
             conn.query_row(
                 "SELECT COALESCE(MAX(version),0) FROM schema_meta",
@@ -422,7 +480,7 @@ mod tests {
                 |r| r.get::<_, i64>(0)
             )
             .unwrap(),
-            4
+            TARGET_VERSION
         );
     }
 
@@ -501,5 +559,201 @@ mod tests {
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
         assert_eq!(mode.to_lowercase(), "memory");
+    }
+
+    /// 拆分前后同红同绿：`assert_wal` 只对**读回**负责。这里刻意不用 `open` 那条路径（它自己会
+    /// 先 `pragma_update`），而是把一份已 WAL 的文件库改回 DELETE 模式再喂给 `assert_wal` ——
+    /// 于是这条测试钉的是「读回不是 wal 就必须红」，而不是「open 之后一般是 wal」。
+    /// M8 的 `backup_import` 在 `restore` 之后现读它（`restore` 绕过 `after_open`，spec §七），
+    /// 这条门没有测试就等于 spec §十一.8 那条风险没人守。
+    #[test]
+    fn assert_wal_rejects_a_db_that_fell_out_of_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::open(dir.path()).unwrap();
+        // 先证正对照：刚 open 完必须过（否则下一条断言可能是恒红）。
+        db::assert_wal(&conn).expect("open 之后 assert_wal 必须过");
+        conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
+        let err = db::assert_wal(&conn).expect_err("掉回 DELETE 必须红，否则 M8 的导入收尾门什么都没钉住");
+        assert_eq!(err.code, "db_pragma_failed");
+        // 读回的模式是 SQLite 原样给的（本机实测为小写 delete），所以这里大小写不敏感地断「错误里
+        // 念出了实际读到的模式」—— 与 assert_wal 用 eq_ignore_ascii_case 同一个理由，别改成硬编码小写。
+        assert!(
+            err.message.to_uppercase().contains("DELETE"),
+            "错误里要念出实际读到的模式：{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn the_three_20mb_defaults_are_one_number() {
+        // M5 终审发现的「四个家」：种子值 / get 默认串 / parse 回退值 三处各写一遍 20 MB，
+        // 没有一致性断言 ⇒ 改一处就悄悄漂。本任务把后两处收敛到 index_scan 的一个 pub const，
+        // 本断言钉「种子 == 那个 const」。
+        let conn = open_in_memory().unwrap();
+        let seeded: String = conn
+            .query_row("SELECT value FROM settings WHERE key = 'index_max_file_bytes'", [], |r| r.get(0))
+            .unwrap();
+        let seeded: u64 = seeded.parse().unwrap();
+        assert_eq!(
+            seeded,
+            crate::index_scan::DEFAULT_MAX_FILE_BYTES,
+            "settings 种子值与 ScanOptions 的默认上限必须是同一个数"
+        );
+    }
+
+    /// V5 必须真把两张表和两个索引建出来（`CREATE TABLE` 没写 `IF NOT EXISTS`，
+    /// 所以「对象建了一半、schema_meta 停在旧版本」这个失败形状在事务保护下不会发生，
+    /// 但建了表漏了索引是看得见的，这里一起钉）。
+    #[test]
+    fn v5_creates_todo_and_milestone_tables_and_indexes() {
+        let conn = open_in_memory().unwrap();
+        let names: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                  WHERE name IN ('todos','milestones','ix_todo_project','ix_milestone_project')
+                  ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            names,
+            vec![
+                "ix_milestone_project",
+                "ix_todo_project",
+                "milestones",
+                "todos"
+            ],
+            "V5 的四个对象必须全在：{names:?}"
+        );
+    }
+
+    #[test]
+    fn v5_schema_meta_reaches_target_version_five() {
+        let conn = open_in_memory().unwrap();
+        let ver: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, 5, "迁移必须跑到 5");
+        assert_eq!(TARGET_VERSION, 5, "= 上一条，两处别各写各的");
+    }
+
+    /// D4：`stage` 是 CHECK 枚举。这五个词是需求原文那五个（思维导图.md:35-36），
+    /// 词表外的值必须被挡；报错文本要确认是 CHECK 而不是别的约束。
+    #[test]
+    fn v5_milestone_stage_check_refuses_words_outside_the_five() {
+        let conn = open_in_memory().unwrap();
+        seed_project(&conn, "p-stage");
+        for stage in ["立项", "评审", "联调", "上线", "验收"] {
+            conn.execute(
+                "INSERT INTO milestones (id, project_id, stage) VALUES (?1, 'p-stage', ?2)",
+                params![format!("m-{stage}"), stage],
+            )
+            .unwrap_or_else(|e| panic!("五段词表里的「{stage}」必须插得进去：{e}"));
+        }
+        let err = conn
+            .execute(
+                "INSERT INTO milestones (id, project_id, stage) VALUES ('m-bad', 'p-stage', '初验')",
+                [],
+            )
+            .expect_err("词表外的阶段名必须被 CHECK 拒掉");
+        assert!(
+            err.to_string().contains("CHECK constraint failed"),
+            "要的是 CHECK 那条错，实际：{err}"
+        );
+    }
+
+    /// D5：`done` 只吃 0/1。写 2 必须报错 —— 否则「布尔」只是约定。
+    #[test]
+    fn v5_done_column_check_refuses_values_other_than_zero_and_one() {
+        let conn = open_in_memory().unwrap();
+        seed_project(&conn, "p-done");
+        // 两张表的列集不同（todos 无 stage、milestones 无 title），各写各的 INSERT 才只撞到
+        // done 那一条 CHECK；共用一支含全部列的 INSERT 会先报「no such column」而绕开 CHECK。
+        let cases = [
+            (
+                "todos",
+                "INSERT INTO todos (id, project_id, title, done) VALUES ('x', 'p-done', 't', 2)",
+            ),
+            (
+                "milestones",
+                "INSERT INTO milestones (id, project_id, stage, done) VALUES ('x', 'p-done', '立项', 2)",
+            ),
+        ];
+        for (table, sql) in cases {
+            let err = conn
+                .execute(sql, [])
+                .expect_err("两张表的 done 都不许收 2");
+            assert!(
+                err.to_string().contains("CHECK constraint failed"),
+                "{table} 的 done 要的是 CHECK，实际：{err}"
+            );
+        }
+    }
+
+    /// D8 的前提事实：`PRAGMA foreign_keys=ON` 真的在挡外键。
+    /// 这条不是装饰 —— 它是「软删项目不会被 CASCADE 删掉子行」的另一半证明
+    /// （另一半在 T2/T3 的 cross_project 测试里：行还在、只是读不到）。
+    #[test]
+    fn v5_both_new_tables_enforce_the_project_foreign_key() {
+        let conn = open_in_memory().unwrap();
+        let err = conn
+            .execute(
+                "INSERT INTO todos (id, project_id, title) VALUES ('t-x', 'no-such-project', '甲')",
+                [],
+            )
+            .expect_err("不存在的项目必须挡住");
+        assert!(
+            err.to_string().contains("FOREIGN KEY constraint failed"),
+            "要的是 FK 那条错，实际：{err}"
+        );
+        let err2 = conn
+            .execute(
+                "INSERT INTO milestones (id, project_id, stage) VALUES ('m-x', 'no-such-project', '立项')",
+                [],
+            )
+            .expect_err("milestones 同理");
+        assert!(
+            err2.to_string().contains("FOREIGN KEY constraint failed"),
+            "要的是 FK 那条错，实际：{err2}"
+        );
+    }
+
+    /// 默认值是线格式的一部分：日期列可空、done 默认 0、note 默认空串。
+    #[test]
+    fn v5_dates_default_to_null_and_done_defaults_to_zero() {
+        let conn = open_in_memory().unwrap();
+        seed_project(&conn, "p-def");
+        conn.execute(
+            "INSERT INTO todos (id, project_id, title) VALUES ('t-1', 'p-def', '只填标题')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO milestones (id, project_id, stage) VALUES ('m-1', 'p-def', '立项')",
+            [],
+        )
+        .unwrap();
+        let (due, done): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT due_date, done FROM todos WHERE id = 't-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(due, None, "due_date 不填就是 NULL，不是空串");
+        assert_eq!(done, 0, "新行默认未完成");
+        let (plan, note, mdone): (Option<String>, String, i64) = conn
+            .query_row(
+                "SELECT plan_date, note, done FROM milestones WHERE id = 'm-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(plan, None, "plan_date 不填就是 NULL");
+        assert_eq!(note, "", "里程碑 note 默认空串（需求原文把它当可选项，不是必填）");
+        assert_eq!(mdone, 0);
     }
 }

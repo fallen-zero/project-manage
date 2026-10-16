@@ -348,6 +348,8 @@ fn replace_tags(conn: &Connection, project_id: &str, tags: &[String]) -> AppResu
 pub fn set_root_dir(conn: &Connection, project_id: &str, input: &DirInput) -> AppResult<ProjectDir> {
     let path = validate_path(&input.path)?;
     get_project(conn, project_id)?;
+    // `old` 的读必须留在事务外 —— 挪进来会让本事务变成先读后写的 DEFERRED 形态，
+    // 触发 SQLite 的立即 `SQLITE_BUSY` 而不走 `busy_timeout`（规格风险 8 的降级就靠这个形状）。
     let old = conn
         .query_row(
             "SELECT path FROM project_dirs WHERE project_id = ?1 AND kind = 'root'",
@@ -355,11 +357,16 @@ pub fn set_root_dir(conn: &Connection, project_id: &str, input: &DirInput) -> Ap
             |r| r.get::<_, String>(0),
         )
         .optional()?;
-    conn.execute("DELETE FROM project_dirs WHERE project_id = ?1 AND kind = 'root'", [project_id])?;
-    conn.execute(
+    // 两条语句必须原子：轮末的 sweep 落在中间会把「刚删掉旧 root」误读成「这项目没 root 行」，
+    // 连带清掉整项目索引行（M3 残留 11）。`unchecked_transaction` 收 &Connection ⇒ 签名不动；
+    // 中途 Err 时它的 Drop 是 DropBehavior::Rollback（vendored transaction.rs 已核，见事实 9）。
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM project_dirs WHERE project_id = ?1 AND kind = 'root'", [project_id])?;
+    tx.execute(
         "INSERT INTO project_dirs (id, project_id, kind, path, label, sort) VALUES (?1,?2,'root',?3,?4,0)",
         params![uuid::Uuid::new_v4().to_string(), project_id, path, normalize(input.label.clone())],
     )?;
+    tx.commit()?;
     // 只有「旧根存在且指向别处」才回收。同一路径重复登记不许清空索引：那会把一次
     // 无意义的登记重写升级成几十 GB 的全量重抽。
     if old.is_some_and(|old_path| old_path != path) {
@@ -681,5 +688,36 @@ mod tests {
 
         assert_eq!(both_sides(&conn, &p.id), before, "删 entry 目录不许清掉索引行");
         assert_eq!(doc_hits(&conn, "验收", 20).unwrap().len(), 1, "删 entry 之后正文照旧可搜");
+    }
+
+    /// 残留 11：`set_root_dir` 原来是 DELETE + INSERT 两条独立的自动提交语句，作业轮末的
+    /// `sweep_unrooted_projects` 恰好落在两条之间就会把该项目看成「无 root 行」⇒ 整项目索引行被清。
+    /// 包进一个事务后这个窗口不存在。回滚探针用「同路径的 entry 行」：DELETE root 先成功，
+    /// INSERT 必撞 `UNIQUE (project_id, path)`，于是能观测到 DELETE 有没有被一起回滚。
+    /// 变异：把事务拆回两条 `conn.execute` ⇒ 第二条断言红（旧 root 行已自动提交掉了）。
+    #[test]
+    fn a_failed_root_replacement_keeps_the_old_root_row() {
+        let c = crate::db::open_in_memory().unwrap();
+        let p = create_project(&c, &input("事务验证")).unwrap();
+        add_entry_dir(&c, &p.id, &DirInput { path: "E:/同一路径".into(), label: None, sort: None }).unwrap();
+        set_root_dir(&c, &p.id, &DirInput { path: "E:/旧根".into(), label: None, sort: None }).unwrap();
+
+        let err = set_root_dir(&c, &p.id, &DirInput { path: "E:/同一路径".into(), label: None, sort: None })
+            .expect_err("INSERT 该撞 UNIQUE(project_id, path)：entry 行已经占了那个路径");
+        assert_eq!(err.code, "db_failed", "rusqlite 的约束错误走 error.rs 那条 From，不该被翻译成别的码");
+
+        let root: Option<String> = c
+            .query_row(
+                "SELECT path FROM project_dirs WHERE project_id = ?1 AND kind = 'root'",
+                [&p.id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(root.as_deref(), Some("E:/旧根"), "INSERT 失败必须把 DELETE 一起回滚");
+        let dirs: i64 = c
+            .query_row("SELECT count(*) FROM project_dirs WHERE project_id = ?1", [&p.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(dirs, 2, "entry 与旧 root 都该还在：一次失败的改指不许留下半张表");
     }
 }

@@ -22,7 +22,7 @@ tauri-plugin-dialog = "2.8.0"
 tauri-plugin-clipboard-manager = "2.4.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
 uuid = { version = "1.26.1", features = ["v4"] }
 aes-gcm = "0.11.1"
 argon2 = "0.6.0"
@@ -37,6 +37,18 @@ quick-xml = "0.41.0"
 pdf-extract = "0.12.1"
 zip = "8.6.0"
 calamine = "0.36.1"
+notify = "8.2.0"
+# M6 图片 OCR：走 Windows 原生识别器（Media::Ocr），不引第三方 OCR 引擎。
+# feature 名已对 ~/.cargo/registry/src/*/windows-0.62.2/Cargo.toml 逐个核实；
+# Graphics_Imaging/Storage/Storage_Streams 是 Task 2 的 image_text 预铺。
+windows = { version = "0.62.2", features = [
+  "Media_Ocr", "Graphics_Imaging", "Storage", "Storage_Streams",
+  "Foundation", "Foundation_Collections", "Globalization",
+] }
+# M8：备份包 manifest 的 SHA-256。仓库里没有现成哈希（aes-gcm/argon2 都不含 sha2，zip 8.6.0 只给 CRC32），
+# 而技术方案 §6.2 明写 SHA-256。这个 crate 已在 Cargo.lock（lopdf/tauri-codegen/wry 拉 0.10.9，
+# lzma-rust2 拉 0.11.0），提为直接依赖不新增下载、不新增编译单元；自己实现哈希是红线。
+sha2 = "0.11"
 
 [dev-dependencies]
 rust_xlsxwriter = "0.99.1"

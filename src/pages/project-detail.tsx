@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
 import { ArrowLeft, Copy, ExternalLink, FolderOpen, FolderPlus, Pencil, Plus, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -21,6 +21,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { ProjectForm } from "@/components/project-form";
 import { LedgerPanel } from "@/components/ledger-panel";
+import { MilestonePanel } from "@/components/milestone-panel";
 import { copyText, openFolder, pickFolder, revealFolder } from "@/lib/api";
 import { useProjectsStore } from "@/stores/projects";
 import { toInput, type ProjectDir } from "@/types/project";
@@ -57,9 +58,16 @@ export function ProjectDetailPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 
+  // 一次性拉取守卫。原来的条件带 `!loading`，而 store 的初值就是 `loading: true`
+  // 且 app-shell 挂载时刷的是 app/vault 不是项目 ⇒ 深链直达本页时 items 空 + loading 恒真
+  // ⇒ 永不 refresh，页面无限停在「读取项目档案…」（搜索页与待办页的项目链接都能撞上）。
+  // 不改成 store 里 `loading: false`：那会让首帧闪「列表为空」，且库真为空时又变回不拉。
+  const attemptedRefresh = useRef(false);
   useEffect(() => {
-    if (items.length === 0 && !loading) void refresh();
-  }, [items.length, loading, refresh]);
+    if (attemptedRefresh.current || items.length > 0) return;
+    attemptedRefresh.current = true;
+    void refresh();
+  }, [items.length, refresh]);
 
   if (loading) return <p className="px-6 py-8 text-sm text-muted-foreground">读取项目档案…</p>;
   if (!project)
@@ -254,6 +262,10 @@ export function ProjectDetailPage() {
 
       <div className="mt-4 rounded-xl border bg-background p-4">
         <LedgerPanel projectId={project.id} />
+      </div>
+
+      <div className="mt-4 rounded-xl border bg-background p-4">
+        <MilestonePanel projectId={project.id} />
       </div>
 
       <Dialog open={editing} onOpenChange={setEditing}>

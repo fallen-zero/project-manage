@@ -58,12 +58,11 @@ pub struct DocPreview {
     pub truncated: bool,
 }
 
-fn unavailable() -> AppError {
-    AppError::new(
-        "preview_unavailable",
-        "这条索引记录不能预览",
-        Some("记录可能来自已注销的目录，或索引重建前的旧结果；到 /index 重跑一轮索引"),
-    )
+/// 三种成因共用 `preview_unavailable`（行不 ok / 当前尺寸超上限 / 已有一份在抽取），
+/// 因为 M4 §七 把「前端只认 preview_* 两个码」定成了契约；成因一律写进 hint 由界面念出来。
+/// 扩码表是终审议题（spec 风险 5），不许在本任务顺手加。
+fn unavailable(why: &str) -> AppError {
+    AppError::new("preview_unavailable", "这条索引记录不能预览", Some(why))
 }
 
 /// 只在持锁时调用；返回后**释放锁**再抽盘。握着 `state.conn` 去读盘会把整个应用卡在一次慢 IO 上
@@ -81,7 +80,7 @@ pub fn row_for_preview(conn: &Connection, doc_id: &str) -> AppResult<PreviewRow>
             |r| Ok(PreviewRow { path: r.get(0)?, project_name: r.get(1)? }),
         )
         .optional()?;
-    row.ok_or_else(unavailable)
+    row.ok_or_else(|| unavailable("记录可能来自已注销的目录，或索引重建前的旧结果；到 /index 重跑一轮索引"))
 }
 
 /// 抽取层的 io 码（`AppError::io` 的 `fs_failed`）在预览这里翻译成 `preview_file_missing`：
@@ -92,7 +91,7 @@ fn map_io_error(e: AppError) -> AppError {
         AppError::new(
             "preview_file_missing",
             "文件已不可达",
-            Some("文件可能已改名或被移走；真正的失效标记要到 M5 的核对轮才会写回记录"),
+            Some("文件可能已改名或被移走；下一轮索引会把它标成失效，/index 的状态筛选能列出全部失效行"),
         )
     } else {
         e
@@ -100,7 +99,21 @@ fn map_io_error(e: AppError) -> AppError {
 }
 
 /// 生产入口：抽取器固定为 `extract::extract_text`。
-pub fn render_preview(doc_id: &str, row: &PreviewRow, query: &str) -> AppResult<DocPreview> {
+/// `max_file_bytes` 是扫描器那道同一上限：`index_docs.size` 只是登记时的读数，
+/// 文件在索引之后长大就不再有上限（终审 I-4），所以这里按**当前磁盘尺寸**再过一次。
+/// stat 失败一律放行 —— 读不到元数据不代表超限，让抽取器自己出 `fs_failed`
+/// （既有 `io_errors_are_translated…` 用假路径走的就是这一格，别把它改成拒绝）。
+pub fn render_preview(
+    doc_id: &str,
+    row: &PreviewRow,
+    query: &str,
+    max_file_bytes: u64,
+) -> AppResult<DocPreview> {
+    if let Ok(meta) = std::fs::metadata(&row.path) {
+        if meta.len() > max_file_bytes {
+            return Err(unavailable("文件在索引之后长大了，已超过单文件上限；到 /index 重跑一轮把它降级成 skipped"));
+        }
+    }
     render_preview_with(doc_id, row, query, extract_text)
 }
 
@@ -214,13 +227,31 @@ fn take_windows(hits: &[(usize, usize)], text_len: usize) -> (Vec<(usize, usize)
     (windows, dropped)
 }
 
+/// 只给测试用：`prefix_utf16_matches_naive_counting` 拿它当**朴素逐段计数**的参照，对拍前缀差。
+/// `stitch` 自 Task 10 起不再调它（改用 `utf16_prefix` 的 O(1) 前缀差），所以照 `index_store.rs:171`
+/// 同一写法标 `#[cfg(test)]`，不另外开豁免格 —— 全仓的编译期豁免按结构门只剩 `db.rs:30` 那一处。
+#[cfg(test)]
 fn utf16_len(chars: &[char]) -> usize {
     chars.iter().map(|c| c.len_utf16()).sum()
 }
 
+/// 前缀码元长度：prefix[i] = chars[..i] 的 UTF-16 码元数。把 stitch 里「每命中一次 utf16_len」
+/// 的 O(命中数×窗长) 摊成 O(n)（M5 真机：8MB×19.5万命中曾致单次预览挂起 >9 分钟）。
+fn utf16_prefix(chars: &[char]) -> Vec<usize> {
+    let mut p = Vec::with_capacity(chars.len() + 1);
+    p.push(0usize);
+    for c in chars {
+        let last = *p.last().unwrap();
+        p.push(last + c.len_utf16());
+    }
+    p
+}
+
 /// 按窗口切原文、中间插 `PREVIEW_GAP`，同时把命中从「原文 char 坐标」换算到
 /// 「拼出来的 text 的码元坐标」。换算只做一次，就在写入每一扇窗的时候。
+/// 区间码元数走 `utf16_prefix` 的前缀差（O(1)），不再逐命中重数整段窗（Task 10，spec D 风险 5）。
 fn stitch(chars: &[char], windows: &[(usize, usize)], hits: &[(usize, usize)]) -> (String, Vec<(usize, usize)>) {
+    let prefix = utf16_prefix(chars);
     let mut out = String::new();
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     let mut base = 0usize; // 已写入 out 的码元数
@@ -234,13 +265,59 @@ fn stitch(chars: &[char], windows: &[(usize, usize)], hits: &[(usize, usize)]) -
         out.extend(chars[ws..we].iter());
         for &(hs, he) in hits {
             if hs >= ws && he <= we {
-                let start = base + utf16_len(&chars[ws..hs]);
-                ranges.push((start, start + utf16_len(&chars[hs..he])));
+                let start = base + prefix[hs] - prefix[ws];
+                ranges.push((start, start + prefix[he] - prefix[hs]));
             }
         }
-        base += utf16_len(&chars[ws..we]);
+        base += prefix[we] - prefix[ws];
     }
     (out, ranges)
+}
+
+/// 预览的**抽盘**单飞闸门（终审 I-5）—— 精确说封的是「同线程上的一次抽取」，不是整条 RPC：
+/// 命令体返回、票 Drop 之后，serde 与 `return_result` 的 webview 派发仍在票外跑（Task 7 评审
+/// 读到 `ipc/command.rs` 与 `ipc/mod.rs` 的先后顺序）。正文已窗口化，那个尾部成本可忽略，
+/// 但「单飞」两个字别读成「一次只有一条预览 RPC 在飞」。住在 `doc_preview` 而不是塞进
+/// `IndexShared`：那四格（cancel/running/summary/last_error）语义全是索引作业的，混一格
+/// 预览状态会让下一个读者重新发现一遍归属（spec D9）。
+#[derive(Default)]
+pub struct PreviewShared {
+    busy: std::sync::atomic::AtomicBool,
+}
+
+/// 进预览的票。Drop 复位，所以 panic 展开也照样放行 —— 形状照 `index_job::RunningGuard`。
+pub struct PreviewGuard {
+    shared: std::sync::Arc<PreviewShared>,
+}
+
+impl Drop for PreviewGuard {
+    fn drop(&mut self) {
+        self.shared.busy.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl PreviewShared {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `swap` 而不是「先 read 再 store」：命令体跑在多线程 worker 上，
+    /// 两步写会让两条都以为自己独占。
+    pub fn try_enter(shared: &std::sync::Arc<Self>) -> Option<PreviewGuard> {
+        if shared.busy.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        Some(PreviewGuard { shared: std::sync::Arc::clone(shared) })
+    }
+}
+
+/// 三成因里的第三种（D10：不扩码表，靠 hint 分）。
+pub fn busy() -> AppError {
+    AppError::new(
+        "preview_unavailable",
+        "这条索引记录不能预览",
+        Some("已有一份预览正在抽取原文，等它结束再试；特别大的文件可能要几分钟以上"),
+    )
 }
 
 #[cfg(test)]
@@ -289,9 +366,9 @@ mod tests {
             .unwrap()
     }
 
-    /// 与 Task 6 命令体同一条链：锁内查库、锁外抽盘。
+    /// 与 Task 6 命令体同一条链：锁内查库、锁外抽盘。`u64::MAX` = 尺寸门对本模块既有用例透明。
     fn preview(conn: &Connection, doc_id: &str, q: &str) -> AppResult<DocPreview> {
-        render_preview(doc_id, &row_for_preview(conn, doc_id)?, q)
+        render_preview(doc_id, &row_for_preview(conn, doc_id)?, q, u64::MAX)
     }
 
     #[test]
@@ -441,8 +518,10 @@ mod tests {
     fn io_errors_are_translated_and_other_codes_pass_through() {
         let missing = render_preview_with("d1", &row_for("C:/definitely/not/here.txt"), "验收", extract_text).unwrap_err();
         assert_eq!(missing.code, "preview_file_missing", "fs_failed 不能原样给前端");
-        let png = render_preview_with("d1", &row_for("C:/definitely/not/here.png"), "验收", extract_text).unwrap_err();
-        assert_eq!(png.code, "extract_unsupported", "非 io 码保持原样");
+        // M6 起 png 分派到 Image 走 OCR（不存在的路径会落 io 码被翻译成 preview_file_missing），
+        // 「非 io 码原样透出」的例子换成 kind_of 仍为 None 的 .dll。
+        let dll = render_preview_with("d1", &row_for("C:/definitely/not/here.dll"), "验收", extract_text).unwrap_err();
+        assert_eq!(dll.code, "extract_unsupported", "非 io 码保持原样");
     }
 
     /// M3 的 I2 教训：中间层没有测试等于没守。这一条钉住 panic 边界真的接到了预览这条路上。
@@ -451,5 +530,69 @@ mod tests {
         let boom: fn(&Path) -> AppResult<String> = |_| panic!("模拟解析器在畸形文件上炸");
         let e = render_preview_with("d1", &row_for("C:/x/a.docx"), "验收", boom).unwrap_err();
         assert_eq!(e.code, "extract_failed");
+    }
+
+    /// 终审 I-4：`index_docs.size` 是**登记时**的读数，文件在索引之后膨胀就不受任何上限约束
+    /// （扫描器那道门只在扫描循环里判），而 `extract_text` 自己的 doc 注释写着「不做大小校验」。
+    /// 修法：生产入口按**当前磁盘尺寸**再过一次同一道上限。
+    /// 阳性对照必须有：上限放宽一格就该正常抽出，否则上面那条 expect_err 是恒红的。
+    #[test]
+    fn a_file_that_grew_past_the_limit_after_indexing_is_not_previewed() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("膨胀.txt");
+        std::fs::write(&p, "甲方要求验收指标正文".as_bytes()).unwrap(); // 十个汉字 = 30 字节，刻意大于下面那个 10 的上限
+        let c = conn();
+        let id = seed_row(&c, &p.display().to_string(), DocOutcome::Ok("甲方要求验收指标".into()));
+        let row = row_for_preview(&c, &id).unwrap();
+        assert_eq!(row.path, p.display().to_string(), "前提：那一行的 path 就是磁盘上这个真文件");
+
+        let e = render_preview(&id, &row, "验收", 10).expect_err("当前磁盘尺寸 30 > 上限 10 ⇒ 该拒");
+        assert_eq!(e.code, "preview_unavailable", "不扩码表：三成因共用一条码，靠 hint 分（spec D10）");
+
+        let ok = render_preview(&id, &row, "验收", 100_000).unwrap();
+        assert_eq!(ok.ranges.len(), 1, "阳性对照：上限放宽就该正常抽出");
+    }
+
+    /// 终审 I-5：命令体直接跑在 tokio **多线程** worker 上（`kind = "sync_threadpool"` 只是
+    /// tracing 标签，见 HANDOFF 坑 87），所以连点 N 份慢文档就是 N 个 worker 被占死，
+    /// 之后**所有** async 命令与插件异步任务一起排队。真机读数：单次慢预览 266,093 ms。
+    /// 单飞闸门：占用中第二条直接拒。第三条断言（释放后能再进）不可省 ——
+    /// 没有它，「永不放行」的实现也能过前两条。
+    #[test]
+    fn only_one_preview_is_in_flight_at_a_time() {
+        let shared = std::sync::Arc::new(PreviewShared::new());
+        let first = PreviewShared::try_enter(&shared);
+        assert!(first.is_some(), "空闲时第一条该进");
+        assert!(PreviewShared::try_enter(&shared).is_none(), "占用中第二条该被拒");
+        drop(first);
+        assert!(PreviewShared::try_enter(&shared).is_some(), "释放后该能再进");
+    }
+
+    /// 借 `index_job::running_flag_is_released_even_when_the_job_panics` 的形状。
+    /// 少了 Drop 复位（比如改成命令末尾手写 `store(false)`），一次 panic 就**永久**锁死预览，
+    /// 而界面只会一直念「已有一份预览正在抽取」，没有任何报错指向真正的原因。
+    #[test]
+    fn the_preview_gate_is_released_when_the_body_panics() {
+        let shared = std::sync::Arc::new(PreviewShared::new());
+        let outer = std::sync::Arc::clone(&shared);
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = PreviewShared::try_enter(&outer).expect("第一条该进");
+            panic!("预览体内炸");
+        }));
+        assert!(ran.is_err(), "前提：闭包确实 panic 了，否则下面那条断言什么都没证明");
+        assert!(PreviewShared::try_enter(&shared).is_some(), "panic 展开也必须把闸门放掉");
+    }
+
+    #[test]
+    fn prefix_utf16_matches_naive_counting() {
+        // 混合 BMP 与代理对（emoji）的串，验「前缀差」等价于逐段 utf16_len。
+        let s = "验收α🎯合同β🚀付款条件";
+        let chars: Vec<char> = s.chars().collect();
+        let prefix = utf16_prefix(&chars);
+        for i in 0..chars.len() {
+            for j in i..=chars.len() {
+                assert_eq!(prefix[j] - prefix[i], utf16_len(&chars[i..j]), "区间 [{i},{j})");
+            }
+        }
     }
 }

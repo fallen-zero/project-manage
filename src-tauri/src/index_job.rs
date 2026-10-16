@@ -5,6 +5,7 @@
 //!   （要 `AppHandle`），正确性由 Task 12 的真机验证承担 —— 别在这里写只能证明 mock 的测试；
 //!   但 `RunningGuard` 的复位语义是可测的，`running_flag_is_released_even_when_the_job_panics` 钉它。
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,13 +17,18 @@ use tauri::{AppHandle, Emitter};
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::extract::{extract_text, panic_to_err};
-use crate::index_scan::{scan_root, ScanOptions};
-use crate::index_store::{clear_project, current_rowid, write_doc, DocOutcome};
+use crate::index_scan::{scan_root, ScanOptions, ScanOutcome};
+use crate::index_store::{clear_project, current_rowid, doc_rows_for_project, mark_missing, write_doc, DocOutcome};
 
 pub const PROGRESS_EVENT: &str = "index://progress";
 /// 每 20 个文件回一次进度：5 万文件全量跑，逐文件 emit 会把事件队列压垮，
 /// 而界面上「10 秒动一次」已经够用。项目边界与结尾一定额外发一次。
 pub const PROGRESS_EVERY: i64 = 20;
+
+/// 熔断地板：一次要标掉的行数**同时**过成「过半」和「过地板（> 20 行）」，才判为
+/// 「疑似盘只挂了一半」而不是「用户真删了」。地板存在的意义是小项目不被它挡住 ——
+/// 一个几十上百个文件的项目整目录被删是日常操作，那种回收是真的。阈值只写这一处。
+const MISSING_FUSE_MIN_ROWS: usize = 20;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,6 +135,57 @@ pub fn sweep_unrooted_projects(conn: &Connection) -> AppResult<usize> {
         clear_project(conn, id)?;
     }
     Ok(ids.len())
+}
+
+/// 差集回收：本轮**完整**扫过这个项目之后，把「库里有行、本轮扫不到」的登记标成失效。
+/// 集合两侧同源（库里那行的 path 就是上一轮 `WalkDir::new(登记的 root 串)` 拼出来的），
+/// 所以一律用原样字符串比对：不做大小写折叠、不做 canonicalize（spec D7 —— 折叠会让换写法
+/// 变成「旧行永久谎标 missing」，因为 `UNIQUE (project_id, path)` 是 BINARY 比较）。
+/// 2026-10-10（Task 2 评审 Minor-1）「两侧同源」是稳态事实、不是无条件事实：稳态构造不出不同源
+/// （`targets()` 原样取 `project_dirs.path` → `WalkDir::new(root)` → `entry.path().display()`，
+/// 库里侧 `write_doc` 落的就是同一个 `file.path`）。唯一可破坏的序列是**作业运行中改指 / 注销根目录**
+/// （`project.rs:343-347` 与 `index_job.rs:110-119` 的旧快照写回窗口）：旧根的行被写回来、而 sweep 不收
+/// （该项目此时有新 root 行，`NOT EXISTS` 不成立）⇒ 下一轮旧串成片标 missing。那不是误删活 root 下的行，
+/// 它把 M3 I3 那种「永久可搜的陈旧行」收敛掉了；Task 5 的事务关的是两条语句之间的窗口，关不到这个。
+/// 返回标掉的行数；调用方刻意丢弃，形状与轮末那句 `let _ = sweep_unrooted_projects(conn)?;` 一致。
+pub fn reclaim_missing(
+    conn: &Connection,
+    project_id: &str,
+    outcome: &ScanOutcome,
+    root_missing: bool,
+) -> AppResult<usize> {
+    // 闸门一：盘没挂载 ≠ 文件全被删。root_missing 时 run_pass 手里是 Default::default() 的空集合，
+    // 少了这一支就会把整个项目的行成片标失效 —— 而本工具的常态用法里有移动盘与未挂载盘。
+    // 「本轮零扫到」不另立闸门：它与这一支是同一个条件（spec 第四节记着这次合并）。
+    if root_missing {
+        return Ok(0);
+    }
+    // 闸门二：capped 的集合是 break 出来的，只含配额内前 N 个；配额外的老行不是被删了，是没轮到被看见。
+    if outcome.capped {
+        return Ok(0);
+    }
+    // 两桶都要：超限文件照样有行（too_large），漏了这一桶就是把每个超限文件误标失效。
+    let seen: HashSet<&str> = outcome
+        .files
+        .iter()
+        .chain(outcome.over_size.iter())
+        .map(|f| f.path.as_str())
+        .collect();
+    let tracked = doc_rows_for_project(conn, project_id)?;
+    let candidates: Vec<i64> = tracked
+        .iter()
+        .filter(|(_, path)| !seen.contains(path.as_str()))
+        .map(|(rowid, _)| *rowid)
+        .collect();
+    // 熔断：一次要标掉过半、且超过地板行数，更像是盘只挂了一半 / walkdir 早期崩，不是真删。
+    // 整数比较不用除法：`tracked.len() / 2` 有截断歧义，`candidates * 2 > tracked.len()` 没有。
+    if candidates.len() * 2 > tracked.len() && candidates.len() > MISSING_FUSE_MIN_ROWS {
+        return Ok(0);
+    }
+    for rowid in &candidates {
+        mark_missing(conn, *rowid)?;
+    }
+    Ok(candidates.len())
 }
 
 /// 时间戳走 SQLite 的 `datetime('now')`：`chrono` 虽在 spec 第七节的清单里，但 Cargo.toml
@@ -246,6 +303,15 @@ pub fn run_pass(
                 on_progress(progress_for(&target, &acc, "running", &file.path));
             }
         }
+        // 差集回收（M5）：本轮完整扫过这个项目之后，库里那些「本轮没扫到」的行标成失效。
+        // 两条硬闸门与熔断全在 reclaim_missing 里面，这里只负责把 root_missing 与本轮集合交出去。
+        // 计数刻意丢弃，形状与轮末那句 `let _ = sweep_unrooted_projects(conn)?;` 一致：接住它就得给
+        // RunSummary 加字段，而 missing 的行数本来就能从 status_counts 的 GROUP BY 免费拿到
+        // （`index_overview` 的 pick("missing") 已在等）。代价照实记在 spec 风险 6：
+        // 被挡下的那一轮「动了还是没动」在界面上看不出来 —— 累计失效数自 Task 9 起已上屏
+        // （`index-status.tsx` 的 missing 计数），缺的只是这一轮的增量。spec 风险 6 记的就是这格。
+        // 上面两条 cancel 早退路径（循环开头那条、循环内那条）都不经过这里 —— 一轮被取消时不做额外写库。
+        let _ = reclaim_missing(conn, &target.project_id, &outcome, root_missing)?;
         on_progress(progress_for(&target, &acc, "running", ""));
         results.push(acc);
     }
@@ -403,10 +469,16 @@ pub fn start(
                 Ok(c) => c,
                 Err(err) => return report_failure(&mut emit, &worker, format!("{err}")),
             };
-            let opts = match ScanOptions::load(&conn) {
+            let mut opts = match ScanOptions::load(&conn) {
                 Ok(o) => o,
                 Err(err) => return report_failure(&mut emit, &worker, format!("{err}")),
             };
+            // M6 D4：load 的默认 true 只是兜底，降级判据必须用真实探测值（ocr_available 进程内记忆化）。
+            opts.ocr_available = crate::ocr::ocr_available();
+            // M7 D5：LibreOffice 的探测**刻意不记忆化**（三次 is_file()，现探免费），每轮一次覆盖进来。
+            // 收益是「/index 一键装完不用重启应用，下一轮就开始索引 .doc/.ppt」；
+            // 一轮只探一次（不是每文件一次），所以降级判据不会在一轮中间翻转。
+            opts.soffice_available = crate::legacy_office::soffice_available();
             match run_pass(&conn, &opts, project_id.as_deref(), rebuild, &worker.cancel, &mut emit) {
                 // state 由 run_pass 自己定（它末尾已经按 cancel 判过一次），这里不再重算第二遍。
                 // 注意是 `Ok(s)` 而不是 `Ok(mut s)`：少了「外面再算一遍 state」之后没人改它，
@@ -456,7 +528,7 @@ mod tests {
     const MAX: u64 = 20 * 1024 * 1024;
 
     fn opts() -> ScanOptions {
-        ScanOptions { exclude_dirs: vec!["node_modules".to_owned()], max_file_bytes: MAX, max_files_per_project: 50000 }
+        ScanOptions { exclude_dirs: vec!["node_modules".to_owned()], max_file_bytes: MAX, max_files_per_project: 50000, ocr_available: true, soffice_available: true }
     }
 
     fn seeded_project(conn: &Connection, id: &str, root: &Path) {
@@ -476,12 +548,33 @@ mod tests {
         std::fs::write(dir.join("维保.txt"), "维保期为十二个月".as_bytes()).unwrap();
         std::fs::write(dir.join("大图.txt"), vec![b'a'; 300]).unwrap(); // 配合下面的小上限
         std::fs::write(dir.join("空扫描.txt"), "   \n\t".as_bytes()).unwrap(); // 抽取成功但正文空白
-        std::fs::write(dir.join("图片.png"), b"\x89PNG").unwrap();
+        std::fs::write(dir.join("附件.zip"), b"PK").unwrap(); // 压缩包：kind_of 为 None，仍走「不支持不建行」（M6 起 png 已被 OCR 支持，不能再当例子）
         std::fs::write(dir.join("合同/node_modules/x.txt"), "不该被索引".as_bytes()).unwrap();
     }
 
     fn no_cancel() -> AtomicBool {
         AtomicBool::new(false)
+    }
+
+    /// 不经磁盘、直接给 `reclaim_missing` 造本轮集合。`capped` 一并可设，
+    /// 这样「配额触顶」那条闸门能被单独触发（T3）。两桶分开传，就是为了能单独验 over_size。
+    fn outcome_with(files: &[&str], over_size: &[&str], capped: bool) -> crate::index_scan::ScanOutcome {
+        crate::index_scan::ScanOutcome {
+            files: files.iter().map(|p| scanned(p)).collect(),
+            over_size: over_size.iter().map(|p| scanned(p)).collect(),
+            walk_errors: vec![],
+            capped,
+        }
+    }
+
+    /// 库里该项目已标 missing 的行数。T3/T4 靠它断「一格都没动」。
+    fn missing_rows(conn: &Connection, project_id: &str) -> i64 {
+        conn.query_row(
+            "SELECT count(*) FROM index_docs WHERE project_id = ?1 AND index_status = 'missing'",
+            [project_id],
+            |r| r.get(0),
+        )
+        .unwrap()
     }
 
     /// 库里的行数。重建用例要拿它证明「磁盘上没了的旧行跟着掉」，
@@ -548,6 +641,220 @@ mod tests {
         assert_eq!(second.results[0].unchanged, 1, "size+mtime 没变的 ok 行不该重读：{:?}", second.results[0]);
         assert_eq!(second.results[0].ok, 0, "没重读就不该再计 ok");
         assert_eq!(crate::index_store::doc_hits(&conn, "验收", 20).unwrap().len(), 1, "跳过后仍可搜");
+    }
+
+    /// M6 T6 端到端（headless，需求方选的路）：真 Windows OCR 引擎驱动整条链 ——
+    /// 一张含已知中文的 png 经 `run_pass`→`extract_text`→`ocr::image_text`→`write_doc`(jieba) 入库
+    /// →`doc_hits` 搜得到→`doc_preview` 出清洗后正文。用编得动的 `--lib` 测试 profile 直驱真代码，
+    /// 绕开本机 `tauri dev` 的提交内存墙（os error 1455，账本 Task 6 记）。无 OCR 语言包显式 SKIP、
+    /// 不假装通过（T2 同形制）。覆盖 spec §八 断言 1（happy path 入库 ok）/2（D7 清洗后无空格原词命中）
+    /// /3（预览出清洗后正文）/6（增量不重 OCR），并当场证红线①（索引只读、源 png 一字未动）。
+    #[test]
+    fn ocr_image_flows_end_to_end_through_index_and_search() {
+        if !crate::ocr::ocr_available() {
+            eprintln!("SKIP: 本机无可用 OCR 语言包，端到端用例不假装通过（§八.5 降级由 ocr_available 探测承担）");
+            return;
+        }
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-cn-ocr.png");
+        // 红线①：被索引的源文件只读——跑前记 size+mtime，跑后逐字比（对 temp 副本同样比）。
+        let src_before = std::fs::metadata(&fixture).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("合同.png");
+        std::fs::copy(&fixture, &img).unwrap();
+        let img_before = std::fs::metadata(&img).unwrap();
+        // txt 刻意不含「合同/验收」，好让下面 doc_hits 的 png 命中不被正文段之外的东西稀释。
+        std::fs::write(dir.path().join("台账.txt"), "项目 台账 摘要".as_bytes()).unwrap();
+        // §八.4 坏图臂：非图片字节挂 .png 扩展名——扫描门放行（ocr_available 真、进 files），
+        // 到抽取阶段 BitmapDecoder 解不开 → image_text 落 Err → run_pass 的 failed 臂建行带 error_msg。
+        std::fs::write(dir.path().join("坏图.png"), b"this is not a png at all".as_slice()).unwrap();
+
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", dir.path());
+
+        // §八.1：一轮后 png 行 index_status='ok'（扫描放行→抽取成功→write_doc 落 ok，不是 failed/skipped）。
+        let summary = run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(summary.state, "done");
+        let png_status: String = conn
+            .query_row("SELECT index_status FROM index_docs WHERE path LIKE '%合同.png'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(png_status, "ok", "含字图片经真 OCR 应入库 ok");
+
+        // §八.4：非图片字节挂 .png → 抽取阶段解码 Err → run_pass 落 failed 行、带 error_msg
+        // （图片专属的 failed 臂；对照上面 png 的 ok 臂，两态在同一轮里分得开）。
+        let bad: (String, Option<String>) = conn
+            .query_row(
+                "SELECT index_status, error_msg FROM index_docs WHERE path LIKE '%坏图.png'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("坏图.png 应建行（Err 是 failed、不是不建行）");
+        assert_eq!(bad.0, "failed", "垃圾字节 .png 该落 failed 行");
+        assert!(bad.1.is_some(), "failed 行应带 error_msg");
+
+        // §八.2 / D7：无空格原词「合同验收」命中 png 正文段（raw OCR 的字间空格已被 clean_cjk_spaces 收掉，
+        // 再由 write_doc→index_text(jieba) 入 FTS）。
+        let hits = crate::index_store::doc_hits(&conn, "合同验收", 20).unwrap();
+        assert!(hits.iter().any(|h| h.path.ends_with("合同.png")),
+            "清洗后的 OCR 正文应进 FTS 并被无空格原词命中：{:?}", hits.iter().map(|h| &h.path).collect::<Vec<_>>());
+
+        // §八.3：预览窗口含清洗后正文（断长度>0 与含词，不把整段 OCR 正文打印进日志）。
+        let doc_id: String = conn
+            .query_row("SELECT id FROM index_docs WHERE path LIKE '%合同.png'", [], |r| r.get(0))
+            .unwrap();
+        let row = crate::doc_preview::row_for_preview(&conn, &doc_id).unwrap();
+        let pv =
+            crate::doc_preview::render_preview(&doc_id, &row, "合同验收", crate::index_scan::DEFAULT_MAX_FILE_BYTES)
+                .unwrap();
+        assert!(pv.text.replace(' ', "").contains("合同验收"), "预览应出清洗后 OCR 词（长度 {}）", pv.text.chars().count());
+
+        // §八.6：增量第二趟不重 OCR——size+mtime 未变 → 计 unchanged、不重记 ok。
+        let second = run_pass(&conn, &opts(), Some("p1"), false, &no_cancel(), &mut |_| {}).unwrap();
+        let r2 = &second.results[0];
+        assert_eq!(r2.ok, 0, "没重读就不该再计 ok：{r2:?}");
+        assert!(r2.unchanged >= 1, "png 应计入 unchanged（不重跑 OCR）：{r2:?}");
+
+        // 红线①：索引器绝不写回被索引文件——源 fixture 与 temp 副本的 size+mtime 跑后逐字不变。
+        let src_after = std::fs::metadata(&fixture).unwrap();
+        assert_eq!(
+            (src_after.len(), src_after.modified().ok()),
+            (src_before.len(), src_before.modified().ok()),
+            "源 png 一字未动"
+        );
+        let img_after = std::fs::metadata(&img).unwrap();
+        // 整分支终审 F5：原先只查 size —— 同尺寸改写会溜过去。补齐 modified()，与 M7 副本侧同判据。
+        assert_eq!(
+            (img_after.len(), img_after.modified().ok()),
+            (img_before.len(), img_before.modified().ok()),
+            "被索引副本一字未动"
+        );
+    }
+
+    /// M7 端到端（headless，需求方选的路线，同 M6 蓝本）：真 LibreOffice 驱动整条链 ——
+    /// 一份含已知中文的 .doc 复制进 tempdir → `run_pass` → `extract_text` → `legacy_office::legacy_text`
+    /// → `office_text`(docx) → `write_doc`(jieba) 入库 → `doc_hits` 搜得到 → `render_preview` 出正文
+    /// → 第二趟 `unchanged` 证「不重转」。覆盖 spec §九 断言 1 与 §八 的 1/3 格，并当场证红线①。
+    /// 没装 LibreOffice 显式 SKIP，不假装通过。
+    #[test]
+    fn legacy_doc_flows_end_to_end_through_index_and_search() {
+        if !crate::legacy_office::soffice_available() {
+            eprintln!("SKIP: 本机无 LibreOffice，旧格式端到端不假装通过（降级由扫描门测守护）");
+            return;
+        }
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-cn.doc");
+        let src_before = std::fs::metadata(&fixture).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("旧合同.doc");
+        std::fs::copy(&fixture, &doc).unwrap();
+        let doc_before = std::fs::metadata(&doc).unwrap();
+        // txt 刻意不含「合同验收」，别让正文段命中被夹具之外的东西稀释。
+        std::fs::write(dir.path().join("台账.txt"), "项目 台账 摘要".as_bytes()).unwrap();
+
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", dir.path());
+
+        // §九.1：一轮后 .doc 行 ok。opts() 默认 soffice_available=true（可用那一支）。
+        let summary = run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(summary.state, "done");
+        let status: String = conn
+            .query_row("SELECT index_status FROM index_docs WHERE path LIKE '%旧合同.doc'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "ok", "真转换应入库 ok（不是 failed/skipped）");
+
+        // 正文段可搜：无空格原词命中（转换抽出的正文经既有 jieba 入库，分词链未动）。
+        let hits = crate::index_store::doc_hits(&conn, "合同验收", 20).unwrap();
+        assert!(hits.iter().any(|h| h.path.ends_with("旧合同.doc")),
+            "旧格式正文应进 FTS 并被原词命中：{:?}", hits.iter().map(|h| &h.path).collect::<Vec<_>>());
+
+        // 预览可开：走同一个 extract_text，于是现转一次。断长度，不回显正文（红线④）。
+        let doc_id: String = conn
+            .query_row("SELECT id FROM index_docs WHERE path LIKE '%旧合同.doc'", [], |r| r.get(0))
+            .unwrap();
+        let row = crate::doc_preview::row_for_preview(&conn, &doc_id).unwrap();
+        let pv = crate::doc_preview::render_preview(&doc_id, &row, "合同验收", crate::index_scan::DEFAULT_MAX_FILE_BYTES)
+            .unwrap();
+        assert!(pv.text.contains("合同验收"), "旧格式预览应能现转并含已知词（长度 {}）", pv.text.chars().count());
+
+        // 增量不重转：size+mtime 未变 ⇒ 第二趟计 unchanged，一个字节都不打开（D1 的成本承诺兑现处）。
+        let second = run_pass(&conn, &opts(), Some("p1"), false, &no_cancel(), &mut |_| {}).unwrap();
+        let r2 = &second.results[0];
+        assert_eq!(r2.ok, 0, "没重读就不该再计 ok：{r2:?}");
+        assert!(r2.unchanged >= 1, ".doc 应计入 unchanged（不重起 LibreOffice）：{r2:?}");
+
+        // 红线①：源夹具与 temp 副本逐字未动。
+        let src_after = std::fs::metadata(&fixture).unwrap();
+        assert_eq!((src_after.len(), src_after.modified().ok()), (src_before.len(), src_before.modified().ok()),
+            "源夹具一字未动");
+        // T7 评审 Minor 补：副本这侧原先只查 size —— 同尺寸改写会溜过去，补 modified() 与夹具侧同判据。
+        let doc_after = std::fs::metadata(&doc).unwrap();
+        assert_eq!((doc_after.len(), doc_after.modified().ok()), (doc_before.len(), doc_before.modified().ok()),
+            "被索引副本一字未动");
+    }
+
+    /// **两笔转换并发**：把 T2 那一轮的设计翻转钉成**确定性**守护，而不是靠多线程 harness 撞运气。
+    /// 实测（spec §三.16）：两个实例共用同一个 `UserInstallation` 时抢输的一方 `exit 1` 且零产物，
+    /// 而每笔转换自带独立目录后两笔都必须成功。这条断的是「目录隔离真的做到了」。
+    /// 变异取证：把 `legacy_text` 里的 profile 换回按 pid 复用的共享目录 ⇒ 本条要能红
+    ///   （T2 修正轮实测过：装回旧形状后 3/3 次红，且每次红的不是同一条测试 ⇒ 正是「随机假失败」）。
+    #[test]
+    fn two_conversions_in_parallel_do_not_collide() {
+        if !crate::legacy_office::soffice_available() {
+            eprintln!("SKIP: 本机无 LibreOffice");
+            return;
+        }
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-cn.doc");
+        // 红线①的另一半：转换一笔都不许往**夹具目录**里写东西（T7 评审 Important-2 补）。
+        let fix_dir = fixture.parent().unwrap().to_path_buf();
+        let fix_before = std::fs::read_dir(&fix_dir).unwrap().count();
+        let fx_meta_before = std::fs::metadata(&fixture).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("甲.doc");
+        let b = dir.path().join("乙.doc");
+        std::fs::copy(&fixture, &a).unwrap();
+        std::fs::copy(&fixture, &b).unwrap();
+        let handle = std::thread::spawn(move || crate::legacy_office::legacy_text(&a, false).map(|t| t.chars().count()));
+        let right = crate::legacy_office::legacy_text(&b, false).map(|t| t.chars().count());
+        let left = handle.join().expect("子线程不该 panic");
+        assert!(left.is_ok() && right.is_ok(), "两笔并发都必须转换成功：left={:?} right={:?}",
+            left.as_ref().map(|n| *n).map_err(|e| e.code), right.as_ref().map(|n| *n).map_err(|e| e.code));
+        let (ln, rn) = (left.unwrap(), right.unwrap());
+        // T7 评审 Minor 补：两笔都 `Ok(0)` 时「相等」会空过 ⇒ 必须断真抽到东西（长度，不回显正文）。
+        assert!(ln > 0 && rn > 0, "两笔都必须抽出非空正文（否则相等断言是空的）：left={ln} right={rn}");
+        assert_eq!(ln, rn, "同一份内容的两副本抽出的长度该一致");
+        assert_eq!(std::fs::read_dir(&fix_dir).unwrap().count(), fix_before, "夹具目录不许多出任何文件");
+        let fx_meta_after = std::fs::metadata(&fixture).unwrap();
+        assert_eq!((fx_meta_after.len(), fx_meta_after.modified().ok()),
+            (fx_meta_before.len(), fx_meta_before.modified().ok()), "夹具源文件一字未动");
+    }
+
+    /// `.ppt` 走的是同一套代码，只有目标扩展名与 `office_text` 的 `slides` 分支不同。
+    /// 单独测一条是因为那条分支的读取入口是 `ppt/slides/slideN.xml`（spec §三.12），
+    /// 与 docx 的 `word/document.xml` 是两个部件 —— 少这一条，ppt 通路就只有注释在守。
+    #[test]
+    fn legacy_ppt_flows_end_to_end_through_index_and_search() {
+        if !crate::legacy_office::soffice_available() {
+            eprintln!("SKIP: 本机无 LibreOffice");
+            return;
+        }
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-cn.ppt");
+        // 红线①：doc 那条已经断过，ppt 走的是同一条 `legacy_text` ⇒ 同样必须断（T7 评审 Important-1 补）。
+        let fx_before = std::fs::metadata(&fixture).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ppt = dir.path().join("旧片子.ppt");
+        std::fs::copy(&fixture, &ppt).unwrap();
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", dir.path());
+        let summary = run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(summary.state, "done");
+        let status: String = conn
+            .query_row("SELECT index_status FROM index_docs WHERE path LIKE '%旧片子.ppt'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "ok", "含字的 .ppt 应经真转换入库 ok");
+        let hits = crate::index_store::doc_hits(&conn, "付款条件", 20).unwrap();
+        assert!(hits.iter().any(|h| h.path.ends_with("旧片子.ppt")),
+            "ppt 的第二段中文应可被搜到：{:?}", hits.iter().map(|h| &h.path).collect::<Vec<_>>());
+        let fx_after = std::fs::metadata(&fixture).unwrap();
+        assert_eq!((fx_after.len(), fx_after.modified().ok()), (fx_before.len(), fx_before.modified().ok()),
+            "ppt 夹具一字未动（同一只读红线的另一条通路）");
     }
 
     /// 取消：第一个进度回调就把标志立起来，pass 必须停在中间。
@@ -645,6 +952,14 @@ mod tests {
     #[test]
     fn running_flag_is_released_even_when_the_job_panics() {
         let shared = Arc::new(IndexShared::new());
+        // 顺带钉住启动自动轮（`lib.rs` 的 setup）依赖的那条前提：新构造的 `IndexShared` 必须是
+        // 未占用态。这一格此前全仓无断言 —— 把 `AtomicBool::new(false)` 改成 `true` 时 147 条
+        // 全绿，而运行时后果是「自动轮永不起来 + 徽章永久停在索引进行中」（Task 8 评审的 Minor）。
+        // 并进本用例，条数不变（本仓先例：M4 终审批次两处「并进既有测试体」）。
+        assert!(
+            !shared.running.load(Ordering::SeqCst),
+            "新构造的 IndexShared 必须未占用，否则 `start` 开头的 running.swap 会把自动轮挡死"
+        );
         shared.running.store(true, Ordering::SeqCst);
         let s = Arc::clone(&shared);
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
@@ -949,5 +1264,480 @@ mod tests {
         assert!(crate::index_store::doc_hits(&conn, "付款条件", 20).unwrap().is_empty(),
             "软删项目的内容靠 deleted_at 过滤挡住，不是靠删行 —— 行在库里而搜不到才是对的");
         assert_eq!(crate::index_store::doc_hits(&conn, "验收", 20).unwrap().len(), 1, "活项目照常可搜");
+    }
+
+    /// 本轮扫到 2 条、库里有 3 条 ⇒ 只有「没了.txt」进差集。
+    /// 断言分工：`== 1` 断计数；按 rowid 断 status 断「动的是哪一行」；
+    /// 检索两条断的是这一行退出召回；虚表点删由末尾那条 `count(*) FROM index_docs_fts` 承重
+    /// （`fts_orphan_rows` 在保留主表行的形态下恒 0，不承重，见 Task 2 评审 I-1）。
+    #[test]
+    fn reclaim_marks_rows_the_pass_did_not_see() {
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", Path::new("C:/根"));
+        write_doc(&conn, "p1", &scanned("C:/根/留下.txt"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        let gone = write_doc(&conn, "p1", &scanned("C:/根/没了.txt"), DocOutcome::Ok("报价单里写着验收流程".into())).unwrap();
+        write_doc(&conn, "p1", &scanned("C:/根/超限.txt"), DocOutcome::Skipped("too_large")).unwrap();
+
+        assert_eq!(doc_rows(&conn, "p1"), 3, "前提：三行都真在库里");
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收流程", 20).unwrap().len(), 1,
+            "前提：那行正文此刻真搜得到，否则末尾「搜不到」什么都没证明");
+
+        let o = outcome_with(&["C:/根/留下.txt", "C:/根/超限.txt"], &[], false);
+        assert_eq!(reclaim_missing(&conn, "p1", &o, false).unwrap(), 1);
+
+        let status: String = conn
+            .query_row("SELECT index_status FROM index_docs WHERE doc_rowid = ?1", [gone], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "missing");
+        assert_eq!(missing_rows(&conn, "p1"), 1, "只该动差集里那一行");
+        assert!(crate::index_store::doc_hits(&conn, "验收流程", 20).unwrap().is_empty(),
+            "还搜得到就说明虚表侧没删干净");
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收指标", 20).unwrap().len(), 1, "留下那行不许被牵连");
+        assert_eq!(crate::index_store::fts_orphan_rows(&conn), 0);
+        // 这条才是「点删真的发生了」的判据：虚表侧只剩「留下.txt」那一行。
+        // 上面两条检索断言守的是另一件事（doc_hits 由 SELECT_SQL 的正向 `= 'ok'` 决定，
+        // status 一翻转必空；fts_orphan_rows 因 D3 保留主表行而恒 0）—— 措辞按 Task 2 评审订正。
+        let fts_total: i64 = conn
+            .query_row("SELECT count(*) FROM index_docs_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fts_total, 1, "变异：把 reclaim_missing 里的 mark_missing 换成裸 UPDATE 只改状态 ⇒ 这里是 2，这条红");
+    }
+
+    /// 超限文件本轮落在 `over_size` 桶里（它有一行 too_large）。集合漏掉这一桶，
+    /// 就等于把每一个超限文件标成失效 —— 本轮最容易写错的一格，所以单独一条测试守。
+    #[test]
+    fn an_over_size_row_still_on_disk_is_not_marked_missing() {
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", Path::new("C:/根"));
+        write_doc(&conn, "p1", &scanned("C:/根/留下.txt"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        let big = write_doc(&conn, "p1", &scanned("C:/根/大图.txt"), DocOutcome::Skipped("too_large")).unwrap();
+
+        let o = outcome_with(&["C:/根/留下.txt"], &["C:/根/大图.txt"], false);
+        assert_eq!(reclaim_missing(&conn, "p1", &o, false).unwrap(), 0, "两桶都算扫到了 ⇒ 差集为空");
+
+        let status: String = conn
+            .query_row("SELECT index_status FROM index_docs WHERE doc_rowid = ?1", [big], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "skipped", "变异：构集合时只取 outcome.files ⇒ 这行被标 missing，这条红");
+        assert_eq!(missing_rows(&conn, "p1"), 0);
+    }
+
+    /// 盘没挂载时一格都不许动。库里刻意只留 **3** 行：3 个候选过不了熔断的地板行数量，
+    /// 所以少了 root_missing 这一支就会被真的标掉 ⇒ 这条测试对那一支是专属守护。
+    #[test]
+    fn an_unmounted_root_marks_nothing() {
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", Path::new("Z:/没挂载/移动盘"));
+        for name in ["甲.txt", "乙.txt", "丙.txt"] {
+            write_doc(
+                &conn,
+                "p1",
+                &scanned(&format!("Z:/没挂载/移动盘/{name}")),
+                DocOutcome::Ok("甲方要求验收指标".into()),
+            )
+            .unwrap();
+        }
+        assert_eq!(doc_rows(&conn, "p1"), 3, "前提：三行在库里");
+
+        let o = outcome_with(&[], &[], false); // 生产里 root_missing 一定配空 outcome
+        assert_eq!(reclaim_missing(&conn, "p1", &o, true).unwrap(), 0, "变异：删掉 root_missing 那一支 ⇒ 3 被标掉");
+        assert_eq!(missing_rows(&conn, "p1"), 0, "未挂载不等于被删除");
+    }
+
+    /// 配额触顶那轮不许比对。库 3 行 / 扫到 2 行 ⇒ 候选 1，熔断（`1 * 2 > 3` 为假）挡不住它，
+    /// 只有 capped 这一支挡得住 ⇒ 专属守护。
+    #[test]
+    fn a_capped_scan_marks_nothing() {
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", Path::new("C:/根"));
+        write_doc(&conn, "p1", &scanned("C:/根/留下.txt"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        write_doc(&conn, "p1", &scanned("C:/根/也留下.txt"), DocOutcome::Ok("甲方也要求验收指标".into())).unwrap();
+        let extra = write_doc(&conn, "p1", &scanned("C:/根/配额外的旧行.txt"), DocOutcome::Ok("配额之外的 付款条件".into())).unwrap();
+
+        let o = outcome_with(&["C:/根/留下.txt", "C:/根/也留下.txt"], &[], true);
+        assert_eq!(reclaim_missing(&conn, "p1", &o, false).unwrap(), 0, "变异：删掉 capped 那一支 ⇒ 1 被标掉");
+        let status: String = conn
+            .query_row("SELECT index_status FROM index_docs WHERE doc_rowid = ?1", [extra], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "ok", "触顶那轮不许把配额外的老行判成被删除");
+        assert_eq!(missing_rows(&conn, "p1"), 0);
+    }
+
+    /// 熔断：25 行里 24 行不见 ⇒ 判为「疑似盘只挂了一半」，本轮不动。
+    /// 正文一律同一句，是为了让最后那条召回断言数得出确切值（数字混进查询词会让分词口径变成赌局）。
+    #[test]
+    fn the_fuse_refuses_a_mass_reclaim() {
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", Path::new("C:/根"));
+        for i in 0..25 {
+            write_doc(
+                &conn,
+                "p1",
+                &scanned(&format!("C:/根/f{i:02}.txt")),
+                DocOutcome::Ok("甲方要求验收指标".into()),
+            )
+            .unwrap();
+        }
+        let o = outcome_with(&["C:/根/f00.txt"], &[], false);
+        assert_eq!(reclaim_missing(&conn, "p1", &o, false).unwrap(), 0, "24/25 过半且过地板 ⇒ 熔断");
+        assert_eq!(missing_rows(&conn, "p1"), 0);
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收指标", 50).unwrap().len(), 25, "熔断生效 ⇒ 二十四行正文都还搜得到（limit 取 50：doc_hits 原样穿透，20 会把结果截到 20）");
+    }
+
+    /// 熔断的阳性对照 + 地板的专属守护：同样过半、但只有 10 行、缺 6 个 ⇒ 必须标掉。
+    /// 这条不可省：只有上一条「25 缺 24」时，把 `MISSING_FUSE_MIN_ROWS` 改成 0、
+    /// 或整支熔断写成恒跳过，测试照样全绿（`24 * 2 > 25` 与地板无关，前一条测不到地板那一半）。
+    /// 6 个候选过得了「过半」（`6 * 2 > 10`）但过不了「> 20」⇒ 只有地板值那一半能被打红。
+    #[test]
+    fn the_fuse_floor_lets_a_small_majority_reclaim_through() {
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", Path::new("C:/根"));
+        let paths: Vec<String> = (0..10).map(|i| format!("C:/根/f{i:02}.txt")).collect();
+        for p in &paths {
+            write_doc(&conn, "p1", &scanned(p), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        }
+        assert_eq!(doc_rows(&conn, "p1"), 10, "前提：十行都在库里");
+
+        let seen: Vec<&str> = paths[..4].iter().map(String::as_str).collect(); // 前 4 个还在磁盘，后 6 个不见了
+        assert_eq!(
+            reclaim_missing(&conn, "p1", &outcome_with(&seen, &[], false), false).unwrap(),
+            6,
+            "6/10 过半但不超地板 ⇒ 正常回收；变异：把 MISSING_FUSE_MIN_ROWS 改成 0 ⇒ 这里变 0"
+        );
+        assert_eq!(missing_rows(&conn, "p1"), 6);
+        assert_eq!(doc_rows(&conn, "p1"), 10, "回收只改状态，一行都不许删（D3）");
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收指标", 20).unwrap().len(), 4, "被标的 6 行退出召回，留下的 4 行照旧");
+    }
+
+    /// 端到端（真 tempdir + 真 walkdir）：删一个已索引文件 ⇒ 下一轮它自动变失效、退出召回；
+    /// 放回 ⇒ **同一行**被重抽回 ok（spec D6：回填不新开设机制，靠的是 current_rowid
+    /// 要求 index_status='ok' 这条既有谓词）。本轮唯一一条走完
+    /// scan_root → 差集 → mark_missing → 召回 → 回填 全链的用例，所以断言覆盖全链。
+    /// 删的文件是 tempdir 里自造的夹具，不是任何用户资料（红线一）。
+    #[test]
+    fn a_file_deleted_since_the_last_pass_is_marked_missing_and_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("留下.txt"), "甲方要求验收指标".as_bytes()).unwrap();
+        let gone = dir.path().join("没了.txt");
+        std::fs::write(&gone, "报价单里写着验收流程".as_bytes()).unwrap();
+        let conn = db::open_in_memory().unwrap();
+        seeded_project(&conn, "p1", dir.path());
+        // 第二个项目刻意做成「有 root 行、但 root 指向不可能存在的目录」，专门钉住接线里
+        // `root_missing` 那个实参传没传对：硬编码成 `false` 会让它的两行被成片标 missing。
+        // 只钉 unit 级不够 —— Task 3 那四条 unit 用例是直接调 `reclaim_missing` 的，
+        // 改调用点的实参它们一条都抓不到（「中间层没有测试等于没守」是 M3 的 I2 教训）。
+        // 两行是假路径字符串键（本仓 blessed 的做法，见本文件 `scanned` 助手头上的注释），
+        // 磁盘上不需要真的存在。软删与无 root 行的形态不归这里（归 sweep 那两条既有用例）。
+        // 正文刻意避开「验收」二字：`doc_hits` 不带项目过滤，p2 的两行若与 p1 那行同词，
+        // 「留下那行不受牵连」那条断言的分母就变成 3（计划 bef01f5 补夹具时的撞词，实测读数）。
+        conn.execute("INSERT INTO projects (id, name, status) VALUES ('p2', '盘没挂载的项目', '立项')", []).unwrap();
+        conn.execute("INSERT INTO project_dirs (id, project_id, kind, path) VALUES ('p2-d', 'p2', 'root', 'Z:/没挂载/移动盘')", []).unwrap();
+        write_doc(&conn, "p2", &scanned("Z:/没挂载/移动盘/合同.txt"), DocOutcome::Ok("移动盘上的遗留合同".into())).unwrap();
+        write_doc(&conn, "p2", &scanned("Z:/没挂载/移动盘/清单.txt"), DocOutcome::Ok("移动盘上的遗留清单".into())).unwrap();
+
+        run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(doc_rows(&conn, "p1"), 2, "前提：首轮两行都进了库");
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收流程", 20).unwrap().len(), 1,
+            "前提：那行正文此刻真搜得到");
+
+        std::fs::remove_file(&gone).unwrap();
+        run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+
+        assert_eq!(missing_rows(&conn, "p1"), 1, "第二轮回扫不到就该标失效");
+        assert_eq!(doc_rows(&conn, "p1"), 2, "只标不删（D3）");
+        assert_eq!(missing_rows(&conn, "p2"), 0, "盘没挂载那个项目一格都不许动 —— 这条钉的是接线处传的 `root_missing` 实参");
+        assert_eq!(doc_rows(&conn, "p2"), 2, "p2 的两行都该原样留着（`targets()` 会列出它，但 root 不可达）");
+        assert!(crate::index_store::doc_hits(&conn, "验收流程", 20).unwrap().is_empty(),
+            "还搜得到就说明虚表侧没删干净");
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收指标", 20).unwrap().len(), 1, "留下那行不受牵连");
+        assert_eq!(crate::index_store::fts_orphan_rows(&conn), 0);
+
+        std::fs::write(&gone, "报价单里写着验收流程".as_bytes()).unwrap();
+        run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(missing_rows(&conn, "p1"), 0, "文件回来后同一行该被重抽回 ok");
+        assert_eq!(doc_rows(&conn, "p1"), 2, "是更新同一行，不是新增一行");
+        assert_eq!(crate::index_store::doc_hits(&conn, "验收流程", 20).unwrap().len(), 1, "回填后又能搜到");
+    }
+
+    // ---- M8 T9：headless 端到端（真 run_pass + 真文件库走完整条往返）----
+    // 四条私有夹具都重写一份小的，不跨模块借用 backup.rs `mod tests` 里的同形件（那是私有模块，
+    // 兄弟模块拿不到），也不为测试把任何一边提可见性 —— 本仓形制：`seeded_project` 与 `seed_project`
+    // 就是两份（简报注 1 的裁定）。
+    // 判据（简报注 1 点名要登记）：本轮 zip 读改写夹具已有两处（backup.rs 的 `unpack_for_test` 一份、
+    // 本模块的 `rewrite_zip_add_stray_entry` + `bump_schema_in_manifest_to` 一份）—— **第三处再要就抽公共件**，
+    // 别再抄第三份。
+
+    /// 包内条目名清单。
+    fn zip_names_of(path: &Path) -> Vec<String> {
+        let file = std::fs::File::open(path).unwrap();
+        let mut z = zip::ZipArchive::new(file).unwrap();
+        (0..z.len())
+            .map(|i| z.by_index(i).unwrap().name().to_owned())
+            .collect()
+    }
+
+    /// 种出 p1/p2/p3 三行项目。id 必须真落成 p1..p3 且行数自检 —— 否则下面
+    /// `DELETE FROM projects WHERE id='p1'` 删 0 行，「包与活库有差异」这个前提根本不存在（T6 注 3）。
+    fn seed_ledger_for_job(conn: &Connection) {
+        for i in 1..=3 {
+            conn.execute(
+                "INSERT INTO projects (id, name, status) VALUES (?1, ?2, '立项')",
+                params![format!("p{i}"), format!("甲项目{i}")],
+            )
+            .unwrap();
+        }
+        let got: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(got, 3, "必须真落 3 行（id=p1..p3），否则删一条制造的差异不存在：{got}");
+    }
+
+    /// 复制 src 的全部条目到 dst，并按 `name` 多塞一条 `bytes`（manifest 不会点名它）。
+    /// 注 2 要求先确认写侧收不收 `../`：实读 vendored `zip-8.6.0` —— `ZipWriter::start_file`
+    /// （`write.rs:1501`）直接把名字交给 `start_entry`（`:1169`），后者落到 `types.rs:422` 的
+    /// `name.to_string()`，整条路上**没有任何**清洗或拒绝（清洗只在读侧的 `enclosed_name`/
+    /// `file_name_sanitized` 里），所以 `../` 形态在本机构造得出来，不需要走注 2 的退让分支。
+    fn rewrite_zip_add_stray_entry(src: &Path, dst: &Path, name: &str, bytes: &[u8]) {
+        use std::io::{Read as _, Write as _};
+        let file = std::fs::File::open(src).unwrap();
+        let mut z = zip::ZipArchive::new(file).unwrap();
+        let out = std::fs::File::create(dst).unwrap();
+        let mut w = zip::ZipWriter::new(out);
+        for i in 0..z.len() {
+            // 条目借用 `z`（Drop 时还要用它）⇒ 取完名字与字节就出块，别横跨下一次 `by_index`。
+            let (entry_name, entry_bytes) = {
+                let mut entry = z.by_index(i).unwrap();
+                let n = entry.name().to_owned();
+                let mut buf = Vec::new();
+                entry.read_to_end(&mut buf).unwrap();
+                (n, buf)
+            };
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            w.start_file(entry_name, options).unwrap();
+            w.write_all(&entry_bytes).unwrap();
+        }
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        w.start_file(name, options).unwrap();
+        w.write_all(bytes).unwrap();
+        w.finish().unwrap();
+    }
+
+    /// 只改 manifest 的 `schemaVersion`、db 字节原样重写进 dst。
+    /// db 原样 ⇒ manifest 记的哈希对这种包**仍然通过**，红点只可能落在版本判据那一道上。
+    fn bump_schema_in_manifest_to(src: &Path, dst: &Path, version: i64) {
+        use std::io::{Read as _, Write as _};
+        let file = std::fs::File::open(src).unwrap();
+        let mut z = zip::ZipArchive::new(file).unwrap();
+        let mut json = String::new();
+        {
+            let mut entry = z.by_name(crate::backup::MANIFEST_ENTRY).unwrap();
+            entry.read_to_string(&mut json).unwrap();
+        }
+        let mut manifest: crate::backup::Manifest = serde_json::from_str(&json).unwrap();
+        let mut db_bytes = Vec::new();
+        {
+            let mut entry = z.by_name(crate::backup::DB_ENTRY).unwrap();
+            entry.read_to_end(&mut db_bytes).unwrap();
+        }
+        manifest.schema_version = version;
+        let body = serde_json::to_vec_pretty(&manifest).unwrap();
+        let out = std::fs::File::create(dst).unwrap();
+        let mut w = zip::ZipWriter::new(out);
+        for (name, bytes) in [
+            (crate::backup::MANIFEST_ENTRY, body.as_slice()),
+            (crate::backup::DB_ENTRY, db_bytes.as_slice()),
+        ] {
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            w.start_file(name, options).unwrap();
+            w.write_all(bytes).unwrap();
+        }
+        w.finish().unwrap();
+    }
+
+    /// M8 的主承诺端到端（headless，与 M6 T6 / M7 T7 同形制）：一张真目录经 `run_pass` 建出索引
+    /// → 导出 → 解包验「台账在、两张索引表空」→ 改活库（删一条项目）→ 导入 → 项目回来、索引仍空、
+    /// 应急包落在数据目录且能读通。绕开 `tauri dev` 的提交内存墙，直驱真代码（`--lib` 测试 profile）。
+    /// 顺带当场证红线①：被索引的源 txt 文件 size+mtime 跑前跑后逐字不变。
+    #[test]
+    fn backup_round_trip_through_a_real_pass_keeps_the_source_files_untouched() {
+        let root = tempfile::tempdir().unwrap(); // 被索引的目录
+        let data = tempfile::tempdir().unwrap(); // 一次性 data_dir（不是真实数据目录）
+        let mut sources = Vec::new();
+        for i in 0..3 {
+            let p = root.path().join(format!("合同{i}.txt"));
+            std::fs::write(&p, format!("项目 验收 指标 第{i}份").as_bytes()).unwrap();
+            sources.push(p);
+        }
+        // 红线①：跑前记 size+mtime，跑后逐字比。
+        let before: Vec<(u64, Option<std::time::SystemTime>)> = sources
+            .iter()
+            .map(|p| {
+                let m = std::fs::metadata(p).unwrap();
+                (m.len(), m.modified().ok())
+            })
+            .collect();
+
+        let mut conn = crate::db::open(data.path()).unwrap();
+        seeded_project(&conn, "p1", root.path());
+        let summary = run_pass(&conn, &opts(), None, false, &no_cancel(), &mut |_| {}).unwrap();
+        assert_eq!(summary.state, "done");
+        let indexed: i64 = conn
+            .query_row("SELECT COUNT(*) FROM index_docs", [], |r| r.get(0))
+            .unwrap();
+        assert!(indexed >= 3, "真扫描后要非空，否则下面「剥索引」是空对空恒真：{indexed}");
+        assert!(crate::index_store::doc_hits(&conn, "验收", 20).unwrap().iter().any(|h| h.path.ends_with("合同0.txt")),
+            "夹具本身得先能搜到，否则后面那条空不是失败而是没测");
+
+        let pkg = data.path().join("round-trip.zip");
+        let sum = crate::backup::export(&conn, &pkg).unwrap();
+        assert!(sum.bytes > 0, "包必须真的落盘并且非空：{}", pkg.display());
+        // 「先关快照连接再读字节」这一臂**只有在 durable（WAL）源库上才有牙**：T4 的单元测试全走
+        // `db::open_in_memory()`（`after_open(durable=false)` ⇒ journal 为 MEMORY，全程没有 -wal 侧文件），
+        // 所以那边把 `drop(s)` 挪到 `fs::read` 之后也不会红（T4 评审的 Important，控制方裁定：判据挪到本格）。
+        // 本格实测（变异④ 已跑）：`drop(s)` 挪到 `fs::read` 之后**确实红**，但红点是下面的 `idx == 0`
+        // —— 快照连接没关时 `-wal` 里的帧没 checkpoint，`fs::read` 拿到的主文件是**剥索引之前的陈旧一致影像**
+        // （3 行原样），于是 `idx` 读出 3。⇒ **spec §七 在本格的守卫是 `idx == 0` / `fts == 0` 这两条**，
+        // 不是紧邻的两条包形状断言：`names` 那条由 `zip_out` 写死的两个常量条目名决定（本变异动不了它），
+        // `PRAGMA integrity_check` 对「缺自己 -wal 的库」返回 ok（它就是一致的旧影像）。那两条各自守的是
+        // 「包里只有 `manifest.json` + `backup.db` 这两条」与「解出来的 db 自洽」，本身有用，但**不许**在注释里记成 §七 的功劳。
+        let names = zip_names_of(&pkg);
+        // 订正：只数条数没有失败面 ⇒ 断**名字的逐条内容与写入顺序**（这才是「包内只有这两条」那句判据的实体）。
+        assert_eq!(names, vec!["manifest.json".to_owned(), "backup.db".to_owned()], "{names:?}");
+        // 解出来验：台账在、两张索引表空。
+        // 控制方修订：原写还调一个 `unpack_backup_db(&pkg, ...)` 再 `unpack_for_test(&pkg, ...)` —— 两个名字
+        // 指的是同一件事（解出包内 db 并开一条连接），重复了。只留 `backup::unpack_for_test` 一份，
+        // 上面那条 `PRAGMA integrity_check` 就在它返回的连接上跑。
+        let probe = crate::backup::unpack_for_test(&pkg, data.path());
+        let ok: String = probe
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .expect("integrity_check 必须有且只有一行读数");
+        assert_eq!(ok, "ok", "解出来的包内 db 必须自洽（注意：这条**不是** §七 的守卫 —— 缺自己 -wal 的库是一致旧影像，integrity_check 照样 ok）");
+        let idx: i64 = probe.query_row("SELECT COUNT(*) FROM index_docs", [], |r| r.get(0)).unwrap();
+        let fts: i64 = probe.query_row("SELECT COUNT(*) FROM index_docs_fts", [], |r| r.get(0)).unwrap();
+        assert_eq!(idx, 0, "索引不进包（D4 的兑现）；这一条同时是 spec §七「先关快照连接再读字节」的载体：把 `drop(s)` 挪到 `fs::read` 之后这里会读出 3（陈旧影像），与变异① 同为一条 —— 这是已知的一条断言担两条判据，别再为它加假断言");
+        assert_eq!(fts, 0, "FTS 侧同样要空");
+        let proj: i64 = probe.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap();
+        assert_eq!(proj, 1, "台账侧一行都不能少：{proj}");
+        drop(probe);
+
+        // 改活库，制造回滚场景。
+        conn.execute("DELETE FROM projects WHERE id='p1'", []).unwrap();
+        assert_eq!(conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap(), 0);
+
+        let out = crate::backup::import(&mut conn, &pkg, data.path()).unwrap();
+        assert_eq!(
+            conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap(),
+            1,
+            "被删的项目要回来 —— 这是回滚的全部意义"
+        );
+        assert_eq!(conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM index_docs", [], |r| r.get(0)).unwrap(), 0,
+            "导入后索引必须是空的（D7 那句提示的存在理由）");
+        let pre = std::path::Path::new(&out.pre_restore_path);
+        assert!(pre.parent() == Some(data.path()), "应急包必须落在数据目录内：{}", out.pre_restore_path);
+        let info = crate::backup::inspect(pre).unwrap();
+        // 简报原文期望 1，实跑得 0 —— 计划错，不是实现错：应急包是 `import` 在 **restore 之前**用
+        // 活连接导的（`backup.rs:448`），此刻活库刚被 DELETE 成 0 行，所以它念的就是 0。
+        // T6 裁定 4 钉的也是这件事（`out.counts == after_delete`）。期望改成 0 之后这条仍有牙：
+        // 谁把 ⑤ 挪到 ⑥ 之后，这里就会变成 1。
+        assert_eq!(info.counts.projects, 0, "应急包念的就是覆写前那一刻的现数（删掉 p1 之后的活库）：{:?}", info.counts);
+
+        // 红线①：索引器与备份器都只读，源文件一字未动。
+        let after: Vec<(u64, Option<std::time::SystemTime>)> = sources
+            .iter()
+            .map(|p| {
+                let m = std::fs::metadata(p).unwrap();
+                (m.len(), m.modified().ok())
+            })
+            .collect();
+        assert_eq!(after, before, "被索引的源文件 size+mtime 必须逐字不变");
+    }
+
+    /// zip-slip：包内多塞一条 manifest 没点名的条目，导入后那个位置**不许**被写出来。
+    /// T5 的判据是「只按 manifest 点名的条目取」，这条测试是那一句的唯一直接证据。
+    ///
+    /// 篡改包 / zip-slip：包内多一条 manifest 没点名的条目 ⇒ **导入被硬拒**，且那条一条也没落过盘。
+    ///
+    /// 这条测试的期望在两处交付之间翻过方向，两版都留痕（别只看见最后一版）：
+    /// ① 计划 T9 初稿写「期望 `backup_package_invalid`」—— 在那时的实现下**必红**：`read_package` 只按
+    ///    `DB_ENTRY` 取名，而哈希算的是**解压后**的 db 字节，重写 zip 时重新压缩只改存放字节、不改摘要
+    ///    ⇒ 多一条谁都不违反，四道前置全过、导入照成。那一版因此翻成「导入成功 + 钉 `!exists`」。
+    /// ② M8.1 ④b（需求方当次批准）把 spec §五 的判据从「静默忽略」升级成**硬拒**：包内条目集合必须
+    ///    恰好等于 manifest 点名的集合（含 `manifest.json` 自己）⇒ 本条重新期望被拒。
+    ///
+    /// **遮蔽要如实说**：④b 之后「不落盘」那两条 `!exists` 不再是唯一防线 —— 集合校验在它之前就把包拒了，
+    /// 「只加遍历落盘、集合校验还在」这一档变异现在打不红本条（它只能靠前一档红）。还留着是因为纵深不要钱，
+    /// 也因为这正是 T5 那条「同时违反多道的包必须有确定的那一条错误」的同款取舍。能红本条的两个变异是：
+    /// 摘掉集合校验（`expect_err` 红）、或校验与落盘一起退化回旧行为（`expect_err` 与 `!exists` 双红）。
+    #[test]
+    fn an_extra_entry_in_the_package_is_refused_and_never_written_to_disk() {
+        let data = tempfile::tempdir().unwrap();
+        let conn = crate::db::open(data.path()).unwrap();
+        seed_ledger_for_job(&conn); // 必须种出 p1..p3，下面删掉 p1 才有可观测的差异
+        let good = data.path().join("ok.zip");
+        crate::backup::export(&conn, &good).unwrap();
+        let evil = data.path().join("evil.zip");
+        let stray = "pfm-m8-zipslip-probe.txt"; // 名字带里程碑前缀，避免撞上 %TEMP% 里的既有文件
+        rewrite_zip_add_stray_entry(&good, &evil, &format!("../{stray}"), b"pwned");
+        // 钉住这条测试自己的前提 —— 野条目真的在那个包里。不钉的话，将来 `zip` 写侧一旦开始清洗条目名
+        // （注 2 设想过的那档退化），包会被静默写成没有越界名，本条全绿而什么都没测。
+        let evil_names = zip_names_of(&evil);
+        assert_eq!(evil_names.len(), 3, "恶包必须真的有 3 条（好包的 2 条 + 这条野条目）：{evil_names:?}");
+        assert!(evil_names.iter().any(|n| n == &format!("../{stray}")), "越界名必须原样在包里存着：{evil_names:?}");
+        drop(conn);
+
+        let mut conn2 = crate::db::open(data.path()).unwrap();
+        conn2.execute("DELETE FROM projects WHERE id='p1'", []).unwrap();
+        let e = crate::backup::import(&mut conn2, &evil, data.path())
+            .expect_err("M8.1 ④b：manifest 没点名的条目现在必须硬拒，不再静默忽略");
+        assert_eq!(e.code, "backup_package_invalid", "实际错码 {code}，消息 {msg}", code = e.code, msg = e.message);
+        let after: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, 2, "被拒之后库必须一字未动（删掉的那条项目不能神秘回来）⇒ 这道检查确实早于 restore");
+        assert!(
+            !data.path().join(stray).exists(),
+            "绝不能按包内自带路径落盘（数据目录内侧）：{}",
+            data.path().join(stray).display()
+        );
+        assert!(
+            !data.path().join("..").join(stray).exists(),
+            "绝不能按包内自带路径落盘（数据目录外侧，zip-slip 的正身）：{}",
+            data.path().join("..").join(stray).display()
+        );
+        let leaves = std::fs::read_dir(data.path())
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("pre-restore-"))
+            .count();
+        assert_eq!(leaves, 0, "这道新增的硬拒也必须早于应急包 —— 被拒的包一条文件都不许多写");
+    }
+
+    /// 「包比本机新」在端到端这一层也只拒不动（T5 测的是函数，这条测的是带真库的调用形状）。
+    #[test]
+    fn a_newer_package_does_not_touch_a_real_file_database() {
+        let data = tempfile::tempdir().unwrap();
+        let mut conn = crate::db::open(data.path()).unwrap();
+        seed_ledger_for_job(&conn);
+        let pkg = data.path().join("n.zip");
+        crate::backup::export(&conn, &pkg).unwrap();
+        let newer = data.path().join("nn.zip");
+        bump_schema_in_manifest_to(&pkg, &newer, crate::db::TARGET_VERSION + 5);
+        // 控制方修订：包是从**这个库**导出来的 ⇒ 若不加这一步，`before` 与包内容恒等，
+        // 「被拒之后一行都没动」在版本判据被删掉的情况下仍然为真（灌回去也是同样的数），是恒真断言。
+        // 删一行制造差异：版本判据一旦失效，导入会把 3 行灌回来 ⇒ 这一句才真的可证伪。
+        conn.execute("DELETE FROM projects WHERE id='p1'", []).unwrap();
+        let before = conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap();
+        assert_eq!(before, 2, "差异得真的存在，否则下面那条断言什么都没测");
+        let e = crate::backup::import(&mut conn, &newer, data.path()).expect_err("必须拒");
+        assert_eq!(e.code, "backup_schema_too_new");
+        assert_eq!(conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap(), before,
+            "被拒之后一行都没动");
+        let leaves = std::fs::read_dir(data.path())
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with("pre-restore-"))
+            .count();
+        assert_eq!(leaves, 0, "前三道失败不许留应急包");
     }
 }

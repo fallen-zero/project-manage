@@ -274,7 +274,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
 ///   变异取证一律用反转形态；
 /// - 第三级 id：**当前没有任何测试能把它打红**（删掉它实测 120 条全绿）。要它生效得有两个同名且
 ///   同条数的簇，而测试没法把随机 id 的「插入序 vs id 序」摆成固定先后，`sort_by` 又是稳定排序。
-///   有名缺口，交 M5（补法要么给 `projects.id` 开测试注入点，要么在测试里用裸 SQL 固定 id）。
+///   有名缺口，归 M5.5（本批按预期不红处理，见 spec 第四节清账#6；补法要么给 `projects.id` 开测试注入点，要么在测试里用裸 SQL 固定 id）。
 fn cluster_by_project<T>(
     items: Vec<T>,
     project_of: impl Fn(&T) -> (String, String),
@@ -703,6 +703,31 @@ mod tests {
             "名序最大者被截：{:?}",
             cluster_names(&b.docs)
         );
+    }
+
+    #[test]
+    fn ledger_section_is_capped_by_cluster_limit_too() {
+        // 终审 Minor：正文段有 `section_drops_the_31st_cluster…`，台账段共用 cluster_by_project
+        // 却**没有独立用例** ⇒ 台账段若哪天不再走同一上限，无人看守。补这一格。
+        // notes.body/title 是**明文列**（ledger.rs:621 create_note 不要 MasterKey），故本用例无需 vault。
+        let conn = db::open_in_memory().unwrap();
+        for i in 0..31 {
+            let pid = seed_project(&conn, &format!("台账项目{i:02}"));
+            ledger::create_note(
+                &conn,
+                &pid,
+                &ledger::NoteInput {
+                    title: "台账封顶".to_owned(),
+                    body: Some("这条正文含关键词台账封顶".to_owned()),
+                    tag: None,
+                },
+            )
+            .unwrap();
+        }
+        let bundle = unified_bundle(&conn, "台账封顶").unwrap();
+        // 上限 30：31 个簇必须砍到 30，并如实报 hidden=1。
+        assert_eq!(bundle.ledger.clusters.len(), MAX_CLUSTERS_PER_SECTION, "台账段应截到上限 30");
+        assert_eq!(bundle.ledger.hidden_clusters, 1, "31 减 30 应报隐藏 1 个簇");
     }
 
     #[test]

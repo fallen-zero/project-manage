@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { Project, ProjectInput } from "@/types/project";
 import type { DocPreview, SearchBundle } from "@/types/search";
@@ -16,6 +16,9 @@ import type {
   ServerInput,
 } from "@/types/ledger";
 import type { DocHit, DocRow, IndexOverview, IndexProgress } from "@/types/index";
+import type { BackupSummary, ImportOutcome, PackageInfo } from "@/types/backup";
+import type { Todo, TodoInput, TodoEdit } from "@/types/todo";
+import type { Milestone, MilestoneInput, MilestoneEdit } from "@/types/milestone";
 
 export const listProjects = () => invoke<Project[]>("project_list");
 export const getProject = (id: string) => invoke<Project>("project_get", { id });
@@ -46,6 +49,46 @@ export async function pickFolder(): Promise<string | null> {
   const picked = await openDialog({ directory: true, multiple: false });
   return typeof picked === "string" ? picked : null;
 }
+
+// —— M8 备份：三条命令 + 两个原生对话框封装 ——
+// 取消不是错误：save/open 返回 null 时由调用方直接 return，绝不写进 error。
+// dialog:default 实测含 allow-save / allow-open，补 save 不需要新权限。
+export async function pickBackupPath(defaultName: string): Promise<string | null> {
+  const picked = await saveDialog({
+    defaultPath: defaultName,
+    filters: [{ name: "备份包", extensions: ["zip"] }],
+  });
+  return typeof picked === "string" ? picked : null;
+}
+
+export async function pickPackagePath(): Promise<string | null> {
+  const picked = await openDialog({
+    multiple: false,
+    filters: [{ name: "备份包", extensions: ["zip"] }],
+  });
+  return typeof picked === "string" ? picked : null;
+}
+
+export const backupExport = (path: string) => invoke<BackupSummary>("backup_export", { path });
+export const backupInspect = (path: string) => invoke<PackageInfo>("backup_inspect", { path });
+export const backupImport = (path: string) => invoke<ImportOutcome>("backup_import", { path });
+
+// —— M9 待办与里程碑：八个封装（lib.rs 里 todo_*/milestone_* 四对命令的前端接线口）——
+// list 的 projectId 传显式 `null` 而不是省键：后端形参是 Option<String>，
+// 省键要依赖 Tauri 对缺失参数落 None 的行为，本仓没有先例，别赌。
+export const listTodos = (projectId: string | null) =>
+  invoke<Todo[]>("todo_list", { projectId });
+export const createTodo = (input: TodoInput) => invoke<Todo>("todo_create", { input });
+export const updateTodo = (id: string, input: TodoEdit) => invoke<void>("todo_update", { id, input });
+export const deleteTodo = (id: string) => invoke<void>("todo_delete", { id });
+
+export const listMilestones = (projectId: string | null) =>
+  invoke<Milestone[]>("milestone_list", { projectId });
+export const createMilestone = (input: MilestoneInput) =>
+  invoke<Milestone>("milestone_create", { input });
+export const updateMilestone = (id: string, input: MilestoneEdit) =>
+  invoke<void>("milestone_update", { id, input });
+export const deleteMilestone = (id: string) => invoke<void>("milestone_delete", { id });
 
 // 走 Tauri 的原生剪贴板而不是 navigator.clipboard：后者要求文档处于焦点态，
 // 窗口刚失焦就会静默抛错，而"一键复制路径/密码"正是这个软件的核心动作。
@@ -113,3 +156,16 @@ export const searchDocs = (query: string, limit?: number) =>
 // 两侧都是字面量、没有共享常量，拼错事件名 tsc 抓不到，只能由真机点验确认连通。
 export const onIndexProgress = (handler: (p: IndexProgress) => void) =>
   listen<IndexProgress>("index://progress", (e) => handler(e.payload));
+
+export interface LibreOfficeInstallOutcome {
+  startedViaWinget: boolean;
+}
+
+/** 一键安装 LibreOffice（无参数：包 ID 硬编码在 Rust 侧）。true = 已弹出 winget 窗口，进度与 UAC 都在
+ *  那个窗口里，本调用不等安装结束；false = 本机没有 winget，调用方要退到打开官网下载页。 */
+export const installLibreOffice = () =>
+  invoke<LibreOfficeInstallOutcome>("libreoffice_install");
+
+/** winget 不在时的退路：用系统默认浏览器打开 LibreOffice 下载页（opener:default 已含 https://* scope）。 */
+export const openLibreOfficeDownloadPage = () =>
+  openUrl("https://www.libreoffice.org/download/download-libreoffice/");
