@@ -782,7 +782,7 @@ use crate::daily_report::{DailyReport, DailyReportEdit, DailyReportInput};
 ```rust
 /// 日报四条命令（M10 Task 2，形制照 `todo_*`）：同步、函数体不写 await 点。
 /// `db(&state)?` 取回的 `MutexGuard` 不是 `Send`，**在 async fn 里让它横跨 await 点**才编不过（M8 D11）。
-/// 只挂 async 属性、函数体照常同步是合法的 —— 同文件下方备份那三条就是这个形态，
+/// 只挂 async 属性、函数体照常同步是合法的 —— `backup_import` 与 `doc_preview` 就是这个形态，
 /// M10 Task 6/7 的导出与导入三条也走这一形（spec §五.5）。
 #[tauri::command]
 fn daily_report_list(
@@ -817,10 +817,13 @@ fn daily_report_delete(state: State<'_, AppState>, id: String) -> AppResult<()> 
 ```rust
 /// 待办四条命令（M9 Task 2，形制照 `ledger_env_create`）：全部同步、函数体不写 await 点。
 /// **本注释原先写的是「给它们加 async 标记会直接编不过」——那是句假话，M10 更正**：
-/// 同文件下方备份那三条既挂 async 属性、又在体内用 `db(&state)?` 取 MutexGuard，照样编得过。
+/// 真取 `db(&state)?` 的 `MutexGuard` 又挂着 async 属性的是 `backup_import` 与 `doc_preview` 这两条，
+/// 它们今天就编得过（`backup_export` 开的是另一条连接、`backup_inspect` 根本不碰库，不能当证据）。
 /// 真编不过的是 `async fn` 里让 guard 横跨 await 点；只加属性、函数体不 await，
 /// 得到的正是 M10 Task 6/7 那三条导出/导入命令用的形态（spec §五.5）。
 ```
+
+> **这句假话在本文件里有两份，两份都要改**（Task 2 复审时控制方才发现）：`todo_*` 那块之外，`milestone_*` 那块（原 `lib.rs:723-724`）带着同一句「给它们加 async 标记会直接编不过」，本 Step 原先只写了前一份。第二份换成同样的更正说法。同一格还顺带纠正了一处**枚举过宽**：真在 async 属性下取 `MutexGuard` 的是 `backup_import` 与 `doc_preview` 两条，`backup_export` 开的是新连接、`backup_inspect` 不碰库，把它们一起算进「那三条都取 guard」是错的（结论不变，证据要准）。
 
 注册表（`lib.rs:855` 附近）：给 `milestone_delete` **补上逗号**，末尾追加四条且**最后一条不带逗号**：
 

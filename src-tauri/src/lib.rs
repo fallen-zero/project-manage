@@ -691,7 +691,8 @@ fn backup_import(state: State<'_, AppState>, path: String) -> AppResult<backup::
 
 /// 待办四条命令（M9 Task 2，形制照 `ledger_env_create`）：全部同步、函数体不写 await 点。
 /// **本注释原先写的是「给它们加 async 标记会直接编不过」——那是句假话，M10 更正**：
-/// 同文件下方备份那三条既挂 async 属性、又在体内用 `db(&state)?` 取 MutexGuard，照样编得过。
+/// 真取 `db(&state)?` 的 `MutexGuard` 又挂着 async 属性的是 `backup_import` 与 `doc_preview` 这两条，
+/// 它们今天就编得过（`backup_export` 开的是另一条连接、`backup_inspect` 根本不碰库，不能当证据）。
 /// 真编不过的是 `async fn` 里让 guard 横跨 await 点；只加属性、函数体不 await，
 /// 得到的正是 M10 Task 6/7 那三条导出/导入命令用的形态（spec §五.5）。
 /// 勾选完成走 `todo_update` 的 `done` 字段（D12：不单开一条命令）。
@@ -720,8 +721,10 @@ fn todo_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
     todo::delete(&conn, &id)
 }
 
-/// 里程碑四条命令（M9 Task 3，形制照上面 `todo_*` 那四条）：全部同步、函数体零 `await` ——
-/// `db(&state)?` 取回的 `MutexGuard` 不是 `Send`，给它们加 async 标记会直接编不过（M8 spec D11）。
+/// 里程碑四条命令（M9 Task 3，形制照上面 `todo_*` 那四条）：全部同步、函数体不写 await 点。
+/// 这里原先也写着「加 async 标记会直接编不过」，与上面 `todo_*` 那处是**同一句假话**（M10 一起更正）：
+/// 挂着 async 属性又取 `MutexGuard` 的 `backup_import`/`doc_preview` 今天就编得过；编不过的是让 guard
+/// 横跨 await 点的 `async fn`（M8 spec D11 说的其实是这件事）。
 /// 勾选完成走 `milestone_update` 的 `done` 字段（D12：不单开命令）；`MilestoneEdit` 不含
 /// `project_id`，改归属不在本轮（spec §十一）。`project_id` 的 JS 侧要显式传 `null`（缺键与 null 的行为别赌）。
 #[tauri::command]
@@ -753,7 +756,7 @@ fn milestone_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
 
 /// 日报四条命令（M10 Task 2，形制照 `todo_*`）：同步、函数体不写 await 点。
 /// `db(&state)?` 取回的 `MutexGuard` 不是 `Send`，**在 async fn 里让它横跨 await 点**才编不过（M8 D11）。
-/// 只挂 async 属性、函数体照常同步是合法的 —— 同文件下方备份那三条就是这个形态，
+/// 只挂 async 属性、函数体照常同步是合法的 —— `backup_import` 与 `doc_preview` 就是这个形态，
 /// M10 Task 6/7 的导出与导入三条也走这一形（spec §五.5）。
 #[tauri::command]
 fn daily_report_list(
