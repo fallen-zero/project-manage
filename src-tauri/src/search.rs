@@ -608,6 +608,50 @@ mod tests {
         ledger::delete_note(&conn, &note_id).unwrap();
         assert!(field_hits(&conn, "租户参数").unwrap().is_empty());
 
+        // 日报与待办那两条 collect 各自带着行级判据（`x.deleted_at IS NULL`）。
+        // 必须在项目还活着的时候验：一旦项目被软删，JOIN 里的项目级判据会先把整行挡掉，
+        // 行级判据就再也观察不到了 —— 这一格只能钉在下面的 delete_project 之前。
+        let d = daily_report::create(
+            &conn,
+            &daily_report::DailyReportInput {
+                project_id: pid.clone(),
+                report_date: Some("2026-10-16".to_owned()),
+                content: "季度巡检记录".to_owned(),
+                hours: 3.5,
+            },
+        )
+        .unwrap();
+        let t = todo::create(
+            &conn,
+            &todo::TodoInput {
+                project_id: pid.clone(),
+                title: "季度巡检待办跟进".to_owned(),
+                due_date: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            field_hits(&conn, "季度巡检记录").unwrap().len(),
+            1,
+            "前置条件：活项目的日报行要能搜到"
+        );
+        assert_eq!(
+            field_hits(&conn, "季度巡检待办跟进").unwrap().len(),
+            1,
+            "前置条件：活项目的待办行要能搜到"
+        );
+
+        daily_report::delete(&conn, &d.id).unwrap();
+        assert!(
+            field_hits(&conn, "季度巡检记录").unwrap().is_empty(),
+            "软删的日报行不该再被搜到"
+        );
+        todo::delete(&conn, &t.id).unwrap();
+        assert!(
+            field_hits(&conn, "季度巡检待办跟进").unwrap().is_empty(),
+            "软删的待办行不该再被搜到"
+        );
+
         project::delete_project(&conn, &pid).unwrap();
         assert!(field_hits(&conn, "运维后台").unwrap().is_empty(), "项目删除后其台账不再可搜");
         assert!(field_hits(&conn, "政务云迁移").unwrap().is_empty());
