@@ -95,7 +95,7 @@ fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
 
 /// 线性版本迁移：一个版本一段 DDL，只追加不改历史，便于备份包跨版本恢复。
 /// 提 `pub(crate)` 是给 M8 的验包判据比：包里的库比本机新就该拒（`backup::read_package`）。
-pub(crate) const TARGET_VERSION: i64 = 5;
+pub(crate) const TARGET_VERSION: i64 = 6;
 
 /// `pub(crate)` 是 M8 加的：`backup_import` 灌完包内库要能重放迁移（包里可能是旧版本）。
 pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
@@ -121,6 +121,7 @@ pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
             3 => V3,
             4 => V4,
             5 => V5,
+            6 => V6,
             _ => "",
         };
         apply_version(conn, target, ddl)?;
@@ -362,6 +363,28 @@ CREATE TABLE milestones (
 
 CREATE INDEX ix_todo_project ON todos(project_id);
 CREATE INDEX ix_milestone_project ON milestones(project_id);
+";
+
+/// V6 = 日报表（M10 spec §五.1）。三条口径延续 V5 的注释：
+/// 1. 软删沿用 `deleted_at`；`ON DELETE CASCADE` 因项目是软删（`project.rs` 的 UPDATE）而永不触发，
+///    所以「跨项目读要自带 p.deleted_at IS NULL」这条规矩照旧适用于本表。
+/// 2. `hours` 用 REAL 且**不加 CHECK**：表由本程序唯一写入，`0<h<=24` 与两位小数的判据在 Rust 侧
+///    （`daily_report::check_hours`）。CHECK 违例冒出来是 `db_failed`，会把「校验失败」伪装成库故障。
+/// 3. `report_date` 的形状与必填**只由写入侧保证**（`todo::req_date`）：SQL 里不做任何日期解释，
+///    `strftime`/`date` 是 UTC，用它比较会把本机日期算错（M9 D7 同一个理由，spec D9 沿用）。
+const V6: &str = "
+CREATE TABLE daily_reports (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    report_date TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    hours       REAL NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at  TEXT
+);
+
+CREATE INDEX ix_daily_report_project ON daily_reports(project_id);
 ";
 
 #[cfg(test)]
@@ -631,13 +654,13 @@ mod tests {
     }
 
     #[test]
-    fn v5_schema_meta_reaches_target_version_five() {
+    fn v6_schema_meta_reaches_target_version_six() {
         let conn = open_in_memory().unwrap();
         let ver: i64 = conn
             .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, 5, "迁移必须跑到 5");
-        assert_eq!(TARGET_VERSION, 5, "= 上一条，两处别各写各的");
+        assert_eq!(ver, 6, "迁移必须跑到 6");
+        assert_eq!(TARGET_VERSION, 6, "= 上一条，两处别各写各的");
     }
 
     /// D4：`stage` 是 CHECK 枚举。这五个词是需求原文那五个（思维导图.md:35-36），
@@ -755,5 +778,52 @@ mod tests {
         assert_eq!(plan, None, "plan_date 不填就是 NULL");
         assert_eq!(note, "", "里程碑 note 默认空串（需求原文把它当可选项，不是必填）");
         assert_eq!(mdone, 0);
+    }
+
+    /// 列集合与顺序一起钉：顺序漂了 `SELECT_COLUMNS`（Task 2）会静默错位读，
+    /// 而改名会同时打掉 `src/types/daily-report.ts` 与 xlsx 表头两处。
+    #[test]
+    fn v6_creates_daily_reports_with_documented_columns() {
+        let conn = db::open_in_memory().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('daily_reports') ORDER BY cid")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(
+            cols.join(","),
+            "id,project_id,report_date,content,hours,created_at,updated_at,deleted_at",
+            "V6 的列集合/顺序变了要同步 daily_report.rs 的 SELECT_COLUMNS 与 xlsx 表头"
+        );
+    }
+
+    /// 这一格钉的是**为什么必填日期必须走 `req_date` 而不是 `norm_date`**（spec §五.2）：
+    /// 缺列/NULL 走到 SQL 才有约束来挡，而那一挡冒出来是 SQLite 的 NOT NULL，不是我们的 invalid_input。
+    #[test]
+    fn v6_report_date_not_null_is_enforced_at_sqlite_layer() {
+        let conn = db::open_in_memory().unwrap();
+        seed_project(&conn, "p1");
+        let err = conn
+            .execute(
+                "INSERT INTO daily_reports (id, project_id, content, hours) VALUES ('d1','p1','甲',1.0)",
+                [],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("NOT NULL"),
+            "预期是 NOT NULL 挡住（而不是 CHECK 或外键），实际：{err}"
+        );
+    }
+
+    /// 本轮新立的规矩：**V6 零回填**（延续 M9 为 V5 立的那条）。迁移里不许塞业务行。
+    #[test]
+    fn v6_backfills_nothing() {
+        let conn = db::open_in_memory().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM daily_reports", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "新建库跑完迁移后本表必须是空的");
     }
 }
