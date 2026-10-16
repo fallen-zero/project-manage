@@ -34,3 +34,13 @@ export const MAX_HOURS_PER_ROW = 24;
 
 /// 表单里的空串折成 null（同 `todo.ts` 的 `dueOrNull` 形制）。
 export const dateOrNull = (raw: string): string | null => (raw.trim() === "" ? null : raw.trim());
+
+/// 与 Rust 的 ExportRow 对齐。`projectName` 必须是 `Project.name` 原值 ——
+/// 它是导入侧名称匹配的对象，写成 `projectLabel`（拼了编号）会导出去再导回来对不上。
+export interface DailyReportExportRow {
+  reportDate: string;
+  projectCode: string | null;
+  projectName: string;
+  content: string;
+  hours: number;
+}

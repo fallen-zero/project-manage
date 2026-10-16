@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde::Serialize;
 use tauri::{Manager, State};
 
-use crate::daily_report::{DailyReport, DailyReportEdit, DailyReportInput};
+use crate::daily_report::{DailyReport, DailyReportEdit, DailyReportInput, ExportRow};
 use crate::error::{AppError, AppResult};
 use crate::ledger::{
     CredentialInput, EnvInput, Ledger, LinkInput, NoteInput, ServerInput,
@@ -785,6 +785,22 @@ fn daily_report_delete(state: State<'_, AppState>, id: String) -> AppResult<()> 
     daily_report::delete(&conn, &id)
 }
 
+/// 日报导出（M10 Task 6，spec §六.1）：挂 async 属性、函数体不写 await 点 —— 写整个 xlsx 是文件 IO，
+/// 不该压在消息泵那一个线程上（与备份那三条同一个理由，见本文件上方那条备份命令）。
+/// **不取 `db(&state)?`**：要导出的行由前端传回来（判据只有一处），所以这条与索引 job、
+/// 与其它读写完全并行，不占那把全局 Mutex。
+#[tauri::command(async)]
+fn daily_report_export(
+    state: State<'_, AppState>,
+    path: String,
+    rows: Vec<ExportRow>,
+) -> AppResult<usize> {
+    // 落点守卫必须早于任何文件写：`File::create` 是 CREATE_ALWAYS 截断，把落点指进数据目录
+    // 会覆掉活库或那次导入的撤销键（`backup_export` 里同一条注释）。
+    backup::guard_destination(&state.data_dir, std::path::Path::new(&path))?;
+    daily_report::write_xlsx(std::path::Path::new(&path), &rows)
+}
+
 /// 建库并在**指定目录**打开（M5.5 D8）。把「开库 + WAL 读回」从 setup 里拆出来，是为了能喂 tempdir
 /// 单测它——`index_job::start` 要 AppHandle、本批不开 tauri::test，所以可测切分只能到这一步；
 /// 取默认数据目录的路径与起轮仍留在 setup。`db::open` 内部已做 `create_dir_all` 与 WAL 读回断言
@@ -898,7 +914,8 @@ pub fn run() {
             daily_report_list,
             daily_report_create,
             daily_report_update,
-            daily_report_delete
+            daily_report_delete,
+            daily_report_export
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");

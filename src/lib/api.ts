@@ -19,7 +19,7 @@ import type { DocHit, DocRow, IndexOverview, IndexProgress } from "@/types/index
 import type { BackupSummary, ImportOutcome, PackageInfo } from "@/types/backup";
 import type { Todo, TodoInput, TodoEdit } from "@/types/todo";
 import type { Milestone, MilestoneInput, MilestoneEdit } from "@/types/milestone";
-import type { DailyReport, DailyReportEdit, DailyReportInput } from "@/types/daily-report";
+import type { DailyReport, DailyReportEdit, DailyReportExportRow, DailyReportInput } from "@/types/daily-report";
 
 export const listProjects = () => invoke<Project[]>("project_list");
 export const getProject = (id: string) => invoke<Project>("project_get", { id });
@@ -100,6 +100,18 @@ export const createDailyReport = (input: DailyReportInput) =>
 export const updateDailyReport = (id: string, input: DailyReportEdit) =>
   invoke<void>("daily_report_update", { id, input });
 export const deleteDailyReport = (id: string) => invoke<void>("daily_report_delete", { id });
+
+// —— M10 日报导出 ——
+export async function pickXlsxSavePath(defaultName: string): Promise<string | null> {
+  const picked = await saveDialog({
+    defaultPath: defaultName,
+    filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }],
+  });
+  return typeof picked === "string" ? picked : null;
+}
+
+export const exportDailyReports = (path: string, rows: DailyReportExportRow[]) =>
+  invoke<number>("daily_report_export", { path, rows });
 
 // 走 Tauri 的原生剪贴板而不是 navigator.clipboard：后者要求文档处于焦点态，
 // 窗口刚失焦就会静默抛错，而"一键复制路径/密码"正是这个软件的核心动作。

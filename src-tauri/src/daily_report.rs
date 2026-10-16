@@ -4,6 +4,8 @@
 //! 日期形状判据**不重写一份**：走 `crate::todo::req_date`（先例：`milestone.rs:10` 用 `todo::norm_date`）。
 //! `hours` 的界与精度也先于 SQL 拒掉：CHECK 违例冒出来是 db_failed，会把校验失败伪装成库故障。
 
+use std::path::Path;
+
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -174,6 +176,61 @@ pub fn delete(conn: &Connection, id: &str) -> AppResult<()> {
         return Err(not_found(id));
     }
     Ok(())
+}
+
+/// 表头五列 —— 导出写它、导入按它定位列，**全仓只有这一处**（spec §六）。改一个词会同时打掉两格的
+/// 测试：Task 6 的表头断言与 Task 7 的列定位断言读的都是这个常量。
+pub const EXPORT_HEADERS: [&str; 5] = ["日期", "项目编号", "所属项目", "工作内容", "时长（小时）"];
+
+/// 前端把**当前筛选后的行**传回来（spec §六.1：命令不收查询条件，免得在 SQL 里再造第二份日期比较）。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportRow {
+    pub report_date: String,
+    /// `projects.code` 是可空列，原样给出；导入侧按它优先匹配，为空则退到名称。
+    pub project_code: Option<String>,
+    /// **必须是 `projects.name` 原值**，不是界面上的 `projectLabel`（后者拼了编号就对不上）。
+    pub project_name: String,
+    pub content: String,
+    pub hours: f64,
+}
+
+/// 写 xlsx 的失败按文件域报：码与文案对齐 `error.rs:21` 的 `AppError::io`。
+/// 不直接调 `io()` 是因为 `rust_xlsxwriter` 的错误不是 `std::io::Error`，硬套会丢掉它自己那句话。
+fn write_fail(path: &Path, e: impl std::fmt::Display) -> AppError {
+    AppError::new(
+        "fs_failed",
+        &format!("写 {} 失败：{e}", path.display()),
+        Some("确认该路径存在且可读写"),
+    )
+}
+
+/// 写一份真 `.xlsx`。0 行数据也写出表头 —— 那就是「下载模板」。返回落地的数据行数。
+pub fn write_xlsx(path: &Path, rows: &[ExportRow]) -> AppResult<usize> {
+    use rust_xlsxwriter::{Format, Workbook};
+
+    let mut wb = Workbook::new();
+    let ws = wb.add_worksheet();
+    ws.set_name("日报").map_err(|e| write_fail(path, e))?;
+    ws.set_freeze_panes(1, 0).map_err(|e| write_fail(path, e))?;
+    let bold = Format::new().set_bold();
+    for (col, head) in EXPORT_HEADERS.iter().enumerate() {
+        ws.write_with_format(0, col as u16, *head, &bold)
+            .map_err(|e| write_fail(path, e))?;
+    }
+    for (i, r) in rows.iter().enumerate() {
+        let row = (i + 1) as u32;
+        ws.write(row, 0, r.report_date.as_str()).map_err(|e| write_fail(path, e))?;
+        ws.write(row, 1, r.project_code.as_deref().unwrap_or(""))
+            .map_err(|e| write_fail(path, e))?;
+        ws.write(row, 2, r.project_name.as_str()).map_err(|e| write_fail(path, e))?;
+        ws.write(row, 3, r.content.as_str()).map_err(|e| write_fail(path, e))?;
+        // 工时写成数字（用户在 Excel 里要能求和），日期写成文本（上面那行）—— 两种类型是故意的，
+        // 别顺手把日期也写成日期单元。
+        ws.write(row, 4, r.hours).map_err(|e| write_fail(path, e))?;
+    }
+    wb.save(path).map_err(|e| write_fail(path, e))?;
+    Ok(rows.len())
 }
 
 #[cfg(test)]
@@ -450,5 +507,69 @@ mod tests {
             vec!["content", "createdAt", "hours", "id", "projectId", "reportDate", "updatedAt"],
             "DailyReport 的键集合变了就要同步 src/types/daily-report.ts 与 xlsx 表头"
         );
+    }
+
+    /// 读回用 calamine（与本任务的写同一把库），**不经 `extract::sheet_text`**：
+    /// 那个函数把所有格子拼成一串文本，看不出「这一格是日期单元还是文本」，而那是 §六.1 的判据。
+    fn read_cells(path: &std::path::Path) -> Vec<Vec<String>> {
+        use calamine::Reader as _;
+        let mut book = calamine::open_workbook_auto(path).unwrap();
+        let names = book.sheet_names();
+        let range = book.worksheet_range(&names[0]).unwrap();
+        range.rows().map(|r| r.iter().map(|c| c.to_string()).collect()).collect()
+    }
+
+    fn export_row(name: &str, code: Option<&str>) -> ExportRow {
+        ExportRow {
+            report_date: "2026-10-16".to_owned(),
+            project_code: code.map(|s| s.to_owned()),
+            project_name: name.to_owned(),
+            content: "联调第三方接口".to_owned(),
+            hours: 7.5,
+        }
+    }
+
+    #[test]
+    fn export_writes_a_real_xlsx_that_calamine_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("out.xlsx");
+        let n = write_xlsx(&p, &[export_row("甲项目", Some("P-01")), export_row("乙项目", None)]).unwrap();
+        assert_eq!(n, 2);
+        let cells = read_cells(&p);
+        assert_eq!(cells[0].join("|"), "日期|项目编号|所属项目|工作内容|时长（小时）", "表头五列");
+        assert_eq!(cells.len(), 3, "表头 + 两行数据");
+        assert_eq!(cells[1].join("|"), "2026-10-16|P-01|甲项目|联调第三方接口|7.5");
+        assert_eq!(cells[2][1], "", "编号为 None 要落成空格，不是字面 \"None\"");
+    }
+
+    /// §六.1：日期写成**文本**。钉的是「导出 → 用户编辑 → 再导回来」这条环不经过 Excel 序列号 ——
+    /// 日期单元读回来是 `Data::DateTime`，`to_string()` 带时分秒，与文本分支不同形状。
+    #[test]
+    fn export_writes_the_date_as_text_not_a_date_cell() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.xlsx");
+        write_xlsx(&p, &[export_row("甲项目", None)]).unwrap();
+        assert_eq!(read_cells(&p)[1][0], "2026-10-16", "要读回纯日期文本，不许是日期单元的序列化形状");
+    }
+
+    /// 「下载模板」= 传空 rows：表头必须在，否则用户填无可填、导入必然报「缺列」。
+    #[test]
+    fn export_with_no_rows_still_writes_the_five_headers() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("template.xlsx");
+        assert_eq!(write_xlsx(&p, &[]).unwrap(), 0);
+        let cells = read_cells(&p);
+        assert_eq!(cells.len(), 1, "模板只有表头一行");
+        assert_eq!(cells[0].len(), EXPORT_HEADERS.len());
+    }
+
+    /// 写不出去按 `fs_failed` 报（`error.rs:21` 的既有码与文案），不许冒成 invalid_input 说「你输入错了」。
+    #[test]
+    fn write_xlsx_reports_fs_failed_when_the_directory_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("no-such-dir").join("out.xlsx");
+        let err = write_xlsx(&p, &[export_row("甲项目", None)]).unwrap_err();
+        assert_eq!(err.code, "fs_failed", "落点不可写是文件域，不是校验域：{}", err.message);
+        assert!(err.message.contains("失败"), "{}", err.message);
     }
 }

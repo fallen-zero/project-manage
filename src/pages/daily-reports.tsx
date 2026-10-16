@@ -17,8 +17,10 @@ import { Separator } from "@/components/ui/separator";
 import {
   createDailyReport,
   deleteDailyReport,
+  exportDailyReports,
   listDailyReports,
   listProjects,
+  pickXlsxSavePath,
   updateDailyReport,
 } from "@/lib/api";
 import { localToday, projectLabel } from "@/lib/due-warning";
@@ -30,7 +32,13 @@ import {
   type HoursFilter,
 } from "@/lib/hours-summary";
 import { toAppError, type AppErrorShape } from "@/lib/ipc";
-import { dateOrNull, type DailyReport, type DailyReportEdit, type DailyReportInput } from "@/types/daily-report";
+import {
+  dateOrNull,
+  type DailyReport,
+  type DailyReportEdit,
+  type DailyReportExportRow,
+  type DailyReportInput,
+} from "@/types/daily-report";
 import type { Project } from "@/types/project";
 
 const ALL_PROJECTS = "__all__";
@@ -177,6 +185,30 @@ export function DailyReportsPage() {
         copied += 1;
       }
       if (copied > 0) setNotice(`从 ${source} 复制了 ${copied} 条到 ${targetDate}`);
+    })();
+  };
+
+  const projectById = useMemo(() => new Map(projects.map((p) => [p.id, p])), [projects]);
+
+  // 导出**所见即所得**：`visible` 是筛过的行（spec §六.1，命令不收查询条件）。
+  // 名称列写 `p.name` 而不是界面上的 label —— 它是导入匹配的对象。
+  const onExport = (templateOnly: boolean) => {
+    const defaultName = templateOnly ? "日报模板.xlsx" : `日报-${localToday().replace(/-/g, "")}.xlsx`;
+    void (async () => {
+      const path = await pickXlsxSavePath(defaultName);
+      if (path === null) return; // 取消不是错误：绝不写进 error（M8 的同一告诫）
+      const rows: DailyReportExportRow[] = (templateOnly ? [] : visible).map((r) => {
+        const p = projectById.get(r.projectId);
+        return {
+          reportDate: r.reportDate,
+          projectCode: p?.code ?? null,
+          projectName: p?.name ?? "（项目缺失）",
+          content: r.content,
+          hours: r.hours,
+        };
+      });
+      const ok = await run(() => exportDailyReports(path, rows));
+      if (ok) setNotice(`已导出 ${rows.length} 条到 ${path}`);
     })();
   };
 
@@ -373,6 +405,12 @@ export function DailyReportsPage() {
           >
             <Copy className="mr-1 size-4" />
             复制上一天
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => onExport(false)}>
+            导出当前范围
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => onExport(true)}>
+            下载模板
           </Button>
         </div>
 

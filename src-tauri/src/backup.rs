@@ -199,7 +199,7 @@ pub fn guard_destination(data_dir: &Path, dst: &Path) -> AppResult<()> {
         return Err(AppError::new(
             "backup_destination_unsafe",
             &format!("导出目标 {} 落在应用的数据目录里，会被拒掉以免覆掉活库或应急包", dst.display()),
-            Some("请把备份包保存到数据目录以外的位置（数据目录里是活库和撤销用的应急包，覆盖会毁掉它们）"),
+            Some("请把导出文件保存到数据目录以外的位置（数据目录里是活库和应急包，覆盖会毁掉它们）"),
         ));
     }
     Ok(())
