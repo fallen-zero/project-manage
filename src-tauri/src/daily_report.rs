@@ -1264,7 +1264,11 @@ mod tests {
         assert!(err.message.contains(&MAX_IMPORT_ROWS.to_string()), "要念出上限：{}", err.message);
     }
 
-    /// **M⑦ 的靶子**：事务拆成逐行提交，这条当场红 —— 半套台账是本轮最贵的失败形态。
+    /// **M⑦ 的靶子**：把「先全量校验、后一次性写入」改成「逐行校验、逐行提交」，这条当场红
+    /// （红在 `left: 1 / right: 0`，即坏行之前的那条已经落了库）。
+    /// **别读成「拆掉 `transaction()` 就会红」** —— Task 7 实测拆了也不红：坏行在 `validate_row`
+    /// 那一步就被拦下，根本走不到写。事务防的是写入阶段自身的失败（约束、磁盘、掉电），
+    /// 是第二道防线而不是唯一防线；它的提交侧由 `apply_rereads_the_file_and_reports_the_inserted_count` 守着。
     #[test]
     fn apply_inserts_all_or_nothing() {
         let conn = db::open_in_memory().unwrap();
