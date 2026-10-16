@@ -44,3 +44,24 @@ export interface DailyReportExportRow {
   content: string;
   hours: number;
 }
+
+export interface ImportReject {
+  /** Excel 里的绝对行号（表头是第 1 行）。 */
+  line: number;
+  field: string;
+  reason: string;
+}
+
+/// 与 Rust 的 ImportPreview 对齐（六键，`import_preview_line_format_has_exactly_six_keys` 钉着）。
+export interface ImportPreview {
+  total: number;
+  ok: number;
+  duplicates: number;
+  duplicateLines: number[];
+  truncatedLines: number[];
+  rejected: ImportReject[];
+}
+
+export interface ImportOutcome {
+  inserted: number;
+}

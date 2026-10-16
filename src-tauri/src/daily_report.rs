@@ -1,16 +1,17 @@
 //! 日报管理：跨项目的工时条目（M10，spec §五）。四操作与判据在这里；
-//! Excel 双向（Task 6/7）的两个私有函数同在本文件，共用 `EXPORT_HEADERS` 与日期/工时判据。
+//! Excel 双向（Task 6/7）的读写两侧同在本文件：表头只认 `EXPORT_HEADERS`，日期与工时的界只认下面那几支纯函数。
 //!
-//! 日期形状判据**不重写一份**：走 `crate::todo::req_date`（先例：`milestone.rs:10` 用 `todo::norm_date`）。
+//! 日期形状判据**不重写一份**：表单侧走 `crate::todo::req_date`，导入的文本单元走 `crate::todo::is_iso_date`，
+//! 两者读的同一条规则（先例：`milestone.rs:10` 用 `todo::norm_date`）。
 //! `hours` 的界与精度也先于 SQL 拒掉：CHECK 违例冒出来是 db_failed，会把校验失败伪装成库故障。
-
-use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::Path;
 
 use crate::error::{AppError, AppResult};
-use crate::todo::req_date;
+use crate::todo::{is_iso_date, req_date};
 
 fn invalid(msg: &str) -> AppError {
     AppError::new("invalid_input", msg, Some("检查表单必填项"))
@@ -231,6 +232,424 @@ pub fn write_xlsx(path: &Path, rows: &[ExportRow]) -> AppResult<usize> {
     }
     wb.save(path).map_err(|e| write_fail(path, e))?;
     Ok(rows.len())
+}
+
+/// 一次导入最多多少行。上限是给「手滑选了整份年度台账」那一格兜底的，
+/// 不是因为几百行会慢 —— 本机的物理内存会把这些行的校验与事务全压在一个 Mutex 上。
+pub const MAX_IMPORT_ROWS: usize = 2000;
+
+/// 一格读出来的形状。**保留 calamine 的类型区分**（文本 / 数字 / 日期单元 / 其它），
+/// 因为 §六.2 的判据就是按类型分岔的：工时列出现日期单元要单独教用户怎么改。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Cell {
+    Empty,
+    Text(String),
+    Number(f64),
+    /// 年、月、日、时、分、秒。`to_ymd_hms_milli()` 是**单数 milli**（`calamine-0.36.1/src/datatype.rs:776`）；
+    /// 不许改用它旁边的 `as_datetime()` —— 那返回 `chrono::NaiveDateTime`，一用就把 chrono 拖进代码面。
+    DateTime(u16, u8, u8, u8, u8, u8),
+    /// 布尔或错误单元：五列里任何一种都不认。
+    Other,
+}
+
+/// `Data`（owned，`datatype.rs:36` 起）一共九臂 ⇒ 这个 match 必须写满九支。
+/// 少一支编译器会报 non-exhaustive，多写不存在的臂会报 unreachable —— 臂数由编译器守着，别凭记忆删。
+fn to_cell(d: &calamine::Data) -> Cell {
+    use calamine::Data;
+    match d {
+        Data::Empty => Cell::Empty,
+        Data::String(s) => Cell::Text(s.clone()),
+        Data::Float(f) => Cell::Number(*f),
+        Data::Int(i) => Cell::Number(*i as f64),
+        Data::Bool(_) | Data::Error(_) => Cell::Other,
+        Data::DateTime(e) => {
+            let (y, mo, d, hh, mm, ss, _milli) = e.to_ymd_hms_milli();
+            Cell::DateTime(y, mo, d, hh, mm, ss)
+        }
+        // xlsb/ods 才给 ISO 形状；退化成文本，交给 `date_of_cell` 的形状判据。
+        Data::DateTimeIso(s) | Data::DurationIso(s) => Cell::Text(s.clone()),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SheetRow {
+    /// **Excel 里的绝对行号**（表头是第 1 行）。用户看的是 Excel，报 0-based 下标等于没报。
+    pub line: u32,
+    pub date: Cell,
+    pub code: Cell,
+    pub name: Cell,
+    pub content: Cell,
+    pub hours: Cell,
+}
+
+/// 一行里某一个字段的拒绝。`field` 用表头那五个词，与界面上的列名同词。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Reject {
+    pub line: u32,
+    pub field: String,
+    pub reason: String,
+}
+
+fn reject(line: u32, field: &str, reason: &str) -> Reject {
+    Reject { line, field: field.to_owned(), reason: reason.to_owned() }
+}
+
+/// 通过校验、可以往库里写的一行。**不带 `line`**：行号只在拒绝时用（`Reject.line`），
+/// 写库这一步不需要它 —— 带上就是一条没人读的字段，会逼出第二条 `dead_code` 豁免。
+#[derive(Debug, Clone)]
+pub(crate) struct ReadyRow {
+    pub project_id: String,
+    pub report_date: String,
+    pub content: String,
+    pub hours: f64,
+}
+
+pub(crate) struct ProjectRow {
+    pub id: String,
+    pub code: Option<String>,
+    pub name: String,
+}
+
+/// 单元格 → 用来匹配的文本。整数形状的数字不留 `.0` 尾巴（Excel 常把编号列识别成数字）。
+/// **已知边界**：`"01"` 这种前导零的编号在 Excel 里会变成 `1`，本函数不补救 —— 那种项目要用编号列
+/// 匹配不上时，退到名称那列仍然能命中（`project_of_cells` 的两级次序就是为这个存在的）。
+fn text_of(cell: &Cell) -> Option<String> {
+    match cell {
+        Cell::Empty => None,
+        Cell::Text(s) => {
+            let t = s.trim();
+            (!t.is_empty()).then(|| t.to_owned())
+        }
+        Cell::Number(f) => {
+            if f.fract() == 0.0 {
+                Some(format!("{}", *f as i64))
+            } else {
+                Some(f.to_string())
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `(日期串, 是否截掉了时分秒)`。判据收在纯函数里（M8 终审 C1 教训③），所以 `Cell::DateTime`
+/// 这一支不必造出真日期格式单元也能测到。形状只走 `is_iso_date`，**历法有效性不在本轮**。
+fn date_of_cell(cell: &Cell, line: u32) -> Result<(String, bool), Reject> {
+    match cell {
+        Cell::Text(s) => {
+            let t = s.trim();
+            if is_iso_date(t) {
+                Ok((t.to_owned(), false))
+            } else {
+                Err(reject(line, "日期", &format!("不是 YYYY-MM-DD：「{t}」")))
+            }
+        }
+        Cell::DateTime(y, mo, d, hh, mm, ss) => Ok((
+            format!("{y:04}-{mo:02}-{d:02}"),
+            *hh != 0 || *mm != 0 || *ss != 0,
+        )),
+        Cell::Number(_) => Err(reject(
+            line,
+            "日期",
+            "日期列不要填数字；要填 2026-10-16 这样的文本或日期格式",
+        )),
+        Cell::Empty => Err(reject(line, "日期", "日期不能空着")),
+        Cell::Other => Err(reject(line, "日期", "这一格不是日期")),
+    }
+}
+
+/// 工时：数字单元直接进 `check_hours`；文本只认「全是数字与小数点」的形状，
+/// 所以全角（`８`）、千分位（`1,5`）、科学计数（`1e2`）都在这里被挡在 parse 之前。
+/// 日期单元 ⇒ 单独一句教用户改（`8:30` 是时间格式，本表要的是小时数）。
+fn hours_of_cell(cell: &Cell, line: u32) -> Result<f64, Reject> {
+    match cell {
+        Cell::Number(f) => check_hours(*f)
+            .map_err(|e| reject(line, "工时", &format!("{}（要大于 0、不超过 {MAX_HOURS_PER_ROW}、最多两位小数）", e.message))),
+        Cell::Text(s) => {
+            let t = s.trim();
+            if t.chars().any(|c| !(c.is_ascii_digit() || c == '.')) {
+                return Err(reject(line, "工时", &format!("工时要填小时数（如 8.5），收到「{t}」")));
+            }
+            match t.parse::<f64>() {
+                Ok(f) => check_hours(f)
+                    .map_err(|e| reject(line, "工时", &format!("{}（要大于 0、不超过 {MAX_HOURS_PER_ROW}、最多两位小数）", e.message))),
+                Err(_) => Err(reject(line, "工时", &format!("工时不是数字：「{t}」"))),
+            }
+        }
+        Cell::DateTime(..) => Err(reject(
+            line,
+            "工时",
+            "工时要填小时数（8.5），不要用时间格式（8:30）",
+        )),
+        Cell::Empty => Err(reject(line, "工时", "工时不能空着")),
+        Cell::Other => Err(reject(line, "工时", "这一格不是数字")),
+    }
+}
+
+fn project_of_cells(code: &Cell, name: &Cell, line: u32, projects: &[ProjectRow]) -> Result<String, Reject> {
+    // 两级：**先编号、命中即用**；编号为空或编号匹配不到 ⇒ 退到名称。
+    // 退到名称而不是直接报错，是为了「用户改了编号列 / 项目没填编号」两种常态还能走通。
+    if let Some(c) = text_of(code) {
+        let hits: Vec<&ProjectRow> = projects.iter().filter(|p| p.code.as_deref() == Some(c.as_str())).collect();
+        match hits.len() {
+            1 => return Ok(hits[0].id.clone()),
+            n if n > 1 => return Err(reject(line, "项目编号", &format!("编号「{c}」对应 {n} 个项目，请改用所属项目列"))),
+            _ => {}
+        }
+    }
+    match text_of(name) {
+        None => Err(reject(line, "所属项目", "项目编号与所属项目不能同时空着")),
+        Some(n) => {
+            let hits: Vec<&ProjectRow> = projects.iter().filter(|p| p.name == n).collect();
+            match hits.len() {
+                0 => Err(reject(line, "所属项目", &format!("找不到项目「{n}」（要先在项目页建好，或改填项目编号）"))),
+                1 => Ok(hits[0].id.clone()),
+                k => Err(reject(line, "所属项目", &format!("项目名「{n}」重名 {k} 个，请改填项目编号"))),
+            }
+        }
+    }
+}
+
+/// 一行 → 可写入的 `ReadyRow`，或**第一个**拒绝理由。
+/// `preview` 与 `apply` 共用这一支：两段式里两处判据必须同源（spec §六.2）。
+fn validate_row(r: &SheetRow, projects: &[ProjectRow]) -> Result<ReadyRow, Reject> {
+    let (report_date, _truncated) = date_of_cell(&r.date, r.line)?;
+    let content = text_of(&r.content).ok_or_else(|| reject(r.line, "工作内容", "工作内容不能空着"))?;
+    let hours = hours_of_cell(&r.hours, r.line)?;
+    let project_id = project_of_cells(&r.code, &r.name, r.line, projects)?;
+    Ok(ReadyRow { project_id, report_date, content, hours })
+}
+
+/// 五列在表里的下标（按表头文字定位，**不是列序**）。
+#[derive(Debug, Clone, Copy)]
+struct Columns {
+    date: usize,
+    code: usize,
+    name: usize,
+    content: usize,
+    hours: usize,
+}
+
+/// 打不开表按 `extract_failed` 报，message 与 `extract.rs:179` 同码同文案（本轮不开新码、不改那句）。
+/// 所以路径进不了 message，参数只留作调用点的记录（下划线前缀是读数逼出来的，不是笔误）。
+fn read_fail(_path: &Path, e: impl std::fmt::Display) -> AppError {
+    AppError::new(
+        "extract_failed",
+        &format!("打开表格失败：{e}"),
+        Some("文件可能已损坏、受密码保护，或是伪装成表格的其它格式"),
+    )
+}
+
+/// 读第一个工作表。多 sheet 只读第一个（spec §十一）。
+pub(crate) fn read_rows(path: &Path) -> AppResult<Vec<SheetRow>> {
+    use calamine::Reader as _; // `open_workbook_auto` 后必须带这条（先例 `extract.rs:176`）
+
+    let mut book = calamine::open_workbook_auto(path).map_err(|e| read_fail(path, e))?;
+    let names = book.sheet_names();
+    let Some(first) = names.first() else {
+        return Err(invalid("这份工作簿里没有工作表"));
+    };
+    let range = book.worksheet_range(first).map_err(|e| read_fail(path, e))?;
+    let mut it = range.rows();
+    let Some(header) = it.next() else {
+        return Err(invalid("这份表是空的，至少要有表头一行（可以先「下载模板」）"));
+    };
+    let cols = locate_columns(header)?;
+
+    // `Range::start()` 给的是绝对 0-based 左上角行号（`calamine-0.36.1/src/lib.rs:784`）。
+    // Excel 显示的行号从 1 起，表头占第一行 ⇒ 数据的绝对行号 = start + 1 + (下标 + 1)。
+    let base = range.start().map(|(r, _)| r).unwrap_or(0) + 1;
+    let mut out = Vec::new();
+    for (i, row) in it.enumerate() {
+        let pick = |idx: usize| row.get(idx).map(to_cell).unwrap_or(Cell::Empty);
+        let line = base + i as u32 + 1;
+        // 整行全空 ⇒ 跳过：用户在 Excel 里删过内容但留了空行，是常态，不该变成一条拒绝。
+        if matches!(
+            (pick(cols.date), pick(cols.code), pick(cols.name), pick(cols.content), pick(cols.hours)),
+            (Cell::Empty, Cell::Empty, Cell::Empty, Cell::Empty, Cell::Empty)
+        ) {
+            continue;
+        }
+        out.push(SheetRow {
+            line,
+            date: pick(cols.date),
+            code: pick(cols.code),
+            name: pick(cols.name),
+            content: pick(cols.content),
+            hours: pick(cols.hours),
+        });
+    }
+    if out.len() > MAX_IMPORT_ROWS {
+        return Err(AppError::new(
+            "invalid_input",
+            &format!("一次最多导入 {MAX_IMPORT_ROWS} 行，这份有 {} 行，请分批", out.len()),
+            Some("用页面上的日期范围筛小一点再导出、再导入"),
+        ));
+    }
+    Ok(out)
+}
+
+/// **按表头文字定位列**：插一列、换列序都不该让导入错位（M⑧ 的靶子就是「改成按列序硬数」）。
+/// 认不出必需列 ⇒ 点名缺哪几列。
+fn locate_columns(header: &[calamine::Data]) -> AppResult<Columns> {
+    let texts: Vec<String> = header.iter().map(|c| c.to_string().trim().to_owned()).collect();
+    let mut found: [Option<usize>; 5] = [None; 5];
+    for (i, t) in texts.iter().enumerate() {
+        for (slot, head) in EXPORT_HEADERS.iter().enumerate() {
+            if t == *head && found[slot].is_none() {
+                found[slot] = Some(i);
+            }
+        }
+    }
+    let missing: Vec<&str> = EXPORT_HEADERS
+        .iter()
+        .enumerate()
+        .filter(|(slot, _)| found[*slot].is_none())
+        .map(|(_, head)| *head)
+        .collect();
+    if !missing.is_empty() {
+        return Err(invalid(&format!(
+            "表头缺列：{}。要用「下载模板」出来的那五列 —— 列的顺序可以变、名字不能改",
+            missing.join("、")
+        )));
+    }
+    Ok(Columns {
+        date: found[0].unwrap(),
+        code: found[1].unwrap(),
+        name: found[2].unwrap(),
+        content: found[3].unwrap(),
+        hours: found[4].unwrap(),
+    })
+}
+
+/// 匹配用的项目清单：软删项目**不在**清单里（挂不上新行，与 `create` 同一判据）。
+fn load_projects(conn: &Connection) -> AppResult<Vec<ProjectRow>> {
+    let mut stmt = conn.prepare("SELECT id, code, name FROM projects WHERE deleted_at IS NULL")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ProjectRow { id: r.get(0)?, code: r.get(1)?, name: r.get(2)? })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// 查重用的键集合。**f64 不进 hash**：换成放大 100 倍的整数（`check_hours` 已保证两位小数）。
+fn existing_keys(conn: &Connection) -> AppResult<HashSet<(String, String, String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT report_date, project_id, content, hours FROM daily_reports WHERE deleted_at IS NULL",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let h: f64 = r.get(3)?;
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            (h * 100.0).round() as i64,
+        ))
+    })?;
+    let mut out = HashSet::new();
+    for r in rows {
+        out.insert(r?);
+    }
+    Ok(out)
+}
+
+/// 预检的结果。**只读、不写库**（D5）：界面上先给用户看清「几行能进、哪几行为什么不进」，
+/// 再决定要不要点确认。重复行只提示、不拦（D2 之后「同一天同项目同内容同工时」是合法的）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreview {
+    pub total: usize,
+    pub ok: usize,
+    pub duplicates: usize,
+    pub duplicate_lines: Vec<u32>,
+    /// 日期单元带时分秒、被截到「日」的那些行 —— 不静默（spec §六.2）。
+    pub truncated_lines: Vec<u32>,
+    pub rejected: Vec<Reject>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportOutcome {
+    pub inserted: usize,
+}
+
+pub fn preview(conn: &Connection, path: &Path) -> AppResult<ImportPreview> {
+    let rows = read_rows(path)?;
+    let projects = load_projects(conn)?;
+    let existing = existing_keys(conn)?;
+    let mut ok = 0usize;
+    let mut rejected: Vec<Reject> = Vec::new();
+    let mut duplicate_lines: Vec<u32> = Vec::new();
+    let mut truncated_lines: Vec<u32> = Vec::new();
+    for r in &rows {
+        let (_date, truncated) = match date_of_cell(&r.date, r.line) {
+            Ok(v) => v,
+            Err(e) => {
+                rejected.push(e);
+                continue;
+            }
+        };
+        if truncated {
+            truncated_lines.push(r.line);
+        }
+        // 其余三段逐个拿第一个拒绝理由，与 `validate_row` 同次序（同一支判据，不重拼第二份）：
+        let ready = match validate_row(r, &projects) {
+            Ok(v) => v,
+            Err(e) => {
+                rejected.push(e);
+                continue;
+            }
+        };
+        ok += 1;
+        if existing.contains(&(ready.report_date, ready.project_id, ready.content, (ready.hours * 100.0).round() as i64)) {
+            duplicate_lines.push(r.line);
+        }
+    }
+    Ok(ImportPreview {
+        total: rows.len(),
+        ok,
+        duplicates: duplicate_lines.len(),
+        duplicate_lines,
+        truncated_lines,
+        rejected,
+    })
+}
+
+/// 落库：**重新解析同一个路径**（不缓存 preview 的结果，也不锁文件 —— D5 当次写明的代价），
+/// 重新校验，任一行不合格 ⇒ 一句 `invalid_input` 报出「第几行 + 哪个字段 + 为什么」，**库里一条都不许多**。
+pub fn apply(conn: &mut Connection, path: &Path) -> AppResult<ImportOutcome> {
+    let rows = read_rows(path)?;
+    let projects = load_projects(conn)?;
+    let mut ready: Vec<ReadyRow> = Vec::with_capacity(rows.len());
+    for r in &rows {
+        match validate_row(r, &projects) {
+            Ok(v) => ready.push(v),
+            Err(e) => {
+                return Err(AppError::new(
+                    "invalid_input",
+                    &format!("第 {} 行的{}不合格：{}", e.line, e.field, e.reason),
+                    Some("修好整份文件后重新预检；任何一行不合格都不写入"),
+                ))
+            }
+        }
+    }
+    if ready.is_empty() {
+        return Err(invalid("没有可导入的行（这份表只有表头？）"));
+    }
+    let tx = conn.transaction()?;
+    for r in &ready {
+        tx.execute(
+            "INSERT INTO daily_reports (id, project_id, report_date, content, hours) VALUES (?1,?2,?3,?4,?5)",
+            params![uuid::Uuid::new_v4().to_string(), r.project_id, r.report_date, r.content, r.hours],
+        )?;
+    }
+    // `Transaction` 的 drop 默认回滚（`rusqlite-0.40.2/src/transaction.rs` 里 `DropBehavior::Rollback`
+    // 那句注释），所以这里只要不 `commit` 就是整批撤销；不需要手写 rollback 分支（先例 `db::apply_version`）。
+    tx.commit()?;
+    Ok(ImportOutcome { inserted: ready.len() })
 }
 
 #[cfg(test)]
@@ -614,5 +1033,305 @@ mod tests {
         let err = write_xlsx(&p, &[export_row("甲项目", None)]).unwrap_err();
         assert_eq!(err.code, "fs_failed", "落点不可写是文件域，不是校验域：{}", err.message);
         assert!(err.message.contains("失败"), "{}", err.message);
+    }
+
+
+    /// 造一份表头 + 若干行文本/数字单元的 xlsx。**列按 `headers` 的顺序写**，
+    /// 所以「插一列」「换列序」这两种用户动作都能造出来 —— M⑧ 的靶就是这里。
+    fn fixture_book(rows: &[Vec<String>], headers: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("in.xlsx");
+        {
+            use rust_xlsxwriter::Workbook;
+            let mut wb = Workbook::new();
+            let ws = wb.add_worksheet();
+            for (c, h) in headers.iter().enumerate() {
+                ws.write(0, c as u16, *h).unwrap();
+            }
+            for (r, cells) in rows.iter().enumerate() {
+                for (c, v) in cells.iter().enumerate() {
+                    // 数字串按原样写成文本；要数字单元用 `fixture_book_typed`（下面第 5 条测试用）。
+                    ws.write((r + 1) as u32, c as u16, v.as_str()).unwrap();
+                }
+            }
+            wb.save(&p).unwrap();
+        }
+        dir
+    }
+
+    /// 五列都齐的完整行（日期、编号、名称、内容、工时）。
+    fn full_row(line: usize) -> Vec<String> {
+        vec![
+            format!("2026-10-{line:02}"),
+            "P-01".to_owned(),
+            "甲项目".to_owned(),
+            "联调第三方接口".to_owned(),
+            "7.5".to_owned(),
+        ]
+    }
+
+    #[test]
+    fn read_rows_locates_columns_by_header_text_even_when_reordered_or_inserted() {
+        // 用户把「工作内容」挪到最后一列、又在最前面插了一列「备注」⇒ 按列序硬数的实现会整表错位（M⑧）。
+        let headers = ["备注", "所属项目", "日期", "时长（小时）", "工作内容", "项目编号"];
+        let dir = fixture_book(&[vec!["随便".to_owned(), "甲项目".to_owned(), "2026-10-16".to_owned(), "7.5".to_owned(), "联调".to_owned(), "P-01".to_owned()], ], &headers);
+        let rows = read_rows(&dir.path().join("in.xlsx")).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].line, 2, "表头是第 1 行 ⇒ 首条数据的 Excel 绝对行号是 2");
+        assert_eq!(rows[0].content, Cell::Text("联调".to_owned()));
+        assert_eq!(rows[0].hours, Cell::Text("7.5".to_owned()));
+        assert_eq!(rows[0].code, Cell::Text("P-01".to_owned()));
+    }
+
+    #[test]
+    fn read_rows_names_the_missing_header_columns() {
+        let dir = fixture_book(&[], &["日期", "所属项目", "工作内容"]);
+        let err = read_rows(&dir.path().join("in.xlsx")).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("项目编号"), "要点名缺哪一列：{}", err.message);
+        assert!(err.message.contains("时长（小时）"), "两列都要念出来：{}", err.message);
+    }
+
+    #[test]
+    fn read_rows_returns_excel_absolute_line_numbers() {
+        // 三行数据 ⇒ 行号 2、3、4。用户看的是 Excel，报 0-based 下标等于没报（spec §六.2）。
+        let dir = fixture_book(
+            &[full_row(16), full_row(17), full_row(18)],
+            &EXPORT_HEADERS,
+        );
+        let rows = read_rows(&dir.path().join("in.xlsx")).unwrap();
+        let lines: Vec<u32> = rows.iter().map(|r| r.line).collect();
+        assert_eq!(lines, vec![2, 3, 4], "实际：{lines:?}");
+    }
+
+    /// **这一支是本计划原先记为「只能靠真机第 15 格」的那格，Task 6 的 M④ 变异证明本机造得出来**
+    /// （`write_number` 一个序列号 + `set_num_format("yyyy\\-mm\\-dd")` 就是 Excel 手填日期的形状），
+    /// 所以它回到单测里。它同时是「calamine 到底把日期样式归成哪个 `Data` 臂」的端到端追问：
+    /// 若这里红在 `Cell::Number(46311.0)`，说明样式没被认出来，就要在 `to_cell` 里补序列号分支
+    /// （基准 1899-12-30），并回来改 spec §三.2 那句「序列号换算是库内部的事」——
+    /// 两种结果都算这条测试赢了，因为它把一个原本只能靠人眼的问题变成了一次读数。
+    #[test]
+    fn read_rows_recognizes_a_date_formatted_cell() {
+        use rust_xlsxwriter::{Format, Workbook};
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("serial.xlsx");
+        {
+            let mut wb = Workbook::new();
+            let ws = wb.add_worksheet();
+            for (c, h) in EXPORT_HEADERS.iter().enumerate() {
+                ws.write(0, c as u16, *h).unwrap();
+            }
+            let dfmt = Format::new().set_num_format("yyyy\\-mm\\-dd");
+            ws.write_with_format(1, 0, 46311.0_f64, &dfmt).unwrap(); // 46311 = 2026-10-16 的序列号
+            ws.write(1, 1, "P-01").unwrap();
+            ws.write(1, 2, "甲项目").unwrap();
+            ws.write(1, 3, "联调第三方接口").unwrap();
+            ws.write(1, 4, "7.5").unwrap();
+            wb.save(&p).unwrap();
+        }
+        let rows = read_rows(&p).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].date,
+            Cell::DateTime(2026, 10, 16, 0, 0, 0),
+            "日期样式必须走 DateTime 臂，实际：{:?}",
+            rows[0].date
+        );
+        let (date, truncated) = date_of_cell(&rows[0].date, 2).unwrap();
+        assert_eq!(date, "2026-10-16");
+        assert!(!truncated, "纯日期样式（时分秒全 0）不该报截断");
+    }
+
+    #[test]
+    fn date_of_cell_accepts_iso_text_and_refuses_numbers_and_blanks() {
+        assert_eq!(date_of_cell(&Cell::Text(" 2026-10-16 ".to_owned()), 2).unwrap(), ("2026-10-16".to_owned(), false));
+        // 形状对、历法错的值照收（与后端 is_iso_date 同口径，引历法库就破零新依赖）：
+        assert!(date_of_cell(&Cell::Text("2026-13-45".to_owned()), 2).is_ok());
+        for bad in [Cell::Empty, Cell::Number(20261016.0), Cell::Text("2026.10.16".to_owned()), Cell::Other] {
+            let r = date_of_cell(&bad, 7).unwrap_err();
+            assert_eq!(r.line, 7);
+            assert_eq!(r.field, "日期");
+        }
+    }
+
+    #[test]
+    fn date_of_cell_truncates_the_time_part_of_a_date_cell_and_says_so() {
+        let (s, truncated) = date_of_cell(&Cell::DateTime(2026, 10, 16, 8, 30, 0), 3).unwrap();
+        assert_eq!(s, "2026-10-16", "日期单元取到日为止");
+        assert!(truncated, "带时分秒 ⇒ 要记一行提示，不许静默截（spec §六.2）");
+        let (_, clean) = date_of_cell(&Cell::DateTime(2026, 10, 16, 0, 0, 0), 3).unwrap();
+        assert!(!clean, "纯日期单元不该报截断");
+        let (two_digit, _) = date_of_cell(&Cell::DateTime(2026, 1, 5, 0, 0, 0), 3).unwrap();
+        assert_eq!(two_digit, "2026-01-05", "月日要补零成 YYYY-MM-DD");
+    }
+
+    #[test]
+    fn hours_of_cell_accepts_float_and_text_and_refuses_a_time_format_cell() {
+        assert_eq!(hours_of_cell(&Cell::Number(8.5), 4).unwrap(), 8.5);
+        assert_eq!(hours_of_cell(&Cell::Number(8.0), 4).unwrap(), 8.0);
+        assert_eq!(hours_of_cell(&Cell::Text(" 7.53 ".to_owned()), 4).unwrap(), 7.53);
+        let err = hours_of_cell(&Cell::DateTime(1899, 12, 31, 8, 30, 0), 4).unwrap_err();
+        assert_eq!(err.field, "工时");
+        assert!(err.reason.contains("8:30") && err.reason.contains("8.5"), "要教用户怎么改：{}", err.reason);
+    }
+
+    #[test]
+    fn hours_of_cell_refuses_full_width_thousands_separators_and_out_of_range() {
+        for bad in ["８", "1,5", "1e2", "abc", "", "30", "0.001"] {
+            let r = hours_of_cell(&Cell::Text(bad.to_owned()), 9).unwrap_err();
+            assert_eq!(r.line, 9, "「{bad}」要按行号报出来：{r:?}");
+            assert_eq!(r.field, "工时");
+        }
+        assert!(hours_of_cell(&Cell::Number(30.0), 9).is_err(), "越界的数字单元也要拒");
+    }
+
+    fn project_rows() -> Vec<ProjectRow> {
+        vec![
+            ProjectRow { id: "p1".to_owned(), code: Some("P-01".to_owned()), name: "甲项目".to_owned() },
+            ProjectRow { id: "p2".to_owned(), code: None, name: "乙项目".to_owned() },
+            ProjectRow { id: "p3".to_owned(), code: Some("P-03".to_owned()), name: "甲项目".to_owned() },
+        ]
+    }
+
+    #[test]
+    fn project_of_cells_prefers_code_over_name_when_both_are_filled() {
+        let ps = project_rows();
+        // p1 与 p3 同名「甲项目」⇒ 只按名称会歧义，填了编号就必须按编号定。
+        let id = project_of_cells(&Cell::Text("P-03".to_owned()), &Cell::Text("甲项目".to_owned()), 5, &ps).unwrap();
+        assert_eq!(id, "p3", "编号优先，命中即用");
+    }
+
+    #[test]
+    fn project_of_cells_falls_back_to_name_and_rejects_unknown_or_ambiguous() {
+        let ps = project_rows();
+        assert_eq!(project_of_cells(&Cell::Empty, &Cell::Text("乙项目".to_owned()), 5, &ps).unwrap(), "p2");
+        // 编号写错但名称唯一 ⇒ 退到名称（用户可能改了编号那列）。
+        assert_eq!(project_of_cells(&Cell::Text("P-99".to_owned()), &Cell::Text("乙项目".to_owned()), 5, &ps).unwrap(), "p2");
+        let amb = project_of_cells(&Cell::Empty, &Cell::Text("甲项目".to_owned()), 5, &ps).unwrap_err();
+        assert!(amb.reason.contains("重名 2 个") && amb.reason.contains("项目编号"), "要说清怎么办：{}", amb.reason);
+        let none = project_of_cells(&Cell::Empty, &Cell::Text("没这个项目".to_owned()), 5, &ps).unwrap_err();
+        assert!(none.reason.contains("没这个项目"), "要念出用户写的那个名字：{}", none.reason);
+        assert_eq!(
+            project_of_cells(&Cell::Empty, &Cell::Empty, 5, &ps).unwrap_err().field,
+            "所属项目"
+        );
+    }
+
+    /// 端到端：一份齐的行 + 一行坏日期 + 一行不存在的项目 ⇒ 预检各计其数、行号是绝对行号。
+    #[test]
+    fn preview_counts_ok_rejects_and_truncated_separately() {
+        let conn = db::open_in_memory().unwrap();
+        conn.execute("INSERT INTO projects (id, name, code, status) VALUES ('p1','甲项目','P-01','立项')", []).unwrap();
+        let dir = fixture_book(
+            &[
+                full_row(16),
+                vec!["2026/10/17".to_owned(), "P-01".to_owned(), "甲项目".to_owned(), "乙".to_owned(), "1".to_owned()],
+                vec!["2026-10-18".to_owned(), "".to_owned(), "不存在".to_owned(), "丙".to_owned(), "1".to_owned()],
+            ],
+            &EXPORT_HEADERS,
+        );
+        let pv = preview(&conn, &dir.path().join("in.xlsx")).unwrap();
+        assert_eq!(pv.total, 3);
+        assert_eq!(pv.ok, 1, "实际：{pv:?}");
+        assert_eq!(pv.rejected.len(), 2);
+        assert_eq!(pv.rejected[0].line, 3, "坏日期那条在 Excel 里是第 3 行");
+        assert_eq!(pv.rejected[0].field, "日期");
+        assert_eq!(pv.rejected[1].line, 4);
+        assert_eq!(pv.rejected[1].field, "所属项目");
+        assert_eq!(pv.duplicates, 0);
+    }
+
+    #[test]
+    fn preview_flags_exact_duplicates_without_blocking_them() {
+        let conn = db::open_in_memory().unwrap();
+        conn.execute("INSERT INTO projects (id, name, code, status) VALUES ('p1','甲项目','P-01','立项')", []).unwrap();
+        create(&conn, &input("p1", Some("2026-10-16"), "联调第三方接口", 7.5)).unwrap();
+        let dir = fixture_book(&[full_row(16)], &EXPORT_HEADERS);
+        let pv = preview(&conn, &dir.path().join("in.xlsx")).unwrap();
+        assert_eq!(pv.ok, 1, "重复不是错误，D2 之后「同一天同项目同内容同工时」合法");
+        assert_eq!(pv.duplicates, 1, "但要提示，否则用户会连点两次导入按钮");
+        assert_eq!(pv.duplicate_lines, vec![2]);
+    }
+
+    #[test]
+    fn preview_refuses_more_than_max_import_rows() {
+        let conn = db::open_in_memory().unwrap();
+        conn.execute("INSERT INTO projects (id, name, code, status) VALUES ('p1','甲项目','P-01','立项')", []).unwrap();
+        let rows: Vec<Vec<String>> = (0..=MAX_IMPORT_ROWS).map(|i| full_row(i % 28 + 1)).collect();
+        let dir = fixture_book(&rows, &EXPORT_HEADERS);
+        let err = preview(&conn, &dir.path().join("in.xlsx")).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains(&MAX_IMPORT_ROWS.to_string()), "要念出上限：{}", err.message);
+    }
+
+    /// **M⑦ 的靶子**：事务拆成逐行提交，这条当场红 —— 半套台账是本轮最贵的失败形态。
+    #[test]
+    fn apply_inserts_all_or_nothing() {
+        let conn = db::open_in_memory().unwrap();
+        conn.execute("INSERT INTO projects (id, name, code, status) VALUES ('p1','甲项目','P-01','立项')", []).unwrap();
+        let dir = fixture_book(
+            &[full_row(16), vec!["2026-10-17".to_owned(), "P-01".to_owned(), "甲项目".to_owned(), "乙".to_owned(), "30".to_owned()]],
+            &EXPORT_HEADERS,
+        );
+        let mut conn = conn;
+        let err = apply(&mut conn, &dir.path().join("in.xlsx")).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("第 3 行"), "整批回滚也要说清坏在哪一行：{}", err.message);
+        assert!(err.message.contains("工时"), "{}", err.message);
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM daily_reports", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "任一行不合格 ⇒ 库里一条都不许多");
+    }
+
+    #[test]
+    fn apply_rereads_the_file_and_reports_the_inserted_count() {
+        let conn = db::open_in_memory().unwrap();
+        conn.execute("INSERT INTO projects (id, name, code, status) VALUES ('p1','甲项目','P-01','立项')", []).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("in.xlsx");
+        std::fs::copy(fixture_book(&[full_row(16), full_row(17)], &EXPORT_HEADERS).path().join("in.xlsx"), &p).unwrap();
+        let mut conn = conn;
+        let out = apply(&mut conn, &p).unwrap();
+        assert_eq!(out.inserted, 2);
+        assert_eq!(list(&conn, None).unwrap().len(), 2);
+        assert_eq!(list(&conn, None).unwrap()[0].project_id, "p1", "按编号匹配回来的项目 id 要落进行");
+    }
+
+    #[test]
+    fn apply_refuses_a_header_only_file() {
+        let conn = db::open_in_memory().unwrap();
+        let dir = fixture_book(&[], &EXPORT_HEADERS);
+        let mut conn = conn;
+        let err = apply(&mut conn, &dir.path().join("in.xlsx")).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("没有可导入的行"), "{}", err.message);
+    }
+
+    #[test]
+    fn import_preview_line_format_has_exactly_six_keys() {
+        // 期望数组按 `sort_unstable()` 的字节序写：`duplicateLines` 那一格是大写 `L`（U+004C）、
+        // `duplicates` 是小写 `s`（U+0073），所以前者在前 —— 不是忽略大小写的字母表顺序（简报那行按
+        // 后者写，跑出来是恒红，按读数改准）。钉的键集合一个字没动：少一个、多一个、改名都照样红。
+        let pv = ImportPreview {
+            total: 0,
+            ok: 0,
+            duplicates: 0,
+            duplicate_lines: vec![],
+            truncated_lines: vec![],
+            rejected: vec![],
+        };
+        let obj = serde_json::to_value(&pv).unwrap();
+        let mut keys: Vec<&str> = obj.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["duplicateLines", "duplicates", "ok", "rejected", "total", "truncatedLines"],
+            "ImportPreview 的键集合变了就要同步 src/types/daily-report.ts"
+        );
+    }
+
+    #[test]
+    fn import_outcome_line_format_has_exactly_one_key() {
+        let obj = serde_json::to_value(ImportOutcome { inserted: 3 }).unwrap();
+        assert_eq!(obj.as_object().unwrap().keys().collect::<Vec<_>>(), vec!["inserted"]);
     }
 }

@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde::Serialize;
 use tauri::{Manager, State};
 
-use crate::daily_report::{DailyReport, DailyReportEdit, DailyReportInput, ExportRow};
+use crate::daily_report::{DailyReport, DailyReportEdit, DailyReportInput, ExportRow, ImportOutcome, ImportPreview};
 use crate::error::{AppError, AppResult};
 use crate::ledger::{
     CredentialInput, EnvInput, Ledger, LinkInput, NoteInput, ServerInput,
@@ -801,6 +801,27 @@ fn daily_report_export(
     daily_report::write_xlsx(std::path::Path::new(&path), &rows)
 }
 
+/// 导入预检（M10 Task 7，spec §六.2）：**只读、不写库**（D5），界面先看清「几行能进、哪几行为什么不进」。
+/// 文件解析与项目匹配/查重在同一次调用里做完 ⇒ 这一格**全程持库锁**（`preview` 收 `&Connection` 与路径，
+/// 读表在锁内）。`MAX_IMPORT_ROWS` 就是给这一格的等待时间兜底的；async 属性只保证不压在消息泵那一个线程上。
+#[tauri::command(async)]
+fn daily_report_import_preview(state: State<'_, AppState>, path: String) -> AppResult<ImportPreview> {
+    let p = std::path::Path::new(&path);
+    let conn = db(&state)?;
+    daily_report::preview(&conn, p)
+}
+
+/// 导入落库（M10 Task 7）：**重新解析同一个路径**（不缓存预检结果、两步之间不锁文件，那是 D5 当次接受的
+/// 代价），单事务全成全败。命令体同样不写 await 点；`db(&state)?` 取回的 `MutexGuard` 也不是 `Send`，
+/// 这正是「挂 async 属性但函数体保持同步」的形态（与 `backup_export`、`daily_report_export` 同形，
+/// 理由见本文件上方 `daily_report_list` 那条注释）。
+#[tauri::command(async)]
+fn daily_report_import_apply(state: State<'_, AppState>, path: String) -> AppResult<ImportOutcome> {
+    let p = std::path::Path::new(&path);
+    let mut conn = db(&state)?;
+    daily_report::apply(&mut conn, p)
+}
+
 /// 建库并在**指定目录**打开（M5.5 D8）。把「开库 + WAL 读回」从 setup 里拆出来，是为了能喂 tempdir
 /// 单测它——`index_job::start` 要 AppHandle、本批不开 tauri::test，所以可测切分只能到这一步；
 /// 取默认数据目录的路径与起轮仍留在 setup。`db::open` 内部已做 `create_dir_all` 与 WAL 读回断言
@@ -915,7 +936,9 @@ pub fn run() {
             daily_report_create,
             daily_report_update,
             daily_report_delete,
-            daily_report_export
+            daily_report_export,
+            daily_report_import_preview,
+            daily_report_import_apply
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");

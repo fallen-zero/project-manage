@@ -19,7 +19,16 @@ import type { DocHit, DocRow, IndexOverview, IndexProgress } from "@/types/index
 import type { BackupSummary, ImportOutcome, PackageInfo } from "@/types/backup";
 import type { Todo, TodoInput, TodoEdit } from "@/types/todo";
 import type { Milestone, MilestoneInput, MilestoneEdit } from "@/types/milestone";
-import type { DailyReport, DailyReportEdit, DailyReportExportRow, DailyReportInput } from "@/types/daily-report";
+import type {
+  DailyReport,
+  DailyReportEdit,
+  DailyReportExportRow,
+  DailyReportInput,
+  ImportPreview,
+  // 备份包那边已经占用了 `ImportOutcome` 这个名字（上面 `@/types/backup` 那一行），
+  // 这里必须起别名：同名两条 import 语句是 tsc 的重复标识符错误，而不是「谁在后面谁生效」。
+  ImportOutcome as DailyReportImportOutcome,
+} from "@/types/daily-report";
 
 export const listProjects = () => invoke<Project[]>("project_list");
 export const getProject = (id: string) => invoke<Project>("project_get", { id });
@@ -112,6 +121,23 @@ export async function pickXlsxSavePath(defaultName: string): Promise<string | nu
 
 export const exportDailyReports = (path: string, rows: DailyReportExportRow[]) =>
   invoke<number>("daily_report_export", { path, rows });
+
+// —— M10 日报导入（Task 7，两段式）——
+// 预检只读、确认才写：前端只把**路径**发给后端，绝不把预检结果回传（后端 apply 自己重新解析同一个文件，
+// 判据因此只有一处，且 apply 不信任客户端）。
+// 取消不是错误：open 返回 null 时由调用方直接 return，绝不写进 error（与 `pickPackagePath` 同形制）。
+export async function pickXlsxOpenPath(): Promise<string | null> {
+  const picked = await openDialog({
+    multiple: false,
+    filters: [{ name: "Excel 工作簿", extensions: ["xlsx"] }],
+  });
+  return typeof picked === "string" ? picked : null;
+}
+
+export const importDailyReportsPreview = (path: string) =>
+  invoke<ImportPreview>("daily_report_import_preview", { path });
+export const importDailyReportsApply = (path: string) =>
+  invoke<DailyReportImportOutcome>("daily_report_import_apply", { path });
 
 // 走 Tauri 的原生剪贴板而不是 navigator.clipboard：后者要求文档处于焦点态，
 // 窗口刚失焦就会静默抛错，而"一键复制路径/密码"正是这个软件的核心动作。

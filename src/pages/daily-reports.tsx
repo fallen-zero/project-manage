@@ -18,8 +18,11 @@ import {
   createDailyReport,
   deleteDailyReport,
   exportDailyReports,
+  importDailyReportsApply,
+  importDailyReportsPreview,
   listDailyReports,
   listProjects,
+  pickXlsxOpenPath,
   pickXlsxSavePath,
   updateDailyReport,
 } from "@/lib/api";
@@ -38,6 +41,7 @@ import {
   type DailyReportEdit,
   type DailyReportExportRow,
   type DailyReportInput,
+  type ImportPreview,
 } from "@/types/daily-report";
 import type { Project } from "@/types/project";
 
@@ -73,6 +77,11 @@ export function DailyReportsPage() {
   const [draftProject, setDraftProject] = useState("");
   const [draftContent, setDraftContent] = useState("");
   const [draftHours, setDraftHours] = useState("");
+
+  // 导入两段式（Task 7，D5）：前端只存**文件路径**与后端算回来的预检结果。
+  // 预检的行不回传给确认那一步 —— apply 在后端重新解析同一个路径，前端没有第二份判据可漂。
+  const [importPath, setImportPath] = useState<string | null>(null);
+  const [previewData, setPreviewData] = useState<ImportPreview | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -212,6 +221,26 @@ export function DailyReportsPage() {
     })();
   };
 
+  const onPickImport = async () => {
+    const path = await pickXlsxOpenPath();
+    if (path === null) return; // 取消不是错误
+    setPreviewData(null);
+    const ok = await run(async () => setPreviewData(await importDailyReportsPreview(path)));
+    if (ok) setImportPath(path);
+    else setImportPath(null);
+  };
+
+  const onApplyImport = () => {
+    const path = importPath;
+    if (path === null) return;
+    void run(async () => {
+      const out = await importDailyReportsApply(path);
+      setNotice(`已导入 ${out.inserted} 条`);
+      setPreviewData(null);
+      setImportPath(null);
+    });
+  };
+
   const onStartEdit = (r: DailyReport) => {
     setEditingId(r.id);
     setDraftDate(r.reportDate);
@@ -309,6 +338,46 @@ export function DailyReportsPage() {
       )}
       {notice && !error && (
         <div className="rounded-lg border bg-muted px-3 py-2 text-xs text-muted-foreground">{notice}</div>
+      )}
+
+      {previewData && (
+        <section className="rounded-xl border bg-background p-4">
+          <h2 className="text-sm font-medium">导入预检</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {previewData.total} 行里 {previewData.ok} 行可导入 · {previewData.rejected.length} 行不合格
+            {previewData.duplicates > 0 && ` · ${previewData.duplicates} 行与库里已有记录完全相同`}
+            {previewData.truncatedLines.length > 0 &&
+              ` · ${previewData.truncatedLines.length} 行的日期带时分秒，将截到「日」`}
+          </p>
+          {previewData.rejected.length > 0 && (
+            <ul className="mt-2 space-y-1 text-xs">
+              {previewData.rejected.map((r) => (
+                <li key={`${r.line}-${r.field}`}>
+                  <span className="font-mono">第 {r.line} 行</span> · {r.field}：{r.reason}
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="mt-3 flex items-center gap-2">
+            <Button size="sm" disabled={busy || previewData.ok === 0} onClick={onApplyImport}>
+              确认导入 {previewData.ok} 条
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setPreviewData(null);
+                setImportPath(null);
+              }}
+            >
+              取消
+            </Button>
+            <span className="text-xs text-muted-foreground">{importPath}</span>
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground">
+            任何一行不合格 ⇒ 整批不写。确认时后端会重新读一遍这个文件，所以改过的内容按新的算。
+          </p>
+        </section>
       )}
 
       <section className="rounded-xl border bg-background p-4">
@@ -411,6 +480,9 @@ export function DailyReportsPage() {
           </Button>
           <Button size="sm" variant="outline" disabled={busy} onClick={() => onExport(true)}>
             下载模板
+          </Button>
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => void onPickImport()}>
+            从 Excel 导入
           </Button>
         </div>
 
