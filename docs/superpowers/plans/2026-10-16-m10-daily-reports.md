@@ -2579,7 +2579,9 @@ git commit -m "feat(m10): 日报导出真 .xlsx + 第一条 async 命令（57→
         assert!(err.message.contains(&MAX_IMPORT_ROWS.to_string()), "要念出上限：{}", err.message);
     }
 
-    /// **M⑦ 的靶子**：事务拆成逐行提交，这条当场红 —— 半套台账是本轮最贵的失败形态。
+    /// **M⑦ 的靶子**：把「先全量校验、后一次性写入」改成「逐行校验、逐行提交」，这条当场红。
+    /// **别把它读成「拆掉 transaction 就会红」** —— Task 7 实测拆掉也不红：坏行在 `validate_row` 那一步就被拦下，
+    /// 根本走不到写；事务防的是写入阶段自身的失败（约束、磁盘、掉电），是第二道防线，不是唯一防线。
     #[test]
     fn apply_inserts_all_or_nothing() {
         let conn = db::open_in_memory().unwrap();
@@ -2636,7 +2638,9 @@ git commit -m "feat(m10): 日报导出真 .xlsx + 第一条 async 命令（57→
         keys.sort_unstable();
         assert_eq!(
             keys,
-            vec!["duplicates", "duplicateLines", "ok", "rejected", "total", "truncatedLines"],
+            vec!["duplicateLines", "duplicates", "ok", "rejected", "total", "truncatedLines"],
+            // 注：`duplicateLines` 必须排在 `duplicates` 前面 —— 第 9 个字符是
+            // `L`(U+004C) 而不是 `s`(U+0073)，`sort_unstable` 按码元序就是这个小写前大写后。
             "ImportPreview 的键集合变了就要同步 src/types/daily-report.ts"
         );
     }
@@ -3100,7 +3104,10 @@ pub fn apply(conn: &mut Connection, path: &Path) -> AppResult<ImportOutcome> {
 - [ ] **Step 6: 两条 async 命令与注册表**
 
 ```rust
-/// 导入预检（M10 Task 7）：先解析文件（**不取库锁**，大文件在这里读），再取锁做匹配与查重。
+/// 导入预检（M10 Task 7）：解析与匹配都在库锁内做完。**这条注释原先写的是「先解析文件（不取库锁）」，
+/// 与代码不符，实现者按实改掉** —— 上限 2000 行的解析是几十毫秒量级，为「一次取锁、一条代码路径」
+/// 付这个钱值得；spec §五.5 说的是异步签名把命令体挪出消息泵那一个线程，DB 这侧本来就由全局 Mutex 串行。
+/// 真要改成「锁外解析、锁内匹配」，得把 `read_rows` 提到 `pub` 并把 preview 拆成两步 —— 那是另一格的改动。
 #[tauri::command(async)]
 fn daily_report_import_preview(state: State<'_, AppState>, path: String) -> AppResult<ImportPreview> {
     let p = std::path::Path::new(&path);
@@ -3164,8 +3171,10 @@ export async function pickXlsxOpenPath(): Promise<string | null> {
 
 export const importDailyReportsPreview = (path: string) =>
   invoke<ImportPreview>("daily_report_import_preview", { path });
+// `ImportOutcome` 这个名字已经被 `@/types/backup` 占着（M8 的恢复返回类型同名），
+// 同一文件里二次导入就是 TS2300 双重声明 —— 给日报那份起别名导入。
 export const importDailyReportsApply = (path: string) =>
-  invoke<ImportOutcome>("daily_report_import_apply", { path });
+  invoke<DailyReportImportOutcome>("daily_report_import_apply", { path });
 ```
 
 `src/pages/daily-reports.tsx`：先补 `import`（漏一行就是 `tsc` 当场红）——`@/lib/api` 那条里加 `importDailyReportsApply, importDailyReportsPreview, pickXlsxOpenPath`，`@/types/daily-report` 那条里加 `type ImportPreview`；然后状态加两个、按钮加两个、预检结果加一段。**确认后重新发一次 apply（后端自己重新解析文件），前端不把预检结果回传给后端**（判据只有一处，且 apply 不信任客户端）。
@@ -3271,7 +3280,7 @@ grep -rn "allow(dead_code)" src-tauri/src/ | wc -l        # 期望 1（只有 db
 ```bash
 cd /e/zero/demo/2026/project-files-manage
 git add src-tauri/src/daily_report.rs src-tauri/src/lib.rs src/types/daily-report.ts src/lib/api.ts src/pages/daily-reports.tsx
-git commit -m "feat(m10): Excel 导入两段式（预检 + 单事务落库，58→60、async 5→7）—— 按 EXPORT_HEADERS 文字定位列（插列换序不错位，M⑧靶）、行号一律 Excel 绝对行号、日期接受 ISO 文本与日期单元两种（带时分秒截到日并单独报行）、工时的文本支只认数字与小数点（全角/千分位/科学计数都挡在 parse 之前）而日期单元单独教用户改 8:30→8.5、项目按编号优先名称兜底（重名 2 个要说清怎么办）、重复四字段全等只提示不拦（f64 换成放大 100 的整数进 hash）、apply 重新解析同一路径任一行不合格整批回滚（M⑦靶，Transaction drop 即回滚）；preview 与 apply 共用 validate_row 一支判据；三处残余（日期格式单元造不出端到端夹具、ReadyRow 不带行号因此不开新豁免、两步之间不锁文件）写进开发进度"
+git commit -m "feat(m10): Excel 导入两段式（预检 + 单事务落库，58→60、async 5→7）—— 按 EXPORT_HEADERS 文字定位列（插列换序不错位，M⑧靶）、行号一律 Excel 绝对行号、日期接受 ISO 文本与日期单元两种（带时分秒截到日并单独报行）、工时的文本支只认数字与小数点（全角/千分位/科学计数都挡在 parse 之前）而日期单元单独教用户改 8:30→8.5、项目按编号优先名称兜底（重名 2 个要说清怎么办）、重复四字段全等只提示不拦（f64 换成放大 100 的整数进 hash）、apply 重新解析同一路径任一行不合格整批回滚（M⑦靶，Transaction drop 即回滚）；preview 与 apply 共用 validate_row 一支判据；日期格式单元已由 read_rows_recognizes_a_date_formatted_cell 端到端钉住（calamine 认成 Data::DateTime，不补序列号分支，spec §三.2 那句站住）；M⑦ 的靶子按实测改成「逐行校验逐行提交」；ReadyRow 不带行号因此不开新豁免；两步之间不锁文件"
 ```
 
 ---
@@ -3322,7 +3331,7 @@ Expected（**全部现跑核对**，下面这串是本计划按逐格列名加�
 | M④ | `hours-summary.ts` 的 `isoWeekKey` | 周首从周一改成周日（`dow = thursday.getUTCDay() + 1`） | node 的「跨年周三条边界」与「同周不同日同键」 |
 | M⑤ | `hours-summary.ts` 的 `sumHours` | 去掉整数化，直接 `+= r.hours` | node 的「十条 0.1 得 1」（实际 `1.0000000000000002`） |
 | M⑥ | `hours-summary.ts` 的 `scopedHoursSummary` | 把 `scopeDailyReports(rows, f)` 改成 `rows` | node 的「只算筛选后的行」（M9 终审 I1 的同族靶） |
-| M⑦ | `daily_report.rs` 的 `apply` | 去掉 `transaction()`，逐行 `conn.execute` 自动提交 | `apply_inserts_all_or_nothing`（半套台账 —— 本轮最贵的失败形态） |
+| M⑦ | `daily_report.rs` 的 `apply` | **把「先全量校验、后一次性写入」改成「逐行校验、逐行提交」**（注意：**只把 `transaction()` 拆成自动提交是打不红的** —— `validate_row` 在写之前就拦住了坏行，事务因此是第二道防线而不是唯一防线；这条是 Task 7 实现者实测带回的更正） | `apply_inserts_all_or_nothing`（红在 `left: 1 / right: 0`，即坏行之前的那一条已经落库） |
 | M⑧ | `daily_report.rs` 的 `locate_columns` | 改成硬编码 `Columns { date: 0, code: 1, name: 2, content: 3, hours: 4 }` | `read_rows_locates_columns_by_header_text_even_when_reordered_or_inserted` |
 
 **取证口径**（照 M8/M9）：每处跑完把命令、`test result` 行、红的测试名与断言原文（含 `file:line`）追加进 `mutation-evidence.txt`；还原用 `cp` 备份 + `cmp` 验字节一致，**不要**用 `git checkout --`（同 worktree 可能有别的未提交内容）；八处跑完复跑一次全量，读数必须回到 Step 1 那串数。
