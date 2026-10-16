@@ -40,11 +40,11 @@
 | 4 | 前端契约与聚合 | `types/daily-report.ts` + 4 个 api 包装 + `hours-summary.ts` | node +10 |
 | 5 | 日报页 | `/daily-reports` 页面 + nav 第 6 格 + 路由 | 0（靠真机） |
 | 6 | Excel 导出 | `write_xlsx` + `daily_report_export`（async）+ 落点守卫 + 页面按钮 | cargo +4，async 门 4→5 |
-| 7 | Excel 导入 | `read_rows` + preview/apply（async）+ 两段式 UI | cargo +16，async 门 5→7 |
+| 7 | Excel 导入 | `read_rows` + preview/apply（async）+ 两段式 UI | cargo +17，async 门 5→7 |
 | 8 | 门禁与取证 | 全量门 + 八条变异 + 真机十六格（spec 十四格 + 两格人手 Excel） | 0 |
 | 9 | 活文档回写 | 技术方案 / 开发进度 / HANDOFF / M9 spec 反转 | 0 |
 
-**基线读数（2026-10-16 在 `feat/m10-daily-reports` = spec 提交 `5386d2b` 上现跑）**：`cargo test -j 1 --lib` **256 passed / 0 failed**，`node --test "tests/**/*.test.ts"` **tests 31 / pass 31 / fail 0**。按本文实际写出的测试条数累加，本轮终态应为 **cargo 299 / node 41**（cargo：+3 +18 +2 +4 +16；node：+10）。这是**加出来的、不是估的**，但派发每一格时仍要用现跑读数对账 —— 同一格若被别人改过，聚合数会整条漂（HANDOFF 坑 21）。
+**基线读数（2026-10-16 在 `feat/m10-daily-reports` = spec 提交 `5386d2b` 上现跑）**：`cargo test -j 1 --lib` **256 passed / 0 failed**，`node --test "tests/**/*.test.ts"` **tests 31 / pass 31 / fail 0**。按本文实际写出的测试条数累加，本轮终态应为 **cargo 300 / node 41**（cargo：+3 +18 +2 +4 +17；node：+10）。这三个数是用脚本从本文的 `#[test]` / `test(` 块实数点出来的（控制方 2026-10-16 落盘后复点，Task 7 原写 16、实数 17 已改准），不是估的；派发每一格时仍要用现跑读数对账 —— 同一格若被别人改过，聚合数会整条漂（HANDOFF 坑 21）。
 
 **派发顺序不是纯线性的**：T3 依赖 T2 的表；T5 依赖 T4；T6/T7 依赖 T2 的表与 T5 的页面存在（按钮挂在页上）。T1→T2→T3→T4→T5→T6→T7 单线走最稳，同一 worktree **只允许一个会提交的实现者**。
 
@@ -2283,7 +2283,7 @@ git commit -m "feat(m10): 日报导出真 .xlsx + 第一条 async 命令（57→
 ### Task 7: Excel 导入 —— `read_rows` + 预检 + 事务落库（两段式，D5）
 
 **Files:**
-- Modify: `src-tauri/src/daily_report.rs`（`Cell`/`SheetRow`/`Reject`/`ReadyRow`/`ProjectRow` + `to_cell`/`text_of`/`date_of_cell`/`hours_of_cell`/`content_of_cell`/`project_of_cells`/`validate_row`/`read_rows`/`load_projects`/`preview`/`apply` + `ImportPreview`/`ImportOutcome` + 16 条测试）
+- Modify: `src-tauri/src/daily_report.rs`（`Cell`/`SheetRow`/`Reject`/`ReadyRow`/`ProjectRow` + `to_cell`/`text_of`/`date_of_cell`/`hours_of_cell`/`project_of_cells`/`validate_row`/`read_rows`/`locate_columns`/`load_projects`/`existing_keys`/`preview`/`apply` + `ImportPreview`/`ImportOutcome` + 17 条测试）
 - Modify: `src-tauri/src/daily_report.rs` 顶部 `use`：`use crate::todo::req_date;` 改成 `use crate::todo::{is_iso_date, req_date};`（本任务起 `date_of_cell` 要用形状判据；**不许在这文件里再写一份形状判断**）
 - Modify: `src-tauri/src/lib.rs`（两条 async 命令 + 注册表 58→60、async 门 5→7）
 - Modify: `src/types/daily-report.ts`（`ImportReject`/`ImportPreview`/`ImportOutcome`）、`src/lib/api.ts`（`pickXlsxOpenPath`/`importPreview`/`importApply`）、`src/pages/daily-reports.tsx`（导入区）
@@ -2292,7 +2292,7 @@ git commit -m "feat(m10): 日报导出真 .xlsx + 第一条 async 命令（57→
 - Consumes: `EXPORT_HEADERS`（Task 6，**列定位的唯一依据**）、`check_hours`/`MAX_HOURS_PER_ROW`（Task 2）、`todo::is_iso_date`、`calamine::{Data, Reader}`（用法先例 `extract.rs:176-182`）、`Range::start() -> Option<(u32,u32)>`（绝对 0-based 左上角，本任务用它算 Excel 绝对行号）、`rust_xlsxwriter` 造夹具（形制照 `extract.rs:419-422`）。
 - Produces: `pub fn daily_report::preview(conn: &Connection, path: &Path) -> AppResult<ImportPreview>`、`pub fn daily_report::apply(conn: &mut Connection, path: &Path) -> AppResult<ImportOutcome>`、`pub const MAX_IMPORT_ROWS: usize = 2000`；命令 `daily_report_import_preview(path)` / `daily_report_import_apply(path)`；前端 `pickXlsxOpenPath()`、`importDailyReportsPreview(path)`、`importDailyReportsApply(path)`。
 
-- [ ] **Step 1: 写 16 条失败测试（RED：编译层，缺的类型与函数一整套）**
+- [ ] **Step 1: 写 17 条失败测试（RED：编译层，缺的类型与函数一整套）**
 
 `daily_report.rs` 的 `mod tests` 末尾追加。**夹具手法**：文本/数字单元用 `rust_xlsxwriter` 直接写（本机就能造）；日期格式单元造不出来（要给 number format），所以 `Cell::DateTime` 那一支走**纯函数直喂**（`date_of_cell` 收 `Cell`，不经过文件），端到端只验文本/数字/空三类。这条限制写进 Step 6 的残余记录，不许假装测过。
 
@@ -3163,7 +3163,7 @@ export const importDailyReportsApply = (path: string) =>
 
 ```bash
 cd /e/zero/demo/2026/project-files-manage/src-tauri
-cargo test -j 1 --lib                        # 期望 299 passed（283 + 16）
+cargo test -j 1 --lib                        # 期望 300 passed（283 + 17）
 cargo clippy --lib -- -D warnings            # exit=0
 cargo clippy --lib --all-targets -- -D warnings
 cd /e/zero/demo/2026/project-files-manage
@@ -3217,7 +3217,7 @@ git diff --stat master..HEAD -- src-tauri/Cargo.lock                     # 期�
 git diff --stat master..HEAD -- src-tauri/Cargo.toml                     # 期望只有 rust_xlsxwriter 那一行移动
 ```
 
-Expected（**全部现跑核对**，下面这串是本计划按逐格列名加出来的数）：`test=0` + **299 passed / 0 failed**（基线 256 + T1 3 + T2 18 + T3 2 + T6 4 + T7 16）；两个 clippy `exit=0` 且 0 warning；`build=0`；node **41 / 41 / 0**；`npm=0` 且 `error TS` **0**；结构门 **60 / 7 / 6 / 1 / 616**（命令数 / async 属性 / TARGET_VERSION / dead_code 豁免 / Cargo.lock 包数）。
+Expected（**全部现跑核对**，下面这串是本计划按逐格列名加出来的数）：`test=0` + **300 passed / 0 failed**（基线 256 + T1 3 + T2 18 + T3 2 + T6 4 + T7 17）；两个 clippy `exit=0` 且 0 warning；`build=0`；node **41 / 41 / 0**；`npm=0` 且 `error TS` **0**；结构门 **60 / 7 / 6 / 1 / 616**（命令数 / async 属性 / TARGET_VERSION / dead_code 豁免 / Cargo.lock 包数）。
 
 **若某个数对不上**：先怀疑「有人少写/多写了一条测试」或「有一格被回退」，按 `cargo test --lib daily_report` / `--lib search` / `--lib db` 分模块取数定位，**不许**为了凑数放宽断言，也不许把聚合数改成实际读数了事而不解释差异。
 
