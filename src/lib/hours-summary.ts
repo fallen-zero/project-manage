@@ -61,8 +61,11 @@ export function isoWeekKey(date: string): string {
   return `${isoYear}-W${String(week).padStart(2, "0")}`;
 }
 
-/// 求和一律整数化（spec §五.2）。`0.1 * 10` 直接累加得 `1.0000000000000002`，
-/// 那条界面写出来就是「本周合计 1.0000000000000002 小时」。
+/// 求和一律整数化（spec §五.2）。别以为「十条 `0.1` 累加」能证明这件事：本机实测 `0.1 * 10` 恰好是 `1`、
+/// `0.1 * 100` 恰好是 `10`（残差为 0），摘掉 `Math.round` 那组照样得 `1` —— 它只钉显示形状。
+/// 真会漂的是 `0.07` 那组：`0.07 * 100 = 7.000000000000001`，三条不取整地累加再除回来得
+/// `0.21000000000000005`，界面写出来就是「本周合计 0.21000000000000005 小时」。
+/// `tests/hours-summary.test.ts` 钉的是这一组（M⑤ 的靶心），两组断言同时都在。
 export function sumHours(rows: DailyReport[]): number {
   let cents = 0;
   for (const r of rows) cents += Math.round(r.hours * 100);
