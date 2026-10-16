@@ -19,6 +19,7 @@ import type { DocHit, DocRow, IndexOverview, IndexProgress } from "@/types/index
 import type { BackupSummary, ImportOutcome, PackageInfo } from "@/types/backup";
 import type { Todo, TodoInput, TodoEdit } from "@/types/todo";
 import type { Milestone, MilestoneInput, MilestoneEdit } from "@/types/milestone";
+import type { DailyReport, DailyReportEdit, DailyReportInput } from "@/types/daily-report";
 
 export const listProjects = () => invoke<Project[]>("project_list");
 export const getProject = (id: string) => invoke<Project>("project_get", { id });
@@ -89,6 +90,16 @@ export const createMilestone = (input: MilestoneInput) =>
 export const updateMilestone = (id: string, input: MilestoneEdit) =>
   invoke<void>("milestone_update", { id, input });
 export const deleteMilestone = (id: string) => invoke<void>("milestone_delete", { id });
+
+// —— M10 日报：四个封装（导出/导入的三个在 Task 6/7 各自那一格补，别提前塞）——
+// list 的 projectId 传显式 `null` 而不是省键（同 M9 那条告诫）。
+export const listDailyReports = (projectId: string | null) =>
+  invoke<DailyReport[]>("daily_report_list", { projectId });
+export const createDailyReport = (input: DailyReportInput) =>
+  invoke<DailyReport>("daily_report_create", { input });
+export const updateDailyReport = (id: string, input: DailyReportEdit) =>
+  invoke<void>("daily_report_update", { id, input });
+export const deleteDailyReport = (id: string) => invoke<void>("daily_report_delete", { id });
 
 // 走 Tauri 的原生剪贴板而不是 navigator.clipboard：后者要求文档处于焦点态，
 // 窗口刚失焦就会静默抛错，而"一键复制路径/密码"正是这个软件的核心动作。
