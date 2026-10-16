@@ -219,7 +219,7 @@ git ls-remote --heads origin | grep -E "master|m10"         # 核远端 SHA 与�
 | 里程碑实态 + 每格验收证据 + 变更日志 | `docs/开发进度.md` |
 | **M10 规格（已定稿、需求方当次拍定：D1–D10 + §三 六格「树上免费」核实 + §五 后端判据（req_date/工时/检索六扩八）+ §六 Excel 双向 + §九 十条不变量逐条裁定（含 §九.8 反转 M9「待办不进检索」）+ §十 十四格验收 + §十一 明确不做（台账导出整格推 M11）+ §十二 八条变异）** | `docs/superpowers/specs/2026-10-16-m10-daily-reports-design.md` |
 | **M10 实施计划（九格写满且已执行完：T1 V6 迁移 / T2 daily_report 四操作 + req_date / T3 检索六扩八 / T4 前端契约 + hours-summary / T5 /daily-reports 页 / T6 真 .xlsx 导出 / T7 两段式导入 / T8 门禁 + 九处变异 + 真机十六格 / T9 活文档回写；顶部 Global Constraints 钉死零新依赖与结构门口径）** | `docs/superpowers/plans/2026-10-16-m10-daily-reports.md` |
-| **M10 SDD 账本 + 真机读数 + 变异取证（每格 Ruling、Task 4 修复轮、本轮抓到的两条：M⑤ 假守护与 M⑦ 靶改准；真机沙盒 `dev.zero.pfm.m10test` 1–15 格读数与格 16 未验清单）** | `.superpowers/sdd/2026-10-16-m10-daily-reports/{progress.md,real-machine-readings.md,mutation-evidence.txt}` |
+| **M10 SDD 账本 + 真机读数 + 变异取证（每格 Ruling、Task 4 修复轮、本轮抓到的两条：M⑤ 假守护与 M⑦ 靶改准；真机沙盒 `dev.zero.pfm.m10test` 的**计划网格** 1–15 格读数、终审后补跑的 spec §十.12/§十.13 两格、与格 16 未验清单）** | `.superpowers/sdd/2026-10-16-m10-daily-reports/{progress.md,real-machine-readings.md,mutation-evidence.txt}` |
 | **M9 规格（已定稿、需求方已 review：D1–D12 + 数据模型 §三 + 命令契约 §四 + 失败面 §五 + 预警判据 §六 + 真机十格 §十 + 不在本轮 §十一 + 风险 §十二 + 回写 §十三）** | `docs/superpowers/specs/2026-10-14-m9-todos-milestones-design.md` |
 | **M9 实施计划（八格写满且已执行完：T1 迁移 / T2 todo.rs / T3 milestone.rs / T4 前端契约层 / T5 待办页 / T6 里程碑面板 / T7 门禁+九处变异取证+真机十格 / T8 活文档回写；顶部「任务总览与派发前必读」那节是终态账，含期望数链与三处计划偏离裁定）** | `docs/superpowers/plans/2026-10-14-m9-todos-milestones.md` |
 | M8 规格（D1–D13 + §三 失败面 + §四 契约与结构门 + §五 包格式 + §七 判据 + §八 三档测试 + 真机 §九 + 风险 §十一 + 回写 §十二；执行期四条订正落在段末） | `docs/superpowers/specs/2026-10-13-m8-backup-design.md` |
