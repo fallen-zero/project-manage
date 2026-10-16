@@ -11,6 +11,7 @@ const nav = [
   { to: "/index", label: "索引" },
   { to: "/backup", label: "备份" },
   { to: "/todos", label: "待办" },
+  { to: "/daily-reports", label: "日报" },
 ];
 
 export function AppShell() {
