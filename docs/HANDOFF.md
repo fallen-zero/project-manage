@@ -10,6 +10,7 @@
 
 - **M0–M9 已全部合入 `master`**。M8 = 备份包导出/验包/导入，合并点 `99c9401`，收口文档 `a5c593b`；M8 的整分支终审结论是 **Needs fixes / 1 Critical + 2 Important**，三条复现全部成立、全部修完（那条 Critical 是「导出落点能把用户唯一的持久库截断归零」，见坑 31）。**M8.1 = 备份包四格小账**，合并点 `d203156`（`a5c593b..d203156` 的 **fast-forward**，全历史 merge commit 仍 0），`master` 已推 `origin` 且 `git ls-remote --heads origin` 的 SHA 与本地逐字一致；四格口径与**三处变异取证**见 `docs/开发进度.md`「## M8.1 收口」+ 变更日志最后一条。**M8.1 这一格没有真机验证**（详见 §2 末与 §3）。
 - **M9（待办清单 + 项目里程碑 + 到期预警）已合入 `master`**（需求方当次批准后 fast-forward，合并点 `b6469c9`，`master` 与 `feat/m9-todos-milestones` 同指该提交，全历史 merge commit 仍 **0**）。终审结论 **Needs fixes（0C/6I/10N）**已由**一波修复**全部落地、限定范围复审判定逐条 ADDRESSED，之后又修掉一处先于 M9 的深链缺陷（详见 `docs/开发进度.md` 末两条）。**合并后在 `master` 的树上复跑整套门**（不是拿分支读数交差）：`cargo test -j 1 --lib` **256 passed / exit=0**、两条 clippy `exit=0`、`cargo build --lib` `exit=0`、`node --test` **31/31/0**、`npm run build` `error TS`=0；结构门 **53 / async 4 / TARGET_VERSION 5 / 豁免 1 / Cargo.lock 616**、`Cargo.*` 与 `package.json` 零差异。取证与账本：`docs/superpowers/specs/2026-10-14-m9-todos-milestones-design.md`、`.superpowers/sdd/2026-10-14-m9-todos-milestones/{progress.md,mutation-evidence.txt,final-fix-list.md}`。
+- **M10（日报 + 工时统计 + Excel 双向导入导出）代码 + 真机已做完，在分支 `feat/m10-daily-reports`（领先 `master` 22 笔），待整分支终审 + 合 `master`（合并点待填、需需求方当次批准）**：V6 建 `daily_reports`（**零回填**）+ `daily_report.rs` 四操作 CRUD + `todo::req_date`；全局检索从六条同形状 per-table LIKE 扩到**八条**（日报正文 + 待办标题）—— 这一步**反转**了 M9 裁的「待办正文不进任何检索通路」（需求方当次改口径，不是 M9 做错，账见 M10 spec §九.8，M9 spec 顶部只加一行指针、§十一 原文不动）；聚合判据全在前端纯函数 `src/lib/hours-summary.ts`（`node --test` 守，沿用 M9 D7「SQL 不解释日期」）、`/daily-reports` 页作 nav 第 6 格、真 `.xlsx` 导出（含空白模板）与两段式导入（`import_preview` 只读预检 → `import_apply` 单事务全成全败）。**本轮主动推后（是决定不是遗漏）**：`思维导图.md` §四.2「导出 Excel/Markdown **台账**文件」整格推 M11 —— 那格导的是台账五表、里面躺着账号密码密文列，导成文件等于把明文交到用户手里，要先单独定红线。**合并后（或终审后）在 `feat/m10-daily-reports` 的树上现跑 §4-A 那串命令**：`cargo test -j 1 --lib` **301 passed / exit=0**、两条 clippy `exit=0 且 0 warning`、`cargo build --lib` `exit=0`、`node --test` **41/41/0**、`npm run build` `error TS`=0；结构门 **60 / async 7 / TARGET_VERSION 6 / 豁免 1 / Cargo.lock 616**、`git diff origin/master..HEAD -- src-tauri/Cargo.lock` 空（`rust_xlsxwriter` 从 dev 提直接依赖不新增包）。九处变异全部红在该红处（两处本轮抓到：M⑤ 首轮全绿抓到一条假守护、M⑦ 靶按实测改准，详见 `docs/开发进度.md` 2026-10-16 那条）。取证与账本：`docs/superpowers/{plans,specs}/2026-10-16-m10-daily-reports*`、`.superpowers/sdd/2026-10-16-m10-daily-reports/{progress.md,real-machine-readings.md,mutation-evidence.txt}`。
 
 **给下一个对话的一句提醒**：这一轮里「已验证」这三个字被伪造过两次，两次都是控制方自己（一次是凭空写 `Task 9: complete`，一次是从一份 **0 字节**的子代理输出里"读出"整份终审裁决并提交了）。教训与三条可敲的防线在坑 29。**本文任何结论都别直接当读数用 —— 照它附的命令自己跑一遍。**
 
@@ -70,40 +71,41 @@
 
 ## 3. 当前卡在哪
 
-**代码面没有卡点，工作树干净**（只有一颗未跟踪的 `Python/` —— 它绝不 stage、绝不删，仓里有专门的历史教训）。M8.1 已合入 `master`，整套门禁**在合并后的 `master` 树上复跑过**（不是拿分支读数交差）：`cargo test -j 1 --lib` **225 passed / exit=0**、两条 clippy `-D warnings` **exit=0**、`cargo build --lib` **exit=0**、`node --test` **10/10/0**、`npm run build` **exit=0 且 `error TS`=0**、结构门 **45 条命令 / `command(async)` 4 / `TARGET_VERSION` 4 / 全仓 `dead_code` 豁免 1**（`db.rs:30`）、`Cargo.lock` 在合并区间零变化且 `[[package]]` **616** 不变。**这些数一定漂，用 §4-A 那串命令现跑一遍再信。**
+**代码面没有卡点，工作树干净**（只有一颗未跟踪的 `Python/` —— 它绝不 stage、绝不删，仓里有专门的历史教训）。**M10 代码 + 真机已做完**（分支 `feat/m10-daily-reports`，领先 `master` 22 笔，**待整分支终审 + 合 `master`**）；M0–M9 已全部合入 `master`。本轮门禁终态**在 `feat/m10-daily-reports` 的树上现跑**（`master` 仍是 M9 那套 53/4/5，别拿 master 的数当 M10 的数）：`cargo test -j 1 --lib` **301 passed / exit=0**、两条 clippy `-D warnings` **exit=0 且 0 warning**、`cargo build --lib` **exit=0**、`node --test` **41/41/0**、`npm run build` **exit=0 且 `error TS`=0**、结构门 **60 条命令 / `command(async)` 7 / `TARGET_VERSION` 6 / 全仓 `dead_code` 豁免 1**（`db.rs:30` —— 本轮没为 `ReadyRow` 带行号字段，**没开新豁免，别把它改成 2**）、`git diff origin/master..HEAD -- src-tauri/Cargo.lock` **空**（`rust_xlsxwriter` 从 `[dev-dependencies]` 提为直接依赖、不新增包）且 `[[package]]` **616** 不变。**这些数一定漂，用 §4-A 那串命令现跑一遍再信。**
 
 **卡住的两件事，没有一件是代码问题**：
 
-1. **代码面没有卡点：M9 已合 `master`，下一格是 M10（日报 + 工时 + Excel）**。开工前先读 `docs/思维导图.md:47-58`（需求原文逐条在那里，不是技术方案的里程碑表 —— 坑 34）。**两件事别以为做完了**：到期预警只兑了一半（维保/域名/证书三类到期字段至今没建，技术方案 M11 行已点名）；页面与路由层始终没有自动化测试网（深链渲染、`unparsed` 文案是否真被触发、WebView2 里的中文分组次序都只能靠真机与人眼）。
+1. **代码面没有卡点：M10 已交付（分支 `feat/m10-daily-reports`，待整分支终审 + 合 `master`），下一格是 M11**。M11 要接的两件：**① 到期预警剩下的那一半**（`思维导图.md:73` 括号里的**维保 / 域名 / 证书**三类到期字段至今没建 —— M9 只兑了「里程碑计划日期 / 未完成待办截止 / 未归档项目交付截止」这三类日期，那三类字段一个也没建，别以为到期预警做完了）；**② 本轮主动推过去的『项目台账导出 Excel/Markdown 台账文件』**（`思维导图.md` §四.2 那格 —— 导的是台账五表、里面躺着账号密码密文列，导成文件 = 明文交到用户手里，要先单独定红线）。开工前先回 `docs/思维导图.md` 读原文（不是技术方案的里程碑表 —— 坑 34）。**另一件别以为做完了**：页面与路由层始终没有自动化测试网（深链渲染、`unparsed` 文案是否真被触发、日报页 `daily-reports.tsx` 的接线与周归属/排序的实际渲染都只能靠真机与人眼 —— **M10 把聚合判据搬到前端 ⇒ `cargo test` 不再守住它，取证面移到 `node --test`**，与 M9 I1、坑 35 同族）。
 2. **这台机的提交内存是常态瓶颈**：16 G 机，`FreeVirtual` 掉到 ~1 G 时 cargo 会报 `os error 1455`，且症状包括「报编译失败却一行 `error[Exxxx]` 都没有」（坑 32）。要跑门禁前先看 `Get-CimInstance Win32_OperatingSystem` 的 `FreeVirtualMemory`，低于 ~2 G 就叫需求方腾内存，别去改代码。
 
 **只剩需求方能做的四格（一直挂着，不阻塞代码）**：① `/backup` 上「另存为」/「打开」两个原生对话框各真点一次 —— 三个结果块与覆盖确认框的**块内渲染**至今没有真机证据；② 故意把导出目标选进 `%APPDATA%\dev.zero.pfm\`，亲眼看 `backup_destination_unsafe` 报错（守卫的调用点只有文本门守着，M8.1 之后这条更要看一眼）；③ M7 欠的那一下：真按一次 `/index` 的「安装 LibreOffice」（`libreoffice_install` 全程没真调用过）；④ 远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`（本机无 `gh`）⇒ 只能在 Settings → Branches 手改。
 
 ## 4. 下一步计划
 
-**A（已完成：M8.1 已合入 `master`；下面这串现在是「master 整套门的复跑清单」）**。合并走的是 fast-forward（不造合并提交），合并点 `d203156`，`master` 已推 `origin` 且远端 SHA 与本地逐字一致 —— **这三条别信这句话，照下面的命令跑一遍**。以后任何一格收口也用同一串：
+**A（M10 门禁复跑清单：M10 代码 + 真机已做完在 `feat/m10-daily-reports`，待整分支终审 + 合 `master`；M0–M9 已合 `master`）**。下面这串在 `feat/m10-daily-reports` 的树上跑出的就是 M10 终态（`cargo 301 / node 41 / 结构门 60·7·6·1·616`）；`master` 现在仍是 M9 那套 53/4/5，别把 master 的数当 M10 的数。合完走 fast-forward（不造合并提交）、`master` 推 `origin` —— **任何一格收口都用这串现跑，别信写死的数**：
 
 ```
 git rev-list --merges --count --all                          # 期望 0
-git rev-parse --abbrev-ref HEAD                              # 现在应在 master
-git rev-parse --short HEAD master feat/m8.1-cleanup           # 三者应同指一个提交
-cd src-tauri && cargo test -j 1 --lib                        # 期望 225 passed / 0 failed
+git rev-parse --abbrev-ref HEAD                              # 合并前在 feat/m10-daily-reports，合并后在 master
+git rev-parse --short HEAD master feat/m10-daily-reports     # 合并后三者应同指一个提交（M10 现未合，master 仍 M9）
+cd src-tauri && cargo test -j 1 --lib                        # 期望 301 passed / 0 failed（master 上是 256）
 cargo clippy --lib -- -D warnings; cargo clippy --lib --all-targets -- -D warnings   # 两个都期望 exit=0、0 warning
 cargo build --lib                                            # exit=0
-cd .. && node --test "tests/**/*.test.ts"                    # tests 10 / pass 10 / fail 0（在仓库根跑）
+cd .. && node --test "tests/**/*.test.ts"                    # tests 41 / pass 41 / fail 0（在仓库根跑）
 npm run build                                                # exit=0，且 grep -c "error TS" 为 0
-sed -n '/generate_handler/,/^      \]/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"   # 45（逗号可选，写死 ,$ 会漏算末条）
-grep -c 'tauri::command(async)' src-tauri/src/lib.rs         # 4
-grep -rn "allow(dead_code)" src-tauri/src/ | wc -l           # 1（只有 db.rs:30）
+sed -n '/generate_handler/,/^      \]/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"   # 60（逗号可选，写死 ,$ 会漏算末条）
+grep -c 'tauri::command(async)' src-tauri/src/lib.rs         # 7（M10 导出 + 导入两步挂 async，函数体零 await）
+grep -oE 'TARGET_VERSION: [a-z0-9]+ = [0-9]+' src-tauri/src/db.rs   # 6（M10 走 V6）
+grep -rn "allow(dead_code)" src-tauri/src/ | wc -l           # 1（仍只有 db.rs:30，本轮没开新豁免）
 grep -c '^\[\[package\]\]' src-tauri/Cargo.lock              # 616
-git ls-remote --heads origin | grep -E "master|m8.1"         # 核远端 SHA 与本地逐字一致
+git ls-remote --heads origin | grep -E "master|m10"         # 核远端 SHA 与本地逐字一致
 ```
 
 **执行这一串时的两个本机坑（本轮真踩过）**：① cargo/clippy 前要 `cd src-tauri`，而 **cwd 在多次工具调用之间会残留** —— 本轮第一次批量跑就因 `cd: src-tauri: No such file or directory` 让一条 clippy 根本没执行、`exit=1` 是 `cd` 的退出码（坑 4）；② `cd ..` 之后所有仓库根路径都按仓库根算。**合并本身**要另外核的两条例行是 `git merge-base --is-ancestor master <功能分支>; echo $?` 期望 **0**、`git rev-list --count master..<功能分支>` 看领先几笔，然后 `git checkout master && git merge --ff-only <功能分支>`；合完**在 `master` 的树上**复跑上面整套门，别拿分支读数交差。
 
 **M8.1 这一格没有真机验证**（§2 末），需要人手的那四格一条也没被这次合并兑掉（见 §3 末「只剩需求方能做的四格」）。
 
-**B（M9 已交付，下一格是 M10：日报 + 工时 + Excel）** —— 先把 M9 终审 + 合并收掉，再开 M10。 —— 架构级路径（仓库里**没有**现成的待办流程可改，不是 bounded）。`brainstorming` → spec → `writing-plans`（**八格写满**）→ SDD 逐格派发 → 真机十格 **已全部走完**；**下一格动作 = 整分支终审的修复波收口 → 合 `master`（需当次批准）**，不是回头续写计划。已定的口径（在 spec 的 D1–D12，别重问）：
+**B（M9 已合 `master`；M10 代码 + 真机已做完在 `feat/m10-daily-reports`，**下一格动作 = 整分支终审的修复波收口 → 合 `master`（需当次批准）**，合完再开 M11）** —— M10 走的是 `brainstorming` → spec（`docs/superpowers/specs/2026-10-16-m10-daily-reports-design.md`，D1–D10）→ `writing-plans`（`docs/superpowers/plans/2026-10-16-m10-daily-reports.md`，九格写满）→ SDD 逐格派发 → 真机十六格（1–15 有读数、格 16 未验）→ 九处变异取证 **已全部走完**，不是回头续写计划。下面「已勘察完的事实」那几条是 **M9 当轮的历史记录**，保留不改（日报检索反转与台账导出推后的账记在 §0/§3 与 M10 spec §九.8，别回来改这几条 M9 bullet）：
 
 已勘察完的事实（下一个对话不必重读，但建议复核）：
 
@@ -205,12 +207,19 @@ git ls-remote --heads origin | grep -E "master|m8.1"         # 核远端 SHA 与
 
 38. **两条同族的「工具接口形状」坑，本轮各犯一次，而且都藏在门禁全绿之下**：① **往破坏性命令里喂正则抽出来的数字之前，先把「哪一列进了参数」逐条打印出来核对** —— 我回收 dev 进程时拿 `grep -oE "(PORT|APPPID|NODEPID) [0-9]+" | awk '{print $2}'` 抽 PID，而那份脚本的 PORT 行是 `PORT 1520 PID 1188 …` 两列格式 ⇒ **端口号被当成 PID 传给了 `Stop-Process -Force`**（还带 `-ErrorAction SilentlyContinue`，失败不响）。事后 `tasklist //FI "PID eq 1520"` 只能证明它**现在**没进程，**无法自证当时没误杀恰好占用该 PID 的无关进程**。② **在 shell 里用 `python -c` 写含反引号的中文，反引号会被 bash 当命令替换静默执行掉** —— 当场报一串 `command not found`，**却照样把文件写完、被我提交并推送了**，落库那一行所有代码片段变成空白洞，靠「提交后回读」才发现、单独一笔修回。⇒ 这类文本一律走 UTF-8 脚本文件（同族还有：`$` 被 bash 吞、`tasklist /FI` 被 MSYS 改写成路径要写成 `//FI`），**并且提交后回读一次**（与坑 36 的行号/行尾事故同源：改完不复核 = 不知道改坏了）。
 
+**M10（日报 + Excel，2026-10-16）新增的坑**：
+
+39. **显示层会把 `/`（U+002F）印成 `-`（U+002D），所以「放进拒绝列表的日期样本」必须按码点确认它到底是斜杠**：肉眼「这条日期样本是不是斜杠形状」在本机输出层不可信（同族还有 M7 的「含拉丁字母的哨兵串被按文种切开」——渲染层与字节层不是一回事）。本轮控制方写计划时被它打了三次：① `todo.rs` 里那条历史拒收样本；② Task 7 计划的两支日期夹具一度把**合法**日期当斜杠形状放进拒绝列表，写出来恒红；③ 一次 Edit 因「两侧字面量看起来相同」而 0 命中（其实是斜杠 vs 连字符之别）。⇒ **正确做法**：判断日期分隔符一律按码点（`.` 点、`/` 斜杠、`-` 连字符三形分开写死），写拒收/夹具样本前用命令数一遍码点而非用眼睛复验；要让「看起来相同」不可能发生就用互不相同的分隔符。**同族第一条：M9 终审 N5**（斜杠形状的拒收样本必须按码点确认）；判据是「症状藏在门禁全绿之下、取证要回到字节/码点层」，与坑 37（把「我以为的判据」当实现该长的样子）、坑 38（工具接口形状）同一族。
+
 ## 6. 关键指针
 
 | 主题 | 位置 |
 |---|---|
 | 项目定位 / 架构 / 里程碑表 | `docs/技术方案.md` |
 | 里程碑实态 + 每格验收证据 + 变更日志 | `docs/开发进度.md` |
+| **M10 规格（已定稿、需求方当次拍定：D1–D10 + §三 六格「树上免费」核实 + §五 后端判据（req_date/工时/检索六扩八）+ §六 Excel 双向 + §九 十条不变量逐条裁定（含 §九.8 反转 M9「待办不进检索」）+ §十 十四格验收 + §十一 明确不做（台账导出整格推 M11）+ §十二 八条变异）** | `docs/superpowers/specs/2026-10-16-m10-daily-reports-design.md` |
+| **M10 实施计划（九格写满且已执行完：T1 V6 迁移 / T2 daily_report 四操作 + req_date / T3 检索六扩八 / T4 前端契约 + hours-summary / T5 /daily-reports 页 / T6 真 .xlsx 导出 / T7 两段式导入 / T8 门禁 + 九处变异 + 真机十六格 / T9 活文档回写；顶部 Global Constraints 钉死零新依赖与结构门口径）** | `docs/superpowers/plans/2026-10-16-m10-daily-reports.md` |
+| **M10 SDD 账本 + 真机读数 + 变异取证（每格 Ruling、Task 4 修复轮、本轮抓到的两条：M⑤ 假守护与 M⑦ 靶改准；真机沙盒 `dev.zero.pfm.m10test` 1–15 格读数与格 16 未验清单）** | `.superpowers/sdd/2026-10-16-m10-daily-reports/{progress.md,real-machine-readings.md,mutation-evidence.txt}` |
 | **M9 规格（已定稿、需求方已 review：D1–D12 + 数据模型 §三 + 命令契约 §四 + 失败面 §五 + 预警判据 §六 + 真机十格 §十 + 不在本轮 §十一 + 风险 §十二 + 回写 §十三）** | `docs/superpowers/specs/2026-10-14-m9-todos-milestones-design.md` |
 | **M9 实施计划（八格写满且已执行完：T1 迁移 / T2 todo.rs / T3 milestone.rs / T4 前端契约层 / T5 待办页 / T6 里程碑面板 / T7 门禁+九处变异取证+真机十格 / T8 活文档回写；顶部「任务总览与派发前必读」那节是终态账，含期望数链与三处计划偏离裁定）** | `docs/superpowers/plans/2026-10-14-m9-todos-milestones.md` |
 | M8 规格（D1–D13 + §三 失败面 + §四 契约与结构门 + §五 包格式 + §七 判据 + §八 三档测试 + 真机 §九 + 风险 §十一 + 回写 §十二；执行期四条订正落在段末） | `docs/superpowers/specs/2026-10-13-m8-backup-design.md` |
@@ -235,4 +244,4 @@ git ls-remote --heads origin | grep -E "master|m8.1"         # 核远端 SHA 与
 | 旧版累加 HANDOFF（100+ 条编号坑与账本交叉引用） | `git show 0aa0d30:docs/HANDOFF.md` |
 | **需求原文（待办 / 日报 / 工时 / Excel / 增强项的逐条口径）** | `docs/思维导图.md` —— §二 `:38-45` 待办清单、§三 `:47-58` 日报与 Excel、§四.3 `:70-74` 可选增强；**开工前先读它，别读里程碑表**（坑 34） |
 | **M8.1 四格小账的证据（含两次变异取证与「④b 遮蔽了 !exists」这条）** | `docs/开发进度.md`「## M8.1 收口（备份包那四格小账）」一节 + `.superpowers/sdd/2026-10-13-m8-backup/progress.md` 末尾的 `M8.1` 段 |
-| 本文坑编号：M7 起续到 **21**、M8 起续到 **33**、M8.1 起续到 **36**（15–21 是 LibreOffice / 外部 CLI 的账，22–33 是备份包 / zip / rusqlite Backup API / 门禁取证 / 子代理证据可信度，34–36 是需求出处、防线的可证伪性、文档与行尾的手艺）；**编号只增不改 —— 别的文档按号引用 1–33** | 旧版那套 100+ 编号在本版没有连续号可查 ⇒ 挖账看 `git show 0aa0d30:docs/HANDOFF.md` 与 `.superpowers/sdd/<plan>/progress.md` |
+| 本文坑编号：M7 起续到 **21**、M8 起续到 **33**、M8.1 起续到 **36**（15–21 是 LibreOffice / 外部 CLI 的账，22–33 是备份包 / zip / rusqlite Backup API / 门禁取证 / 子代理证据可信度，34–36 是需求出处、防线的可证伪性、文档与行尾的手艺）；**M9 起续到 38、M10 起续到 39**（37–38 是规格判据与工具接口形状，39 是斜杠被印成连字符 ⇒ 拒收日期样本必须按码点确认）；**编号只增不改 —— 别的文档按号引用 1–33** | 旧版那套 100+ 编号在本版没有连续号可查 ⇒ 挖账看 `git show 0aa0d30:docs/HANDOFF.md` 与 `.superpowers/sdd/<plan>/progress.md` |
