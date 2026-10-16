@@ -157,23 +157,27 @@ export function DailyReportsPage() {
     const source = copySource;
     if (source === null) return; // 按钮此时 disabled，这一句只是防御
     const src = reports.filter((r) => r.reportDate === source);
-    // 串行 await、**不吞失败**：任意一条被后端拒就当场抛给 `run()`（错误落 state、剩下的不再发）。
-    // 原先这里写成 `.then(() => true, () => false)` + break —— 那是把后端的拒绝吞干净、
-    // `run()` 照样返回 true，控制方在计划自审里按 M9 I3 的同一条规矩打回。
-    // 已成功的几条不回滚（D10 当次接受的代价：撤销走明细列表逐条删）。
-    void run(async () => {
+    void (async () => {
+      // **逐条走 `run()`，不走「一个 run 里循环」**：`run()` 只在成功路径里 `await reload()`，
+      // 循环版一旦中途被后端拒绝（或落库后 reload 自己失败），已经进库的那几条就**不会回到列表里** ——
+      // 用户看不见它们，既没法按 D10 说的「逐条删」撤销，也会再点一次「复制上一天」把同一批**再复制一遍**。
+      // Task 5 复审抓的就是这一条（单条写入的 `todos.tsx` 不会摊上这事，多条循环才会）。
+      // 代价是 N 次 reload，几十条量级无所谓；`copied` 只在自己 resolve 之后才加，所以不会多报。
       let copied = 0;
       for (const r of src) {
-        await createDailyReport({
-          projectId: r.projectId,
-          reportDate: targetDate,
-          content: r.content,
-          hours: r.hours,
-        });
+        const ok = await run(() =>
+          createDailyReport({
+            projectId: r.projectId,
+            reportDate: targetDate,
+            content: r.content,
+            hours: r.hours,
+          }),
+        );
+        if (!ok) break; // 失败已由 run() 落进 error，且前面成功的几条已经被 run() 内部的 reload 拉回列表
         copied += 1;
       }
-      setNotice(`从 ${source} 复制了 ${copied} 条到 ${targetDate}`);
-    });
+      if (copied > 0) setNotice(`从 ${source} 复制了 ${copied} 条到 ${targetDate}`);
+    })();
   };
 
   const onStartEdit = (r: DailyReport) => {
@@ -330,7 +334,7 @@ export function DailyReportsPage() {
             onChange={(e) => setNewDate(e.target.value)}
             aria-label="日报日期"
           />
-          <Select value={newProject === "" ? undefined : newProject} onValueChange={setNewProject}>
+          <Select value={newProject} onValueChange={setNewProject}>
             <SelectTrigger className="w-48">
               <SelectValue placeholder="所属项目" />
             </SelectTrigger>
