@@ -8,8 +8,8 @@
 
 **现在在哪（三条都要用命令复核，别信这段文字）**：
 
-- **M0–M8.1 已全部合入 `master`**。M8 = 备份包导出/验包/导入，合并点 `99c9401`，收口文档 `a5c593b`；M8 的整分支终审结论是 **Needs fixes / 1 Critical + 2 Important**，三条复现全部成立、全部修完（那条 Critical 是「导出落点能把用户唯一的持久库截断归零」，见坑 31）。**M8.1 = 备份包四格小账**，合并点 `d203156`（`a5c593b..d203156` 的 **fast-forward**，全历史 merge commit 仍 0），`master` 已推 `origin` 且 `git ls-remote --heads origin` 的 SHA 与本地逐字一致；四格口径与**三处变异取证**见 `docs/开发进度.md`「## M8.1 收口」+ 变更日志最后一条。**M8.1 这一格没有真机验证**（详见 §2 末与 §3）。
-- **M9（待办清单 + 项目里程碑 + 到期预警）代码与真机全部做完，卡在「等终审 + 等合并批准」**：分支 `feat/m9-todos-milestones`（已推 `origin`，SHA 逐字一致），**`master` 未动**。终态读数：cargo **254 passed**、node **26**、结构门 **53 / async 4 / TARGET_VERSION 5 / 豁免 1 / Cargo.lock 616 零变化**；九处变异取证八处具名打红、第九处（面板 `stateOf`）**如实打不红**（无自动化网，已记 deferred）。**还剩三件**：① 整分支终审（`review-package` 从 `git merge-base origin/master HEAD` 起算，要 triage 的清单在`.superpowers/sdd/2026-10-14-m9-todos-milestones/progress.md` 与 `mutation-evidence.txt`）；② 修一波 + 限定范围复审；③ 合 `master`（**需需求方当次批准**）。合并后要落收口文档（M7/M8/M8.1 的先例形状）。
+- **M0–M9 已全部合入 `master`**。M8 = 备份包导出/验包/导入，合并点 `99c9401`，收口文档 `a5c593b`；M8 的整分支终审结论是 **Needs fixes / 1 Critical + 2 Important**，三条复现全部成立、全部修完（那条 Critical 是「导出落点能把用户唯一的持久库截断归零」，见坑 31）。**M8.1 = 备份包四格小账**，合并点 `d203156`（`a5c593b..d203156` 的 **fast-forward**，全历史 merge commit 仍 0），`master` 已推 `origin` 且 `git ls-remote --heads origin` 的 SHA 与本地逐字一致；四格口径与**三处变异取证**见 `docs/开发进度.md`「## M8.1 收口」+ 变更日志最后一条。**M8.1 这一格没有真机验证**（详见 §2 末与 §3）。
+- **M9（待办清单 + 项目里程碑 + 到期预警）已合入 `master`**（需求方当次批准后 fast-forward，合并点 `b6469c9`，`master` 与 `feat/m9-todos-milestones` 同指该提交，全历史 merge commit 仍 **0**）。终审结论 **Needs fixes（0C/6I/10N）**已由**一波修复**全部落地、限定范围复审判定逐条 ADDRESSED，之后又修掉一处先于 M9 的深链缺陷（详见 `docs/开发进度.md` 末两条）。**合并后在 `master` 的树上复跑整套门**（不是拿分支读数交差）：`cargo test -j 1 --lib` **256 passed / exit=0**、两条 clippy `exit=0`、`cargo build --lib` `exit=0`、`node --test` **31/31/0**、`npm run build` `error TS`=0；结构门 **53 / async 4 / TARGET_VERSION 5 / 豁免 1 / Cargo.lock 616**、`Cargo.*` 与 `package.json` 零差异。取证与账本：`docs/superpowers/specs/2026-10-14-m9-todos-milestones-design.md`、`.superpowers/sdd/2026-10-14-m9-todos-milestones/{progress.md,mutation-evidence.txt,final-fix-list.md}`。
 
 **给下一个对话的一句提醒**：这一轮里「已验证」这三个字被伪造过两次，两次都是控制方自己（一次是凭空写 `Task 9: complete`，一次是从一份 **0 字节**的子代理输出里"读出"整份终审裁决并提交了）。教训与三条可敲的防线在坑 29。**本文任何结论都别直接当读数用 —— 照它附的命令自己跑一遍。**
 
@@ -74,7 +74,7 @@
 
 **卡住的两件事，没有一件是代码问题**：
 
-1. **M9 卡在「等整分支终审 + 等合并批准」**。代码与真机都已完成并推在功能分支上（读数见 §0 与 `docs/开发进度.md` 的 M9 行）；计划里原本的 Task 3–8 已全部落地，不再有「计划没写完」这个卡点。需求已逐题收口（spec 已过需求方 review），**Task 1–8 的代码与真机读数都在这条分支上**（8 格写满并执行完，计划顶部那节就是终态）；要恢复开发，动作是走**整分支终审 → 按裁定修 → 合 `master`（需需求方当次批准）**，不要再「续写计划」—— 那份计划已经是一份执行完的账，不是半成品。已定的口径别再回头问：预警三来源与阈值、V5 零回填、`stage` 五段 CHECK、两张表都带 `done`、待办必填项目、不进 `Counts`、命令 45→53、单批全做 —— 全部在 spec 的 D1–D12 里，本节末 §4-B 摘了结论。附带一条上一轮已发生的误判：曾把 M9 说成「需求侧口径未定」——不对，口径写在 `思维导图.md` 里（坑 34）。
+1. **代码面没有卡点：M9 已合 `master`，下一格是 M10（日报 + 工时 + Excel）**。开工前先读 `docs/思维导图.md:47-58`（需求原文逐条在那里，不是技术方案的里程碑表 —— 坑 34）。**两件事别以为做完了**：到期预警只兑了一半（维保/域名/证书三类到期字段至今没建，技术方案 M11 行已点名）；页面与路由层始终没有自动化测试网（深链渲染、`unparsed` 文案是否真被触发、WebView2 里的中文分组次序都只能靠真机与人眼）。
 2. **这台机的提交内存是常态瓶颈**：16 G 机，`FreeVirtual` 掉到 ~1 G 时 cargo 会报 `os error 1455`，且症状包括「报编译失败却一行 `error[Exxxx]` 都没有」（坑 32）。要跑门禁前先看 `Get-CimInstance Win32_OperatingSystem` 的 `FreeVirtualMemory`，低于 ~2 G 就叫需求方腾内存，别去改代码。
 
 **只剩需求方能做的四格（一直挂着，不阻塞代码）**：① `/backup` 上「另存为」/「打开」两个原生对话框各真点一次 —— 三个结果块与覆盖确认框的**块内渲染**至今没有真机证据；② 故意把导出目标选进 `%APPDATA%\dev.zero.pfm\`，亲眼看 `backup_destination_unsafe` 报错（守卫的调用点只有文本门守着，M8.1 之后这条更要看一眼）；③ M7 欠的那一下：真按一次 `/index` 的「安装 LibreOffice」（`libreoffice_install` 全程没真调用过）；④ 远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`（本机无 `gh`）⇒ 只能在 Settings → Branches 手改。
@@ -202,6 +202,8 @@ git ls-remote --heads origin | grep -E "master|m8.1"         # 核远端 SHA 与
 36. **改这份长文档别拿行号做算术**：M8.1 收口时我用 python 按行号切 `docs/HANDOFF.md`，一次插入了 §3 的替身文本、又把 §4/§5 的标题吃掉（`grep "^## "` 只剩两个 `## 4.`），当场发现靠 `git checkout -- docs/HANDOFF.md` 恢复。两条正确做法：① 用 `Edit` 逐处替换（每处 old_string 唯一，改错也只伤一处）；② 真要程序化改，就按**标题切块**（`re.split` 在 `(?=^## )` 处）重建，不要维护索引。**同一轮另一处行尾事故**：几次 python 插入用的是 `\n`，在工作树里留下裸 LF（`index_job.rs` 56 行、本文 25 行、`开发进度.md` 4 行）—— 先 `git ls-files --eol <文件>` 看清「仓库侧是 `i/lf` + `core.autocrlf=true`（提交内容不受影响，检出是 CRLF）」再决定要不要动，别顺手"归一化"；要动就整档 `\r\n` 重写并**重跑门禁确认读数不变**（本轮就是这么收的）。
 
 37. **写规格时把「我以为的判据」当成「实现该长的样子」，代价是真机打出一个不存在的 bug**：spec §十 第 3 格我写的是「过去日期的里程碑**不亮红**（D5 的兑现点）」——可 D5 加 `done` 那一列的语义是「**勾掉之后**才不亮」，未勾选的历史立项按判据④本来就该红。CDP 脚本照我那句错话断言，当场印 `NO(误红!)`，差一步就去「修」一个不存在的 bug。⇒ 真机断言的措辞要**逐条回到 spec 的判据表**（§六 那张），不能回到脑子里的画面；发现判据文字错时改文字 + 明写「代码无错」，别静默改读数。同族：`backup.tsx` 页头那句「一份文本两处出」（注 5）自 M8 起就是**假的前提**——它自己就是第二份，于是 M9 改了 Rust 那句后它静默少念两档明文列且无断言守着；裁定是**删掉第二份枚举**（消灭不变量而不是同步它）。凡「两处要一致」的说法，先 grep 数清真有几处，再决定加门还是删一份（另见坑 33、坑 35）。
+
+38. **两条同族的「工具接口形状」坑，本轮各犯一次，而且都藏在门禁全绿之下**：① **往破坏性命令里喂正则抽出来的数字之前，先把「哪一列进了参数」逐条打印出来核对** —— 我回收 dev 进程时拿 `grep -oE "(PORT|APPPID|NODEPID) [0-9]+" | awk '{print $2}'` 抽 PID，而那份脚本的 PORT 行是 `PORT 1520 PID 1188 …` 两列格式 ⇒ **端口号被当成 PID 传给了 `Stop-Process -Force`**（还带 `-ErrorAction SilentlyContinue`，失败不响）。事后 `tasklist //FI "PID eq 1520"` 只能证明它**现在**没进程，**无法自证当时没误杀恰好占用该 PID 的无关进程**。② **在 shell 里用 `python -c` 写含反引号的中文，反引号会被 bash 当命令替换静默执行掉** —— 当场报一串 `command not found`，**却照样把文件写完、被我提交并推送了**，落库那一行所有代码片段变成空白洞，靠「提交后回读」才发现、单独一笔修回。⇒ 这类文本一律走 UTF-8 脚本文件（同族还有：`$` 被 bash 吞、`tasklist /FI` 被 MSYS 改写成路径要写成 `//FI`），**并且提交后回读一次**（与坑 36 的行号/行尾事故同源：改完不复核 = 不知道改坏了）。
 
 ## 6. 关键指针
 
