@@ -1,4 +1,5 @@
 mod backup;
+mod daily_report;
 mod db;
 mod doc_preview;
 mod error;
@@ -24,6 +25,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde::Serialize;
 use tauri::{Manager, State};
 
+use crate::daily_report::{DailyReport, DailyReportEdit, DailyReportInput};
 use crate::error::{AppError, AppResult};
 use crate::ledger::{
     CredentialInput, EnvInput, Ledger, LinkInput, NoteInput, ServerInput,
@@ -687,8 +689,11 @@ fn backup_import(state: State<'_, AppState>, path: String) -> AppResult<backup::
     }
 }
 
-/// 待办四条命令（M9 Task 2，形制照 `ledger_env_create`）：全部同步、函数体零 `await` ——
-/// `db(&state)?` 取回的 `MutexGuard` 不是 `Send`，给它们加 async 标记会直接编不过（M8 spec D11）。
+/// 待办四条命令（M9 Task 2，形制照 `ledger_env_create`）：全部同步、函数体不写 await 点。
+/// **本注释原先写的是「给它们加 async 标记会直接编不过」——那是句假话，M10 更正**：
+/// 同文件下方备份那三条既挂 async 属性、又在体内用 `db(&state)?` 取 MutexGuard，照样编得过。
+/// 真编不过的是 `async fn` 里让 guard 横跨 await 点；只加属性、函数体不 await，
+/// 得到的正是 M10 Task 6/7 那三条导出/导入命令用的形态（spec §五.5）。
 /// 勾选完成走 `todo_update` 的 `done` 字段（D12：不单开一条命令）。
 /// `project_id` 的 JS 侧要显式传 `null`（缺键与 null 的行为别赌）。
 #[tauri::command]
@@ -744,6 +749,37 @@ fn milestone_update(state: State<'_, AppState>, id: String, input: MilestoneEdit
 fn milestone_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
     let conn = db(&state)?;
     milestone::delete(&conn, &id)
+}
+
+/// 日报四条命令（M10 Task 2，形制照 `todo_*`）：同步、函数体不写 await 点。
+/// `db(&state)?` 取回的 `MutexGuard` 不是 `Send`，**在 async fn 里让它横跨 await 点**才编不过（M8 D11）。
+/// 只挂 async 属性、函数体照常同步是合法的 —— 同文件下方备份那三条就是这个形态，
+/// M10 Task 6/7 的导出与导入三条也走这一形（spec §五.5）。
+#[tauri::command]
+fn daily_report_list(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> AppResult<Vec<DailyReport>> {
+    let conn = db(&state)?;
+    daily_report::list(&conn, project_id.as_deref())
+}
+
+#[tauri::command]
+fn daily_report_create(state: State<'_, AppState>, input: DailyReportInput) -> AppResult<DailyReport> {
+    let conn = db(&state)?;
+    daily_report::create(&conn, &input)
+}
+
+#[tauri::command]
+fn daily_report_update(state: State<'_, AppState>, id: String, input: DailyReportEdit) -> AppResult<()> {
+    let conn = db(&state)?;
+    daily_report::update(&conn, &id, &input)
+}
+
+#[tauri::command]
+fn daily_report_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    let conn = db(&state)?;
+    daily_report::delete(&conn, &id)
 }
 
 /// 建库并在**指定目录**打开（M5.5 D8）。把「开库 + WAL 读回」从 setup 里拆出来，是为了能喂 tempdir
@@ -855,7 +891,11 @@ pub fn run() {
             milestone_list,
             milestone_create,
             milestone_update,
-            milestone_delete
+            milestone_delete,
+            daily_report_list,
+            daily_report_create,
+            daily_report_update,
+            daily_report_delete
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");

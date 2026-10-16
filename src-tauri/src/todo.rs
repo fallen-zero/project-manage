@@ -55,6 +55,27 @@ pub(crate) fn norm_date(column: &str, value: Option<String>) -> AppResult<Option
     }
 }
 
+/// **必填**日期列专用（M10 spec §五.2）。与 `norm_date` 分家的唯一理由是空白那一支：
+/// `norm_date` 折成 `NULL`（可选列的正确行为），本函数把空白与缺键都当成用户错误响亮拒掉。
+/// 形状规则仍然只有一处（`is_iso_date`），这里只多一道空白拒绝。
+/// 入参收 `Option<String>`：JSON 缺键 ⇒ `None` ⇒ 与空白同一句点名错误，
+/// 而不是把 serde 那句线格式错抛给用户。
+pub(crate) fn req_date(column: &str, value: Option<String>) -> AppResult<String> {
+    match norm(value) {
+        None => Err(AppError::new(
+            "invalid_input",
+            &format!("「{column}」不能为空，要写成 YYYY-MM-DD（如 2026-06-30）"),
+            Some("日期要用 YYYY-MM-DD"),
+        )),
+        Some(s) if is_iso_date(&s) => Ok(s),
+        Some(s) => Err(AppError::new(
+            "invalid_input",
+            &format!("「{column}」要写成 YYYY-MM-DD（如 2026-06-30），收到「{s}」"),
+            Some("日期要用 YYYY-MM-DD"),
+        )),
+    }
+}
+
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Todo {
@@ -265,6 +286,28 @@ mod tests {
             err.hint
         );
         assert_eq!(norm_date("截止日期", Some("2026-06-30".to_owned())).unwrap().as_deref(), Some("2026-06-30"));
+    }
+
+    /// M10 spec §五.2：必填日期列不能走 `norm_date` —— 它把空白折成 NULL，NULL 进到 NOT NULL 列
+    /// 会由 SQLite 冒成 db_failed，用户看到的是「数据库操作失败」而不是「你的日期没填」。
+    #[test]
+    fn req_date_refuses_blank_and_absent_naming_the_column() {
+        for v in [None, Some("".to_owned()), Some("   ".to_owned())] {
+            let err = req_date("日报日期", v.clone()).unwrap_err();
+            assert_eq!(err.code, "invalid_input", "{v:?} 要在进 SQL 之前就被拒");
+            assert!(err.message.contains("日报日期"), "错误文本要点名是哪一列：{}", err.message);
+            assert_eq!(err.hint.as_deref(), Some("日期要用 YYYY-MM-DD"), "hint 与 norm_date 同句（D7）");
+        }
+    }
+
+    /// 形状那两支与 `norm_date` 共用同一条规则（`is_iso_date`），**不许在这里再写一份判据**。
+    #[test]
+    fn req_date_accepts_the_shape_and_refuses_everything_else() {
+        assert_eq!(req_date("日报日期", Some("2026-06-30".to_owned())).unwrap(), "2026-06-30");
+        assert_eq!(req_date("日报日期", Some("  2026-06-30 ".to_owned())).unwrap(), "2026-06-30", "要 trim");
+        let err = req_date("日报日期", Some("2026-6-30".to_owned())).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("日报日期"), "{}", err.message);
     }
 
     #[test]
