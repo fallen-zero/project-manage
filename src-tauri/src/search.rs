@@ -39,7 +39,7 @@ const MAX_PROJECT_HITS: usize = 15;
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldHit {
-    /// project | env | credential | server | link | note
+    /// project | env | credential | server | link | note | daily | todo
     pub source: &'static str,
     pub id: String,
     pub project_id: String,
@@ -140,7 +140,7 @@ fn collect(source: &'static str, sql: &str, conn: &Connection, pattern: &str) ->
     Ok(out)
 }
 
-/// 空查询直接返回空：不扫库，也避免首屏一进来就发六条全表 LIKE。
+/// 空查询直接返回空：不扫库，也避免首屏一进来就发八条全表 LIKE。
 pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
     let q = query.trim();
     if q.is_empty() {
@@ -258,6 +258,38 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
         &p,
     )?);
 
+    // 日报：只搜工作内容。工时与日期拼成副标题（CAST 成 TEXT 是为了进 `join_bits` 那个
+    // [Option<String>; 3]，别改成 printf —— bundled SQLite 的 printf 不在本轮验证过的前提上）。
+    hits.append(&mut collect(
+        "daily",
+        "SELECT d.id, d.project_id, p.name, SUBSTR(d.content, 1, 80), d.report_date,
+                ('工时 ' || CAST(d.hours AS TEXT) || ' 小时'), NULL
+           FROM daily_reports d
+           JOIN projects p ON p.id = d.project_id AND p.deleted_at IS NULL
+          WHERE d.deleted_at IS NULL
+            AND d.content LIKE ?1 ESCAPE '\\'
+          ORDER BY d.updated_at DESC
+          LIMIT ?2",
+        conn,
+        &p,
+    )?);
+
+    // 待办：只搜标题（M9 已裁定 todos 表没有 note 列，正文就是 title）。
+    // D4 当次反转了 M9 spec §十一「待办正文不进任何检索通路」那句，理由写在 spec §九.8。
+    hits.append(&mut collect(
+        "todo",
+        "SELECT t.id, t.project_id, p.name, t.title, t.due_date,
+                CASE t.done WHEN 1 THEN '已完成' ELSE '未完成' END, NULL
+           FROM todos t
+           JOIN projects p ON p.id = t.project_id AND p.deleted_at IS NULL
+          WHERE t.deleted_at IS NULL
+            AND t.title LIKE ?1 ESCAPE '\\'
+          ORDER BY t.updated_at DESC
+          LIMIT ?2",
+        conn,
+        &p,
+    )?);
+
     Ok(hits)
 }
 
@@ -334,7 +366,7 @@ pub fn unified_bundle(conn: &Connection, query: &str) -> AppResult<SearchBundle>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{db, index_scan::ScannedFile, index_store, ledger, project, vault};
+    use crate::{db, daily_report, index_scan::ScannedFile, index_store, ledger, project, todo, vault};
     use rusqlite::Connection;
 
     const SECRET: &str = "机密串-Zhang@2026";
@@ -802,5 +834,79 @@ mod tests {
             assert!(cluster.as_object().unwrap().contains_key(key), "簇缺 {key}");
         }
         assert!(v["ledger"].as_object().unwrap().contains_key("hiddenClusters"));
+    }
+
+    /// D4 的兑现点：需求原文 §四.1 点名的「日报内容」进台账检索，M9 欠的待办那格一起兑。
+    /// 诱饵词故意与各表既有夹具都不重叠 —— `only_hit` 断的是「本次命中恰好只有这一条」。
+    #[test]
+    fn daily_report_content_and_todo_title_join_the_ledger_section() {
+        let (conn, pid, mk) = fixture();
+        seed_ledger(&conn, &pid, &mk);
+        daily_report::create(
+            &conn,
+            &daily_report::DailyReportInput {
+                project_id: pid.clone(),
+                report_date: Some("2026-10-16".to_owned()),
+                content: "压测报告补材料".to_owned(),
+                hours: 3.5,
+            },
+        )
+        .unwrap();
+        todo::create(
+            &conn,
+            &todo::TodoInput {
+                project_id: pid.clone(),
+                title: "补齐压测报告附件清单".to_owned(),
+                due_date: Some("2026-10-20".to_owned()),
+            },
+        )
+        .unwrap();
+
+        let hit = only_hit(&conn, "压测报告补材料", "daily", "压测报告补材料");
+        assert_eq!(hit.project_id, pid, "日报命中要带上所属项目，供结果页分组与跳转");
+        assert!(hit.detail.contains("2026-10-16"), "副标题要念日期：{}", hit.detail);
+        assert!(hit.detail.contains("3.5"), "副标题要念工时：{}", hit.detail);
+
+        let t = only_hit(&conn, "补齐压测报告附件清单", "todo", "补齐压测报告附件清单");
+        assert_eq!(t.project_id, pid);
+        assert!(t.detail.contains("未完成"), "待办副标题要念勾选状态：{}", t.detail);
+    }
+
+    /// 软删项目的行不进检索 —— 这条与 `todo.rs`/`daily_report.rs` 的同名判据是**同一形状**，
+    /// 变异 M①（摘掉 `p.deleted_at IS NULL`）在这三处任一都能被相应断言打红。
+    #[test]
+    fn soft_deleted_project_hides_daily_and_todo_hits() {
+        let (conn, pid, _mk) = fixture();
+        daily_report::create(
+            &conn,
+            &daily_report::DailyReportInput {
+                project_id: pid.clone(),
+                report_date: Some("2026-10-15".to_owned()),
+                content: "季度巡检记录".to_owned(),
+                hours: 2.0,
+            },
+        )
+        .unwrap();
+        todo::create(
+            &conn,
+            &todo::TodoInput {
+                project_id: pid.clone(),
+                title: "季度巡检待办跟进".to_owned(),
+                due_date: None,
+            },
+        )
+        .unwrap();
+        assert!(!field_hits(&conn, "季度巡检记录").unwrap().is_empty(), "前置条件：项目还活着时两条都要能搜到");
+        assert_eq!(field_hits(&conn, "季度巡检记录").unwrap().len(), 1);
+        assert_eq!(field_hits(&conn, "季度巡检待办跟进").unwrap().len(), 1);
+
+        conn.execute("UPDATE projects SET deleted_at = datetime('now') WHERE id = ?1", [&pid])
+            .unwrap();
+        for needle in ["季度巡检记录", "季度巡检待办跟进"] {
+            assert!(
+                field_hits(&conn, needle).unwrap().is_empty(),
+                "软删项目的行不该进检索：{needle}"
+            );
+        }
     }
 }
