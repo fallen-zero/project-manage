@@ -511,12 +511,42 @@ mod tests {
 
     /// 读回用 calamine（与本任务的写同一把库），**不经 `extract::sheet_text`**：
     /// 那个函数把所有格子拼成一串文本，看不出「这一格是日期单元还是文本」，而那是 §六.1 的判据。
+    ///
+    /// **但 `to_string()` 也分不出类型**（控制方按包缓存核过）：`Data::Float(7.5)` 与
+    /// `Data::String("7.5")` 都印成 `7.5`（`calamine-0.36.1/src/datatype.rs:212-216`），
+    /// `Data::DateTime(e)` 走 `ExcelDateTime` 的 Display，而它印的就是裸 `self.value`
+    /// （`datatype.rs:986-990`）—— 序列号 `46311`，**不带时分秒**。
+    /// 所以凡要钉「这一格是数字还是文本」的判据，必须另按**变体**断（下面的 `read_typed`），
+    /// 只比字符串会得到一条打不红的假守护（Task 6 复审就是这么打回第一版的）。
     fn read_cells(path: &std::path::Path) -> Vec<Vec<String>> {
         use calamine::Reader as _;
         let mut book = calamine::open_workbook_auto(path).unwrap();
         let names = book.sheet_names();
         let range = book.worksheet_range(&names[0]).unwrap();
         range.rows().map(|r| r.iter().map(|c| c.to_string()).collect()).collect()
+    }
+
+    /// 按**变体**读回：字符串读法证不了类型，这一支才证得了（复审 Important）。
+    fn read_typed(path: &std::path::Path) -> Vec<Vec<calamine::Data>> {
+        use calamine::Reader as _;
+        let mut book = calamine::open_workbook_auto(path).unwrap();
+        let names = book.sheet_names();
+        let range = book.worksheet_range(&names[0]).unwrap();
+        range.rows().map(|r| r.to_vec()).collect()
+    }
+
+    /// calamine 对数值单元可能给 `Float` 也可能给 `Int`（取决于它解析出什么），
+    /// 所以「是数字」的判据走 `DataType::as_f64()`，而不是 `matches!(.., Data::Float(_))`。
+    fn is_numeric(d: &calamine::Data) -> bool {
+        use calamine::DataType as _;
+        d.as_f64().is_some() && !matches!(d, calamine::Data::String(_))
+    }
+
+    /// 工作表名也要能断到（`read_cells`/`read_typed` 都是盲取 `names[0]`）。
+    fn first_sheet_name(path: &std::path::Path) -> String {
+        use calamine::Reader as _;
+        let book = calamine::open_workbook_auto(path).unwrap();
+        book.sheet_names().first().cloned().unwrap_or_default()
     }
 
     fn export_row(name: &str, code: Option<&str>) -> ExportRow {
@@ -540,10 +570,23 @@ mod tests {
         assert_eq!(cells.len(), 3, "表头 + 两行数据");
         assert_eq!(cells[1].join("|"), "2026-10-16|P-01|甲项目|联调第三方接口|7.5");
         assert_eq!(cells[2][1], "", "编号为 None 要落成空格，不是字面 \"None\"");
+        // **按变体**钉两条刻意决定的类型（复审 Important：只比字符串这两条都打不红）：
+        // 工时要是数字单元（用户在 Excel 里要能求和），日期要文本（这条环不经过序列号）。
+        let typed = read_typed(&p);
+        assert!(is_numeric(&typed[1][4]), "工时列必须是数字单元，实际：{:?}", typed[1][4]);
+        assert!(
+            matches!(typed[1][0], calamine::Data::String(_)),
+            "日期列必须是文本单元，实际：{:?}",
+            typed[1][0]
+        );
+        // 工作表名也是 spec 钉住的值（§六.1「工作表名 日报」），Task 7 只读第一个 sheet，名字错了没人报。
+        assert_eq!(first_sheet_name(&p), "日报");
     }
 
-    /// §六.1：日期写成**文本**。钉的是「导出 → 用户编辑 → 再导回来」这条环不经过 Excel 序列号 ——
-    /// 日期单元读回来是 `Data::DateTime`，`to_string()` 带时分秒，与文本分支不同形状。
+    /// §六.1：日期写成**文本**。钉的是「导出 → 用户编辑 → 再导回来」这条环不经过 Excel 序列号。
+    /// **形状分不出来**（Task 6 复审核包缓存改准了原先这句：`ExcelDateTime` 的 `Display` 印的是裸
+    /// `self.value`，也就是序列号 `46311`，与 `Data::Float` 的印法一样，`datatype.rs:986-990`）——
+    /// 字符串比对在这里确实能红（`2026-10-16` ≠ `46311`），但**类型要靠上面那条 `matches!(.., Data::String(_))`**。
     #[test]
     fn export_writes_the_date_as_text_not_a_date_cell() {
         let dir = tempfile::tempdir().unwrap();
