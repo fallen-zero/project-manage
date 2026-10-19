@@ -77,7 +77,7 @@
 - [ ] **Step 2: 跑它，确认红在「迁移没跑到 7」**
 
 Run: `cd src-tauri && cargo test -j 1 --lib v7_schema_meta > /tmp/t1-red.log 2>&1; echo "exit=$?"; grep -E "test result|panicked|assertion" /tmp/t1-red.log`
-Expected：`exit=1`，失败信息是 `assert_eq!(ver, 7)` 那一行（左边 6、右边 7）。**若这里编不过或报的是别的断言，说明 Step 1 改错了位置。**
+Expected：`exit=101`（**cargo 测试失败的退出码是 101，不是 1** —— 本计划原文这里写错过一次，实现者按实跑带回后订正），失败信息是 `assert_eq!(ver, 7)` 那一行（左边 6、右边 7）。**若这里编不过或报的是别的断言，说明 Step 1 改错了位置。**
 
 - [ ] **Step 3: 提 `TARGET_VERSION` 并接上 match 臂**
 
@@ -148,8 +148,12 @@ CREATE INDEX ix_expiry_project ON project_expiries(project_id);
             "id,project_id,kind,label,expire_date,note,created_at,updated_at,deleted_at",
             "V7 的列集合/顺序变了要同步 expiry.rs 的 SELECT_COLUMNS"
         );
+        // `AND sql IS NOT NULL` 是必需的，不是洁癖（Task 1 实现者实测带回、控制方复核后订正本计划原文）：
+        // `id TEXT PRIMARY KEY` 让 SQLite 自带一支 `sqlite_autoindex_*`，它在 sqlite_master 里 `sql` 为 NULL，
+        // 每张表都有。不排掉它，下面那句「索引恰好只有 ix_expiry_project」在任何正确 DDL 下**恒红**；
+        // 排掉后钉的才是**本迁移自己写下的索引**：多建一条日期索引会红，漏建 ix_expiry_project 也会红。
         let idx: Vec<String> = conn
-            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'project_expiries' ORDER BY name")
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'project_expiries' AND sql IS NOT NULL ORDER BY name")
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
