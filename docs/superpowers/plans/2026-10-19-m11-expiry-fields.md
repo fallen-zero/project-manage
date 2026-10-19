@@ -294,7 +294,7 @@ export const EXPIRY_KINDS = ["维保", "域名", "证书", "其他"] as const;
 //! 到期事项：维保 / 域名 / 证书 / 其他 四操作（M11-a spec §五、§六）。
 //!
 //! 形制整段照 `milestone.rs`（M9 Task 3）：一条 `list` SQL 同时管「跨项目全部」与「按项目筛」，
-//! `p.deleted_at IS NULL` 在本表只有这一处 + 检索那一条 collect 各一处（spec §九.3）。
+//! `p.deleted_at IS NULL` 在本表这一处（检索侧的第二处由 Task 3 那条 collect 落，届时两处各自有守卫测试）。
 //! 日期形状判据复用 `todo::req_date`（必填日期**不能**走 `norm_date`：它把空白折成 NULL，
 //! 而 NULL 进 `expire_date NOT NULL` 会由 SQLite 冒成 `db_failed`，用户看到的是「数据库操作失败」
 //! 而不是「你的日期没填」—— M10 为 `report_date` 立的同一条理由）。
@@ -384,7 +384,7 @@ fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
 
 /// `ORDER BY e.expire_date, e.kind, e.id`：最近的先看到（`expire_date` NOT NULL，不需要
 /// `milestones` 那句 `plan_date IS NULL` 前置）；第三键 `, e.id` 是 M9 终审 N3 同一条理由 ——
-/// `datetime('now')` 只到秒，同一天同类别的两行必须有确定次序，**摘掉它 Task 2 Step 6 那条当场红**。
+/// `datetime('now')` 只到秒，同一天同类别的两行必须有确定次序，**摘掉它下面那条 `list_breaks_ties_by_id_when_date_and_kind_are_equal` 当场红**。
 pub fn list(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<Expiry>> {
     let mut stmt = conn.prepare(
         &format!(
@@ -790,7 +790,7 @@ grep "test result" /tmp/t2-green.log
 cargo clippy -j 1 --lib -- -D warnings > /tmp/t2-cl.log 2>&1; echo "clippy-lib=$?"
 cargo clippy -j 1 --all-targets --all-features -- -D warnings > /tmp/t2-cla.log 2>&1; echo "clippy-all=$?"
 cd ..
-sed -n '/generate_handler/,/^      \]/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"
+sed -n '/generate_handler/,/^\s*\])/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"
 grep -c 'tauri::command(async)' src-tauri/src/lib.rs
 grep -oE 'TARGET_VERSION: [a-z0-9]+ = [0-9]+' src-tauri/src/db.rs
 grep -rn "allow(dead_code)" src-tauri/src/ | wc -l
@@ -1749,7 +1749,7 @@ cd ..
 node --test "tests/**/*.test.ts" > /tmp/t8-node.log 2>&1; echo "node=$?"
 grep -E "^ℹ (tests|pass|fail)" /tmp/t8-node.log
 npm run build > /tmp/t8-web.log 2>&1; echo "web=$?"; grep -c "error TS" /tmp/t8-web.log
-sed -n '/generate_handler/,/^      \]/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"
+sed -n '/generate_handler/,/^\s*\])/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"
 grep -c 'tauri::command(async)' src-tauri/src/lib.rs
 grep -oE 'TARGET_VERSION: [a-z0-9]+ = [0-9]+' src-tauri/src/db.rs
 grep -rn "allow(dead_code)" src-tauri/src/ | wc -l
@@ -1759,6 +1759,8 @@ grep -c 'hits.append(&mut collect(' src-tauri/src/search.rs
 git rev-list --merges --count --all
 ```
 Expected：`cargo=0` **318 passed**；两条 clippy `=0`；`rust-build=0`；`node=0` **47/47/0**；`web=0` 且 `error TS` **0**；结构门 **64 / 7 / 7 / 1 / 616**；`Cargo.lock` 与 `package.json` 的 diff **空输出**（`Cargo.toml` 也必须空：本轮零新依赖，与 M10 不同）；collect **9** 条；merge commit **0**。
+
+> **命令数那条 `sed` 的范围式已改准**（Task 2 评审带回）：原文 `/generate_handler/,/^      \]/p` 的结束式对不上（收尾行是 `        ])`，六个空格加 `]` 不成立），范围一路跑到文件末尾 —— 现在读数仍是 64，但那是「后面没有别的行匹配 `^ +[a-z_]+,?$`」的运气。改成 `/generate_handler/,/^\s*\])/p`（实测范围 66 行、读数 64）。**HANDOFF §4-A 那串命令里带着同一个脆弱范围式，Task 9 回写时一并改准**，否则下一个照抄它的对话会在某天读出 65、66 然后误判成漏注册。
 `os error 1455` / `E0786` / 无 `error[Exxxx]` 的编译失败 ⇒ 先重跑同一条命令（坑 32/3）。
 
 - [ ] **Step 2: 七处变异，每处都要具名打红（`cp` 备份 + `cmp` 还原）**
@@ -1858,7 +1860,7 @@ project_expiries    到期事项（M11-a 新增，V7）：id / project_id→proj
 
 - §0 加一条 M11-a bullet：**在真合并发生之前，那一格不许出现任何「合并点 = `<sha>`」的写法**，只写取数命令（`git rev-parse --short master`、`git ls-remote --heads origin`）与当次读数；合并完成后由收口提交把读数填进去 —— 本轮 M10 收口刚为「master 未推 origin」这类瞬时句补了两次提交，别再犯（见 HANDOFF 的新增那条口径）。
 - §3「当前卡在哪」与「下一格动作」改成 M11-b（台账导出，先定密文红线）。
-- §4-A 那串命令的期望值整串换成本轮终态（**64 / 7 / 7 / 1 / 616 / cargo 318 / node 47 / collect 9**）。
+- §4-A 那串命令的期望值整串换成本轮终态（**64 / 7 / 7 / 1 / 616 / cargo 318 / node 47 / collect 9**），并把里面那条数命令数的 `sed` 范围式从 `/^      \]/` 改成 `/^\s*\])/`（Task 2 评审带回：原式对不上收尾行 `        ])`，范围跑到 EOF，读数全靠后面没有匹配行才碰巧对 —— 见 Task 8 Step 1 的那条引述）。
 - §6 指针表补三行：M11-a spec、M11-a 计划、`.superpowers/sdd/2026-10-19-m11-expiry-fields/{progress.md,mutation-evidence.txt,real-machine-readings.md,spec-plan-mapping.md}`。
 - 「只剩需求方能做的四格」那条照实保留（本轮一条也没兑掉）。
 

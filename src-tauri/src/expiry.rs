@@ -1,7 +1,7 @@
 //! 到期事项：维保 / 域名 / 证书 / 其他 四操作（M11-a spec §五、§六）。
 //!
 //! 形制整段照 `milestone.rs`（M9 Task 3）：一条 `list` SQL 同时管「跨项目全部」与「按项目筛」，
-//! `p.deleted_at IS NULL` 在本表只有这一处 + 检索那一条 collect 各一处（spec §九.3）。
+//! `p.deleted_at IS NULL` 在本表这一处（检索侧的第二处由 Task 3 那条 collect 落，届时两处各自有守卫测试）。
 //! 日期形状判据复用 `todo::req_date`（必填日期**不能**走 `norm_date`：它把空白折成 NULL，
 //! 而 NULL 进 `expire_date NOT NULL` 会由 SQLite 冒成 `db_failed`，用户看到的是「数据库操作失败」
 //! 而不是「你的日期没填」—— M10 为 `report_date` 立的同一条理由）。
@@ -91,7 +91,7 @@ fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
 
 /// `ORDER BY e.expire_date, e.kind, e.id`：最近的先看到（`expire_date` NOT NULL，不需要
 /// `milestones` 那句 `plan_date IS NULL` 前置）；第三键 `, e.id` 是 M9 终审 N3 同一条理由 ——
-/// `datetime('now')` 只到秒，同一天同类别的两行必须有确定次序，**摘掉它 Task 2 Step 6 那条当场红**。
+/// `datetime('now')` 只到秒，同一天同类别的两行必须有确定次序，**摘掉它下面那条 `list_breaks_ties_by_id_when_date_and_kind_are_equal` 当场红**。
 pub fn list(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<Expiry>> {
     let mut stmt = conn.prepare(
         &format!(
