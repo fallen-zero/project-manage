@@ -520,8 +520,8 @@ mod tests {
         assert_eq!(read("index_max_files_per_project"), "50000");
         // 引用 TARGET_VERSION 而非写字面数字：本断言钉的是「迁移链真的跑到了链头并写下版本号」，
         // 写死数字会在每次加版本时假红（与 lib.rs 的 `bootstrap_data...` 同一形制）。链头**具体等于几**
-        // 由本文件末尾那条 `..._schema_meta_reaches_target_version_...` 钉死，这里不与之重复；
-        // 那条测试每加一个版本都会改名（V5→v5_、V6→v6_、V7→v7_），所以这里只写它的名字形状，不写死版本号。
+        // 由本文件下方那条 `..._schema_meta_reaches_target_version_...` 钉死（每加一版就改名：v5_→v6_→v7_），
+        // 这里既不写死版本号、也不写死行号，只给可 grep 的名字形状；这里不与之重复。
         assert_eq!(
             conn.query_row(
                 "SELECT COALESCE(MAX(version),0) FROM schema_meta",
