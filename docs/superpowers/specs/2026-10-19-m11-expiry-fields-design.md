@@ -90,9 +90,11 @@ CREATE INDEX ix_expiry_project ON project_expiries(project_id);
 
 ```rust
 pub struct Expiry       { id, project_id, kind, label, expire_date, note, created_at, updated_at }  // 8 个键，camelCase 上线
-pub struct ExpiryInput  { project_id, kind, label, expire_date: String, note: Option<String> }
-pub struct ExpiryUpdate { expire_date: String, note: Option<String> }   // 只有这两件有界面消费者（§二 控制方自拍①）
+pub struct ExpiryInput  { project_id, kind, label, expire_date: Option<String>, note: Option<String> }
+pub struct ExpiryUpdate { expire_date: Option<String>, note: Option<String> }   // 只有这两件有界面消费者（§二 控制方自拍①）
 ```
+
+`expire_date` 用 `Option<String>` 而不是 `String`（写计划时订正，与 M10 的 `DailyReportInput.report_date` 同形）：缺键 / `null` / 空串这三种形状都要落进 `req_date`，由它回一句点名「到期日期」的 `invalid_input`；声明成 `String` 的话缺键会先炸在 Tauri 参数反序列化层，回一句**不带我们错误码的裸字符串**，界面只能走 `unknown` 兜底（M10 真机第 5 格实测过那个形状）。
 
 - **`deleted_at` 永不上线**，线格式是 8 个键 ⇒ 照 M10/M9 的先例写一条**键集合钉死断言**（多一键少一键都红）。
 - `expiry_list` 的排序：`ORDER BY e.expire_date, e.kind, e.id`（最近的先看到；`expire_date` NOT NULL，所以不需要 `milestone` 那句 `plan_date IS NULL` 前置）。
