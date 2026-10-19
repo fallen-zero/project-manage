@@ -39,7 +39,7 @@ const MAX_PROJECT_HITS: usize = 15;
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldHit {
-    /// project | env | credential | server | link | note | daily | todo
+    /// project | env | credential | server | link | note | daily | todo | expiry
     pub source: &'static str,
     pub id: String,
     pub project_id: String,
@@ -140,7 +140,7 @@ fn collect(source: &'static str, sql: &str, conn: &Connection, pattern: &str) ->
     Ok(out)
 }
 
-/// 空查询直接返回空：不扫库，也避免首屏一进来就发八条全表 LIKE。
+/// 空查询直接返回空：不扫库，也避免首屏一进来就发九条全表 LIKE。
 pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
     let q = query.trim();
     if q.is_empty() {
@@ -290,6 +290,21 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
         &p,
     )?);
 
+    // 到期事项：搜名称与备注两列（spec D6 / §八）。**日期列不进 WHERE** —— 搜「10」「2027」这种
+    // 短串会把一堆到期日捞成命中，那是噪声；日期只进副标题的 bit。种类也只进副标题。
+    hits.append(&mut collect(
+        "expiry",
+        "SELECT e.id, e.project_id, p.name, e.label, e.kind, e.expire_date, NULL
+           FROM project_expiries e
+           JOIN projects p ON p.id = e.project_id AND p.deleted_at IS NULL
+          WHERE e.deleted_at IS NULL
+            AND (e.label LIKE ?1 ESCAPE '\\' OR e.note LIKE ?1 ESCAPE '\\')
+          ORDER BY e.updated_at DESC
+          LIMIT ?2",
+        conn,
+        &p,
+    )?);
+
     Ok(hits)
 }
 
@@ -366,7 +381,7 @@ pub fn unified_bundle(conn: &Connection, query: &str) -> AppResult<SearchBundle>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{db, daily_report, index_scan::ScannedFile, index_store, ledger, project, todo, vault};
+    use crate::{db, daily_report, expiry, index_scan::ScannedFile, index_store, ledger, project, todo, vault};
     use rusqlite::Connection;
 
     const SECRET: &str = "机密串-Zhang@2026";
@@ -952,5 +967,73 @@ mod tests {
                 "软删项目的行不该进检索：{needle}"
             );
         }
+    }
+
+    /// D6：到期事项的名称与备注进全局检索，副标题念出种类与到期日。
+    /// **日期本身不参与匹配**（spec §八）：否则搜「10」能把一堆日期捞出来，那是噪声不是结果。
+    /// Task 8 变异 **M⑥** 的靶子：把 `WHERE` 里的 `e.label/e.note` 换成 `e.expire_date` 去 LIKE，
+    /// 下面那两条断言会同时反向红（搜得到日期、搜不到备注）。
+    #[test]
+    fn expiry_label_and_note_are_searchable_but_the_date_column_is_not() {
+        let (conn, pid, _mk) = fixture();
+        expiry::create(
+            &conn,
+            &expiry::ExpiryInput {
+                project_id: pid.clone(),
+                kind: "域名".to_owned(),
+                label: "oa-gateway.gov.cn".to_owned(),
+                expire_date: Some("2027-01-31".to_owned()),
+                note: Some("续费要走信息中心审批".to_owned()),
+            },
+        )
+        .unwrap();
+
+        let by_label = only_hit(&conn, "oa-gateway", "expiry", "oa-gateway.gov.cn");
+        assert_eq!(by_label.project_id, pid, "到期事项命中要带所属项目，供结果页分组与跳转");
+        assert!(by_label.detail.contains("域名"), "副标题要念种类：{}", by_label.detail);
+        assert!(by_label.detail.contains("2027-01-31"), "副标题要念到期日：{}", by_label.detail);
+
+        let by_note = only_hit(&conn, "信息中心审批", "expiry", "oa-gateway.gov.cn");
+        assert_eq!(by_note.title, "oa-gateway.gov.cn", "备注命中出来的还是这一行");
+
+        // 日期列不进匹配：单独搜日期片段必须一条台账命中也没有（正文段是另一条通路，本夹具里没有正文）。
+        assert!(
+            field_hits(&conn, "2027-01").unwrap().is_empty(),
+            "日期不许当检索列：{:?}",
+            sources(&field_hits(&conn, "2027-01").unwrap())
+        );
+    }
+
+    /// spec §九.3 在检索侧的兑现点，Task 8 变异 **M①** 的第二格靶子：
+    /// 摘掉本条 collect 的 `p.deleted_at IS NULL` ⇒ 这条当场红。
+    #[test]
+    fn soft_deleted_project_hides_expiry_hits() {
+        let (conn, pid, _mk) = fixture();
+        expiry::create(
+            &conn,
+            &expiry::ExpiryInput {
+                project_id: pid.clone(),
+                kind: "证书".to_owned(),
+                label: "tls-wildcard".to_owned(),
+                expire_date: Some("2027-02-28".to_owned()),
+                note: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(sources(&field_hits(&conn, "tls-wildcard").unwrap()), vec!["expiry"]);
+
+        conn.execute(
+            "UPDATE projects SET deleted_at = datetime('now') WHERE id = ?1",
+            [&pid],
+        )
+        .unwrap();
+        assert!(
+            field_hits(&conn, "tls-wildcard").unwrap().is_empty(),
+            "软删项目的到期事项不能出现在搜索结果里"
+        );
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_expiries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "行留在库里，恢复项目即原样可搜");
     }
 }

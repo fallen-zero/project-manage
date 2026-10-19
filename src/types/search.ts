@@ -10,7 +10,8 @@ export type HitSource =
   | "link"
   | "note"
   | "daily"
-  | "todo";
+  | "todo"
+  | "expiry";
 
 export interface FieldHit {
   source: HitSource;
@@ -31,6 +32,7 @@ export const SOURCE_LABELS: Record<HitSource, string> = {
   note: "备注台账",
   daily: "日报",
   todo: "待办",
+  expiry: "到期事项",
 };
 
 // —— M4 统一检索的线格式，与 Rust 侧 search.rs / doc_preview.rs 逐字段对应（serde camelCase）。
