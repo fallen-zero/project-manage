@@ -428,7 +428,7 @@ fn check_kind(kind: &str) -> AppResult<()> {
 pub fn create(conn: &Connection, input: &ExpiryInput) -> AppResult<Expiry> {
     project_exists(conn, &input.project_id)?;
     check_kind(&input.kind)?;
-    let label = norm(input.label.clone()).ok_or_else(|| invalid("「名称」不能为空（如 oa.gov.cn、年度维保合同）"))?;
+    let label = norm(Some(input.label.clone())).ok_or_else(|| invalid("「名称」不能为空（如 oa.gov.cn、年度维保合同）"))?;
     let expire_date = req_date("到期日期", input.expire_date.clone())?;
     let note = norm(input.note.clone()).unwrap_or_default();
     let id = uuid::Uuid::new_v4().to_string();
@@ -711,7 +711,7 @@ use crate::expiry::{Expiry, ExpiryInput, ExpiryUpdate};
 ```rust
 /// 到期事项四条命令（M11-a Task 2，形制照 `milestone_*`）：同步、函数体不写 await 点。
 /// `db(&state)?` 取回的 `MutexGuard` 不是 `Send`，在 async fn 里让它横跨 await 点才编不过（M8 D11）；
-/// 本批四条不碰文件，所以 `#[tauri::command(async)]` 门**保持 7 条不动**（spec §六）。
+/// 本批四条不碰文件，所以 async 标记那扇门**保持 7 条不动**（spec §六）。
 /// 勾选态那一列本表没有（D2：续期 = 改日期），所以这里没有 `done` 那一条形状。
 #[tauri::command]
 fn expiry_list(
@@ -740,6 +740,8 @@ fn expiry_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
     expiry::delete(&conn, &id)
 }
 ```
+
+> **两处计划文本缺陷由 Task 2 实现者实测带回、控制方复核后订正本文件原文**（与 Task 1 那两条同属「计划自己写错」）：① `create` 里那句 `norm(input.label.clone())` 编不过（`E0308`）—— `ExpiryInput.label` 是 `String`（与 M10 的 `DailyReportInput.content` 同形，缺键由 Tauri 参数层挡、空白由 `norm` 挡），`norm` 收的是 `Option<String>`，所以必须写 `norm(Some(...))`。② 上面那段注释原先字面写着 `#[tauri::command(async)]`，而本仓的 async 门是**对 `lib.rs` 做原始 grep 计数**的（HANDOFF 坑 26 同族：结构门对注释正文敏感），于是一条正常注释把门读数从 7 抬成 8 —— 实现者按 `milestone_*` 那段注释的先例改写成「async 标记那扇门」。**判据没变，只是别把被数的字面量写进注释。**
 
 注册表：在 `generate_handler!` 的 `daily_report_import_apply`(:884 区段末，**无尾逗号**) 之后补逗号并追加四条（末条 `expiry_delete` **不带逗号**）：
 
