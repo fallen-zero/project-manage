@@ -95,7 +95,7 @@ fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
 
 /// 线性版本迁移：一个版本一段 DDL，只追加不改历史，便于备份包跨版本恢复。
 /// 提 `pub(crate)` 是给 M8 的验包判据比：包里的库比本机新就该拒（`backup::read_package`）。
-pub(crate) const TARGET_VERSION: i64 = 6;
+pub(crate) const TARGET_VERSION: i64 = 7;
 
 /// `pub(crate)` 是 M8 加的：`backup_import` 灌完包内库要能重放迁移（包里可能是旧版本）。
 pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
@@ -122,6 +122,7 @@ pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
             4 => V4,
             5 => V5,
             6 => V6,
+            7 => V7,
             _ => "",
         };
         apply_version(conn, target, ddl)?;
@@ -385,6 +386,30 @@ CREATE TABLE daily_reports (
 );
 
 CREATE INDEX ix_daily_report_project ON daily_reports(project_id);
+";
+
+/// V7 = 到期事项表（M11-a spec §四）。四条口径延续 V5/V6 的注释：
+/// 1. 软删沿用 `deleted_at`；`ON DELETE CASCADE` 因项目是软删（`project.rs` 的 UPDATE）而永不触发，
+///    所以「跨项目读要自带 p.deleted_at IS NULL」这条规矩照旧适用于本表（Task 2/3 各落一次）。
+/// 2. `kind` 这里留 CHECK 只是**直写库的最后闸门**：命令路径的合法值判据在 `expiry::check_kind`，
+///    因为 CHECK 违例冒出来是 `db_failed`，会把「你选的种类不在词表里」伪装成库故障（V5 的 stage 同形）。
+/// 3. `expire_date` **必填但不加形状 CHECK**：形状与空白由写入侧的 `todo::req_date` 判（D2 的语义是
+///    「这一行的有效期到 X」，没 X 就没意义）；SQL 里不做任何日期解释（`strftime`/`date` 是 UTC）。
+/// 4. **零回填**：老项目的维保/域名/证书信息不由迁移猜，由用户自己录（延续 M9 为 V5 立的规矩）。
+const V7: &str = "
+CREATE TABLE project_expiries (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind IN ('维保','域名','证书','其他')),
+    label       TEXT NOT NULL,
+    expire_date TEXT NOT NULL,
+    note        TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at  TEXT
+);
+
+CREATE INDEX ix_expiry_project ON project_expiries(project_id);
 ";
 
 #[cfg(test)]
@@ -654,13 +679,13 @@ mod tests {
     }
 
     #[test]
-    fn v6_schema_meta_reaches_target_version_six() {
+    fn v7_schema_meta_reaches_target_version_seven() {
         let conn = open_in_memory().unwrap();
         let ver: i64 = conn
             .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, 6, "迁移必须跑到 6");
-        assert_eq!(TARGET_VERSION, 6, "= 上一条，两处别各写各的");
+        assert_eq!(ver, 7, "迁移必须跑到 7");
+        assert_eq!(TARGET_VERSION, 7, "= 上一条，两处别各写各的");
     }
 
     /// D4：`stage` 是 CHECK 枚举。这五个词是需求原文那五个（思维导图.md:35-36），
@@ -825,5 +850,88 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM daily_reports", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "新建库跑完迁移后本表必须是空的");
+    }
+
+    #[test]
+    fn v7_creates_project_expiries_with_documented_columns() {
+        let conn = db::open_in_memory().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('project_expiries') ORDER BY cid")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(
+            cols.join(","),
+            "id,project_id,kind,label,expire_date,note,created_at,updated_at,deleted_at",
+            "V7 的列集合/顺序变了要同步 expiry.rs 的 SELECT_COLUMNS"
+        );
+        // `sql IS NOT NULL` 不是洁癖：TEXT 主键会让 SQLite 自带一支 `sqlite_autoindex_*`（`sql` 为 NULL），
+        // 每张表都有（daily_reports 同理）。不排掉它，下面那句「索引必须恰好只有 ix_expiry_project」
+        // 在任何正确 DDL 下都恒红；排掉后它钉的才是**本迁移自己写下的索引**：多建一条日期索引
+        // （spec §四 明令不建）就会红，漏建 ix_expiry_project 也会红。
+        let idx: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'project_expiries' AND sql IS NOT NULL ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(idx, vec!["ix_expiry_project"], "只建项目维度的索引，**没有日期索引**（spec §四）：{idx:?}");
+    }
+
+    /// D2 的 SQL 层兜底：`expire_date` NOT NULL 真的挡得住直写库。
+    /// 这条钉的是「为什么必填日期走 `req_date` 而不是 `norm_date`」的同一条理由（延续 v6 那格）。
+    #[test]
+    fn v7_expire_date_not_null_is_enforced_at_sqlite_layer() {
+        let conn = db::open_in_memory().unwrap();
+        seed_project(&conn, "p1");
+        let err = conn
+            .execute(
+                "INSERT INTO project_expiries (id, project_id, kind, label) VALUES ('x1','p1','域名','a.gov.cn')",
+                [],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("NOT NULL"),
+            "预期是 NOT NULL 挡住（而不是 CHECK 或外键），实际：{err}"
+        );
+    }
+
+    /// 四类词表外的值必须被 SQL 的 CHECK 挡住：这是绕过命令直写库的那条路的最后一道闸门。
+    /// 报错要确认是 CHECK 而不是别的约束（延续 `v5_milestone_stage_check_...` 的判法）。
+    #[test]
+    fn v7_kind_check_refuses_words_outside_the_four() {
+        let conn = db::open_in_memory().unwrap();
+        seed_project(&conn, "p-kind");
+        for kind in ["维保", "域名", "证书", "其他"] {
+            conn.execute(
+                "INSERT INTO project_expiries (id, project_id, kind, label, expire_date)
+                  VALUES (?1, 'p-kind', ?2, '一行', '2027-01-31')",
+                rusqlite::params![format!("e-{kind}"), kind],
+            )
+            .unwrap_or_else(|e| panic!("四类词表里的「{kind}」必须插得进去：{e}"));
+        }
+        let err = conn
+            .execute(
+                "INSERT INTO project_expiries (id, project_id, kind, label, expire_date)
+                  VALUES ('e-bad', 'p-kind', '备案', '一行', '2027-01-31')",
+                [],
+            )
+            .expect_err("词表外的种类名必须被 CHECK 拒掉（需求原文只有三类，「其他」是 D7 加的那一格）");
+        assert!(
+            err.to_string().contains("CHECK constraint failed"),
+            "要的是 CHECK 那条错，实际：{err}"
+        );
+    }
+
+    #[test]
+    fn v7_backfills_nothing() {
+        let conn = db::open_in_memory().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_expiries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "新建库跑完迁移后本表必须是空的（迁移里不许塞业务行）");
     }
 }
