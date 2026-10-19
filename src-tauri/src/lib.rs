@@ -3,6 +3,7 @@ mod daily_report;
 mod db;
 mod doc_preview;
 mod error;
+mod expiry;
 mod extract;
 mod index_job;
 mod index_scan;
@@ -27,6 +28,7 @@ use tauri::{Manager, State};
 
 use crate::daily_report::{DailyReport, DailyReportEdit, DailyReportInput, ExportRow, ImportOutcome, ImportPreview};
 use crate::error::{AppError, AppResult};
+use crate::expiry::{Expiry, ExpiryInput, ExpiryUpdate};
 use crate::ledger::{
     CredentialInput, EnvInput, Ledger, LinkInput, NoteInput, ServerInput,
 };
@@ -754,6 +756,37 @@ fn milestone_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
     milestone::delete(&conn, &id)
 }
 
+/// 到期事项四条命令（M11-a Task 2，形制照 `milestone_*`）：同步、函数体不写 await 点。
+/// `db(&state)?` 取回的 `MutexGuard` 不是 `Send`，在 async fn 里让它横跨 await 点才编不过（M8 D11）；
+/// 本批四条不碰文件，所以 async 标记那扇门**保持 7 条不动**（spec §六）。
+/// 勾选态那一列本表没有（D2：续期 = 改日期），所以这里没有 `done` 那一条形状。
+#[tauri::command]
+fn expiry_list(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> AppResult<Vec<Expiry>> {
+    let conn = db(&state)?;
+    expiry::list(&conn, project_id.as_deref())
+}
+
+#[tauri::command]
+fn expiry_create(state: State<'_, AppState>, input: ExpiryInput) -> AppResult<Expiry> {
+    let conn = db(&state)?;
+    expiry::create(&conn, &input)
+}
+
+#[tauri::command]
+fn expiry_update(state: State<'_, AppState>, id: String, input: ExpiryUpdate) -> AppResult<()> {
+    let conn = db(&state)?;
+    expiry::update(&conn, &id, &input)
+}
+
+#[tauri::command]
+fn expiry_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    let conn = db(&state)?;
+    expiry::delete(&conn, &id)
+}
+
 /// 日报四条命令（M10 Task 2，形制照 `todo_*`）：同步、函数体不写 await 点。
 /// `db(&state)?` 取回的 `MutexGuard` 不是 `Send`，**在 async fn 里让它横跨 await 点**才编不过（M8 D11）。
 /// 只挂 async 属性、函数体照常同步是合法的 —— `backup_import` 与 `doc_preview` 就是这个形态，
@@ -938,7 +971,11 @@ pub fn run() {
             daily_report_delete,
             daily_report_export,
             daily_report_import_preview,
-            daily_report_import_apply
+            daily_report_import_apply,
+            expiry_list,
+            expiry_create,
+            expiry_update,
+            expiry_delete
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
@@ -1092,6 +1129,29 @@ mod tests {
         assert!(
             ts.contains("立项\", \"评审\", \"联调\", \"上线\", \"验收"),
             "前端 MILESTONE_STAGES 那五个词的引号/顺序/字面与 Rust 侧不一致"
+        );
+    }
+
+    /// 四类词表三处同源：`expiry::KINDS`、`src/types/expiry.ts` 的 `EXPIRY_KINDS`、V7 的 CHECK。
+    /// 这一条是 include_str! 文本门，钉的是**源码文本形状**（HANDOFF 坑 33：它挡得住「有人删了/改了那一行」，
+    /// 挡不住参数写错）—— 判据本体在 expiry.rs 的 create_refuses_kind_words_outside_the_four 与
+    /// db.rs 的 v7_kind_check_refuses_words_outside_the_four 两处，各有真断言。
+    #[test]
+    fn kind_words_are_identical_in_rust_and_the_frontend_type() {
+        assert_eq!(
+            crate::expiry::KINDS,
+            ["维保", "域名", "证书", "其他"],
+            "Rust 侧词表被改了：V7 的 CHECK 与前端常量要一起改"
+        );
+        let ts = include_str!("../../src/types/expiry.ts");
+        assert!(
+            ts.contains("维保\", \"域名\", \"证书\", \"其他"),
+            "前端 EXPIRY_KINDS 那四个词的引号/顺序/字面与 Rust 侧不一致"
+        );
+        let ddl = include_str!("db.rs");
+        assert!(
+            ddl.contains("CHECK (kind IN ('维保','域名','证书','其他'))"),
+            "V7 的 CHECK 词表与 Rust/前端两份不一致（注意 SQL 里是单引号、无空格）"
         );
     }
 }
