@@ -1653,6 +1653,10 @@ import {
 } from "@/lib/due-warning";
 ```
 
+- [ ] **Step 1b: `scoped` 那段上方的注释也要跟着改数（Task 4 评审 Minor-1）**
+
+`src/pages/todos.tsx` 里 `const scoped = useMemo(...` 上方那段注释现在写的是「而且**三份数据一起缩**（终审 I1）」—— Task 4 已经把 `expiries` 加进去了，这句仍是三份 = 假话（M10 终审 I1 同族：句子里的数字没被分配到任何一格）。把「三份」改成「四份」，其余字面不动。这属于注释、不是文案，所以不许推给下一轮：本格就是唯一动 `todos.tsx` 的任务。
+
 - [ ] **Step 2: 行尾念出「（归档项目）」**
 
 :209-219 那个 `<li>` 里，把项目名那一段换成：
@@ -1799,7 +1803,7 @@ Expected：`cargo=0` **318 passed**；两条 clippy `=0`；`rust-build=0`；`nod
 |---|---|---|---|
 | **M①** | 摘 `expiry::list` 里的 `AND p.deleted_at IS NULL`；再单独摘第 9 条 collect 里那一处 | `cross_project_list_hides_expiries_of_a_soft_deleted_project` + `soft_deleted_project_hides_expiry_hits` | cargo |
 | **M②** | `check_kind` 的条件改成 `true` | `create_refuses_kind_words_outside_the_four_with_invalid_input` | cargo |
-| **M③** | `horizonOf` 改成 `return DUE_HORIZON_DAYS;` | 「第 30 天亮」+ `horizonOf("expiry")` 那条 node 断言 | node |
+| **M③** | `horizonOf` 改成 `return DUE_HORIZON_DAYS;` | **实测红 5 条**（Task 4 Step 7 探针②已跑过一轮，正式取证按这份名单核，别把连带红读成测试写坏）：`到期事项第 30 天亮、第 31 天不亮`、`待办/里程碑/交付截止仍用 7 天…`、`第四类来源：到期事项进 items…`、`归档项目的到期事项照常亮，且 archived=true`、`scopeDueInput：四份一起缩…`。后三条是 `expiry` 夹具默认 `iso(20)` 落进 7<20<30 那条分界区的**合法连带红** | node |
 | **M③′** | `ORDER BY e.expire_date, e.kind, e.id` 摘掉 `, e.id` | `list_breaks_ties_by_id_when_date_and_kind_are_equal` | cargo |
 | **M④** | `scopeDueInput` 里 `expiries` 那份 `.filter` 摘掉 | 「四份一起缩」那条 node 断言 | node |
 | **M⑤** | `expiry::create` 里把 `req_date(...)` 换成 `norm_date(...)`（`use crate::todo::norm_date`） | `create_requires_expire_date_naming_the_column`（空白那半条：`norm_date` 会折成 NULL，INSERT 撞 NOT NULL 冒 `db_failed`，`err.code` 就不是 `invalid_input`） | cargo |
