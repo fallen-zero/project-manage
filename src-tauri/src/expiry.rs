@@ -1,7 +1,9 @@
 //! 到期事项：维保 / 域名 / 证书 / 其他 四操作（M11-a spec §五、§六）。
 //!
 //! 形制整段照 `milestone.rs`（M9 Task 3）：一条 `list` SQL 同时管「跨项目全部」与「按项目筛」，
-//! `p.deleted_at IS NULL` 在本表这一处（检索侧的第二处由 Task 3 那条 collect 落，届时两处各自有守卫测试）。
+//! `p.deleted_at IS NULL` 在本表这一处（检索侧的第二处已在 `search.rs` 的到期事项那条 collect 落，
+//! 两处各自有守卫测试：本文件 cross_project_list_hides_expiries_of_a_soft_deleted_project 与
+//! search.rs 的 soft_deleted_project_hides_expiry_hits）。
 //! 日期形状判据复用 `todo::req_date`（必填日期**不能**走 `norm_date`：它把空白折成 NULL，
 //! 而 NULL 进 `expire_date NOT NULL` 会由 SQLite 冒成 `db_failed`，用户看到的是「数据库操作失败」
 //! 而不是「你的日期没填」—— M10 为 `report_date` 立的同一条理由）。
