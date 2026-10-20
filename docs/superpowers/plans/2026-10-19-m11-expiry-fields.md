@@ -1489,6 +1489,8 @@ export function ExpiryPanel({ projectId }: { projectId: string }) {
           placeholder="名称（如 oa.gov.cn、年度维保合同）"
           className="min-w-40 flex-1"
         />
+        {/* 到期日的空值不在面板里折 NULL：`req_date` 要收到 "" 才能回一句点名「到期日期」的 invalid_input，
+            所以这里原样传字符串（后端 Option<String>，空串与缺键同样拒）。 */}
         <Input type="date" value={expireDate} onChange={(e) => setExpireDate(e.target.value)} className="w-44" />
         <Input
           value={note}
