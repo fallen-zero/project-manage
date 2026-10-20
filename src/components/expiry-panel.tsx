@@ -64,7 +64,7 @@ export function ExpiryPanel({ projectId }: { projectId: string }) {
   };
 
   const today = localToday();
-  // 与预警块**同一份**判据与同一个窗口（`horizonOf("expiry")` = 30 天）：面板自己不许再写一份日期比较。
+  // 与预警块**同一份**判据、同一个按类选出的窗口（`horizonOf("expiry")` 是唯一落点）：面板自己不许再写一份日期比较。
   const stateOf = (date: string): { state: DueState; days: number } | null =>
     dueStateOf(date, today, horizonOf("expiry"));
 
