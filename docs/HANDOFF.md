@@ -90,7 +90,7 @@
 
 **Task 3 那四条 findings 到此全闭**（账本 `Task 3: fix round 1/5` 与 `Task 9 Step 4b` 两段有全文）：① **Important**（plan vs spec 冲突，实现者无错）—— 第 9 条 collect 的三个 detail bit 计划写成 `kind, expire_date, NULL` 而 spec §八 要 `note` ⇒ 已按 spec 改 `SUBSTR(e.note, 1, 80)` 并补「靠备注命中时副标题里念得出备注」的断言，spec §八 同轮改成带截断的写法（原来的形状下「靠备注命中」和「靠名称命中」在结果页渲染成逐字相同的行，用户看不出命中的是哪一列）；② Minor —— 那句 `SELECT COUNT(*) FROM project_expiries` 的空承诺已改成「把 `projects.deleted_at` 置回 NULL 后再断一次命中」，一次钉住行是活的、门是可逆的；③ Minor —— SQL 注释写清了第三个 bit 为什么截断；④ Minor（归 **Task 9**）—— `src-tauri/src/expiry.rs` 模块头那句「检索侧的第二处由 Task 3 那条 collect 落」的将来时已在本轮 Step 4b 改成现在时并给出两个可 grep 的守卫测试名，计划 Task 9 的 Files 清单也补进了那个文件（M10 终审 I1 同族「没被分配到任何一格的句子」）。**限定范围复审判 ①②③ ADDRESSED、新破断无，并确认这批改动没吃掉 Task 8 变异 M① 的可证伪性。**
 
-**下一步动作**：`git checkout feat/m11-expiry-fields`（若不在上面）→ **整分支终审已做**（结论与修复记录见 `.superpowers/sdd/2026-10-19-m11-expiry-fields/final-review.md` 与账本，修复波已落地）→ **问需求方要不要合 `master`（必须当次批准）** → 核两条例行（`git rev-list --merges --count --all` 期望 0、`git merge-base --is-ancestor master feat/m11-expiry-fields` 期望 exit=0）→ `git merge --ff-only` → 在 `master` 的树上复跑 §4-A 整套门 → 推 `origin`（`master` 要单独指示）。**别重派 Task 1–8 的实现者** —— 提交在 `git log` 里、结论在账本里。
+**下一步动作**：`git checkout feat/m11-expiry-fields`（若不在上面）→ **整分支终审已做**（结论与修复记录见 `.superpowers/sdd/2026-10-19-m11-expiry-fields/{final-review.md, final-fix-report.md, recheck-final-fix.md}` 与账本：终审 Needs fixes → 修复波 → 限定范围复审 6/6 ADDRESSED、无新破断；修复前后门禁读数一致）→ **问需求方要不要合 `master`（必须当次批准）** → 核两条例行（`git rev-list --merges --count --all` 期望 0、`git merge-base --is-ancestor master feat/m11-expiry-fields` 期望 exit=0）→ `git merge --ff-only` → 在 `master` 的树上复跑 §4-A 整套门 → 推 `origin`（`master` 要单独指示）。**别重派 Task 1–8 的实现者** —— 提交在 `git log` 里、结论在账本里。
 
 **卡住的两件事，没有一件是代码问题**：
 
