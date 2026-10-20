@@ -1062,6 +1062,14 @@ const empty = {
 
 > `expiry` 夹具用了 `iso(20)`，所以它必须定义在 `iso` 之后、`empty` 之前（文件里 `iso` 在 :11，`project` 夹具在 :16 起 —— 把 `expiry` 插在 `milestone` 夹具与 `empty` 之间即可）。
 
+> **还有三处既有调用点必须一起补 `expiries: []`（控制方派发前实测发现，行号会漂 ⇒ 按测试名找）**：
+> `没日期的行整个跳过，且不进 unparsed`、`三来源汇总 + 排序：overdue 在前、再按日期、再按项目名`、
+> `同一天两条 ⇒ 第三级键走项目名的拼音序，不是码点序` 这三条喂给 `buildDueWarnings` 的是**字面量对象**、
+> 没有 spread `empty`。`DueInput` 加了必填 `expiries` 之后：`npm run build` 在 `tsc` 层报「Property 'expiries' is missing」，
+> 而 `node --test` 走的是类型擦除（不查类型），会在新的 `for (const e of input.expiries)` 上抛
+> `input.expiries is not iterable` ⇒ **三条既有测试一起红在崩溃上**，看着像实现者写坏了循环。
+> 每处补一行 `expiries: [],`（放在 `milestones` 之后、`projects` 之前，与 `DueInput` 的键序一致）。
+
 六条新断言追加到文件末尾：
 
 ```ts
@@ -1143,7 +1151,7 @@ test("scopeDueInput：四份一起缩 ⇒ 别项目的行既不出现、也不�
     ],
   };
   const all = buildDueWarnings(input, TODAY);
-  assert.equal(all.items.length, 4, "不筛时四行都该在（t-jia / m-yi / x-jia / x-yi；下面那半条的对照读数）");
+  assert.equal(all.items.length, 5, "不筛时五行都该在（t-jia / t-yi / m-yi / x-jia / x-yi；下面那半条的对照读数）");
   assert.equal(all.unparsed, 1, "乙项目那个「10月底前」在全量口径里计 unparsed");
 
   const scoped = buildDueWarnings(scopeDueInput(input, "pj"), TODAY);
