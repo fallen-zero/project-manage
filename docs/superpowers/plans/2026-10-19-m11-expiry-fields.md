@@ -1634,7 +1634,8 @@ git push origin feat/m11-expiry-fields
 ### Task 6: 预警块的展示层（四处一起算的文案 + 双窗口 + 归档标注）
 
 **Files:**
-- Modify: `src/pages/todos.tsx`（预警块块头 :197-200 那句 `<p>`、行渲染 :209-219 那圈 `<li>`）
+- Modify: `src/pages/todos.tsx`（预警块块头 :197-200 那句 `<p>`、行渲染 :209-219 那圈 `<li>`、`scoped` 上方那段注释）
+- Modify: `src/components/milestone-panel.tsx`（块头那句的窗口值改从常量念 —— Task 6 评审 N-1，M9 终审 I5 / Task 5 §七订正③ 同族的**第三处漏网**，见 Step 2b）
 - Test: 无新增（展示层，判据本体在 Task 4 已有断言）
 
 **Interfaces:**
@@ -1647,10 +1648,13 @@ git push origin feat/m11-expiry-fields
 
 ```tsx
         <p className="mt-1 text-xs text-muted-foreground">
-          四处一起算：未完成的待办截止、未勾选的里程碑计划日期、未归档项目的交付截止、到期事项。
-          红=已逾期，描边=今天起 {DUE_HORIZON_DAYS} 天内；到期事项单独看 {EXPIRY_HORIZON_DAYS} 天内（续费要走审批，窗口更长），归档项目的到期事项照常提醒。
+          四处一起算：未完成的待办截止、未勾选的里程碑计划日期、未归档项目的交付截止、到期事项。红=已逾期，描边=今天起 {DUE_HORIZON_DAYS} 天内；到期事项单独看 {EXPIRY_HORIZON_DAYS} 天内（续费要走审批，窗口更长），归档项目的行照常提醒并在行尾标出「（归档项目）」—— 只有交付截止那一类不催已退役的项目。
         </p>
 ```
+
+> **两句写在同一行**（Task 6 评审 N-3）：JSX 会把源码里的换行折成一个 ASCII 空格，分两行写就渲染成「…到期事项。 红=已逾期…」，中文句间凭空多一个西文空格。整段一行写完就没这件事；这一格没有门守排版，只能靠写的时候注意。
+>
+> **句末那半句「归档项目的行照常提醒并在行尾标出」是评审 N-2 的兑现**：`archived` 由 `emit` 对**四类统一**赋值（`due-warning.ts`），所以真机上第一次会出现「归档项目的未完成待办 / 未勾选里程碑」也带这枚标注。原先那句只点「到期事项」不算假话（spec §七 记的既有实态就是归档门只管交付截止那一类），但它盖不住界面实际念出来的范围 ⇒ 补全它，免得用户以为标注只跟到期类有关。
 
 import 补两个常量：
 
@@ -1670,7 +1674,7 @@ import {
 
 `src/pages/todos.tsx` 里 `const scoped = useMemo(...` 上方那段注释现在写的是「而且**三份数据一起缩**（终审 I1）」—— Task 4 已经把 `expiries` 加进去了，这句仍是三份 = 假话（M10 终审 I1 同族：句子里的数字没被分配到任何一格）。把「三份」改成「四份」，其余字面不动。这属于注释、不是文案，所以不许推给下一轮：本格就是唯一动 `todos.tsx` 的任务。
 
-- [ ] **Step 2: 行尾念出「（归档项目）」**
+- [ ] **Step 2: 行尾念出「（归档项目）」—— 但必须待在裁切区之外（Task 6 评审 I-1）**
 
 :209-219 那个 `<li>` 里，把项目名那一段换成：
 
@@ -1680,26 +1684,47 @@ import {
                 <Badge variant={i.state === "overdue" ? "destructive" : "outline"}>
                   {i.state === "overdue" ? `逾期 ${-i.days} 天` : i.days === 0 ? "今天" : `${i.days} 天后`}
                 </Badge>
-                <span className="min-w-0 flex-1 truncate">
+                {/* 归档标注刻意放在 truncate 容器**之外**：Tailwind 的 `truncate` = overflow:hidden
+                    + text-overflow:ellipsis + white-space:nowrap，裁的是**整个容器**。把标注塞进容器末尾
+                    就等于让它跟着 `{项目名} · {标题}` 一起被省略号挤掉 —— 而这枚标注是 D4 那句
+                    「归档项目的到期事项照常亮，但界面必须念出来，别让人以为录错」的唯一防线，
+                    不能是一行里最先牺牲的那一段。容器本身补 `title` 兜全文（本仓先例：
+                    expiry-panel.tsx、app-shell.tsx、ledger-panel.tsx、search-bundle.tsx）。
+                    `shrink-0` 让标注永远保住自己的宽度，行名长了先被裁的是中间那段。 */}
+                <span className="min-w-0 flex-1 truncate" title={`${i.projectLabel} · ${i.label}`}>
                   {i.projectLabel} · {i.label}
-                  {i.archived && <span className="text-muted-foreground">（归档项目）</span>}
                 </span>
+                {i.archived && <span className="shrink-0 text-xs text-muted-foreground">（归档项目）</span>}
                 <span className="font-mono text-xs text-muted-foreground">{i.date}</span>
               </li>
             ))}
 ```
 
+> **这一格的证据档要说清**：`{i.archived && …}` 这段在界面上**是否真渲染出来、长名归档行是否真不被裁**，单元层零网（spec §十一 不引 jsdom）⇒ 唯一取证是 Task 8 真机**格 7**，而且那一条夹具**必须刻意用偏长的项目名 + 已归档 + 到期行**（评审点名的走查形态，Task 8 的脚本按这条准备）。
+
+- [ ] **Step 2b: `milestone-panel.tsx` 的块头也从常量念（评审 N-1）**
+
+`src/components/milestone-panel.tsx` 块头那句现在是「…徽标与预警块同判据：红=已逾期，描边=今天起 **7 天内**」（约 :77）。本轮把「块头都从常量念窗口」立成了规矩（Task 5 §七订正③、本格 Step 1），这一处是同一族的第三处漏网 —— 当前值 7 与 `DUE_HORIZON_DAYS` 仍一致，所以它是**漂移风险**而不是假话，正合适在本格一起收掉（一行文案 + 一个 import，不动判据）：
+
+```tsx
+        <span className="text-xs text-muted-foreground">
+          阶段固定五段；勾掉=已完成，不再进预警。徽标与预警块同判据：红=已逾期，描边=今天起 {DUE_HORIZON_DAYS} 天内
+        </span>
+```
+
+import 那行（:16）从 `import { dueStateOf, localToday, type DueState } from "@/lib/due-warning";` 补成含 `DUE_HORIZON_DAYS`（`noUnusedLocals` 要求它真被用到 —— 就用在上面那句）。**本格到此为止不许再往 `milestone-panel` 里加东西**（它不是本轮的面板）。
+
 - [ ] **Step 3: 跑编译门**
 
 Run: `npm run build > /tmp/t6-build.log 2>&1; echo "build=$?"; grep -c "error TS" /tmp/t6-build.log; node --test "tests/**/*.test.ts" > /tmp/t6-node.log 2>&1; echo "node=$?"; grep -E "^ℹ (tests|pass|fail)" /tmp/t6-node.log`
 Expected：`build=0` 且 `error TS` **0**；`node=0`、**47/47/0** 不变。
-**如实写**：块头文案与「（归档项目）」那段是否真渲染出来，只有真机能证（格 7、格 10）；`tsc` 只保证它编得过。
+**如实写**：块头文案与「（归档项目）」那段是否真渲染出来，只有真机能证（格 7、格 10）；`tsc` 只保证它编得过。**格 7 那条夹具要刻意备一行「项目名偏长 + 已归档 + 有到期行」** —— I-1 修的就是这一形态，跑一条短名归档行证明不了标注没被裁。
 
 - [ ] **Step 4: 提交并推**
 
 ```bash
-git add src/pages/todos.tsx
-git commit -m "feat(m11-a): 预警块块头改成四处一起算并从常量念双窗口，行尾标注（归档项目）—— tsc 0 错、node 47 不变"
+git add src/pages/todos.tsx src/components/milestone-panel.tsx
+git commit -m "feat(m11-a): 预警块块头四处一起算、双窗口从常量念，归档标注挪出裁切区并给容器补 title，milestone-panel 块头同规矩收第三处漏网 —— tsc 0 错、node 47 不变"
 git push origin feat/m11-expiry-fields
 ```
 
@@ -1850,7 +1875,7 @@ npm run tauri -- dev -c '{"identifier":"dev.zero.pfm.m11test"}' -- --port 9222 &
 
 - **格 1**：底栏 `schema=7 wal`（`db_status` 往返）。
 - **格 3**：到期日留空点「记一笔」⇒ 界面念出的错误文本含「到期日期」且库里 `expiry_list` 条数不变（前端没折 NULL，见 Task 5 的注释）。
-- **格 7 / 格 8**：同一份数据里既有归档项目（带到期行）又有归档项目（带 `deliveryDeadline`）⇒ 前者**亮**且行尾念「（归档项目）」，后者**不亮**。这两格是同一条 `if (p.status === "归档") continue;` 的两面，跑反了就是判据搬错。
+- **格 7 / 格 8**：同一份数据里既有归档项目（带到期行）又有归档项目（带 `deliveryDeadline`）⇒ 前者**亮**且行尾念「（归档项目）」，后者**不亮**。这两格是同一条 `if (p.status === "归档") continue;` 的两面，跑反了就是判据搬错。**归档那一条的项目名要刻意起长**（Task 6 评审 I-1：标注已挪出 `truncate` 容器并给容器补了 `title`，但只有长名行能证明它没被省略号裁掉 —— 短名行跑绿了等于没跑）。断言口径按「该行文本里是否含『（归档项目）』这一段 + 徽标枚数」，只回布尔不回正文（坑 11）。
 - **格 2 / 格 11 的面板读数（Task 5 评审的 ⚠️ 项在这里结清，别到跑真机时才现场编预期）**：格 2 那条 `+20 天` 的行 ⇒ 面板上**两枚**徽标（`kind` 中性 + 描边「20 天后」）；格 11 把它续到 `+200 天` ⇒ 面板**只剩 `kind` 徽标与日期那一列，天数徽标整枚消失**（`dueStateOf` 对窗口外回 `null`，裁定见 spec §七 订正①），预警块里那一行整条不见。断言口径按「两枚/一枚徽标 + 徽标文本」计数，**只回布尔与文本类别，别把备注正文打印进日志**（坑 11）。`+200` 这一格同时是「窗口外的合法日期 ≠ 形状未知」这条裁定的唯一真机证据 —— 单元层没有面板测试网，跑掉了就要在映射表里标未验。
 
 - [ ] **Step 5: 收口前写 `spec-plan-mapping.md` 双向映射表**
