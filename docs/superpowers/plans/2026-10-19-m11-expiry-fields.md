@@ -1406,8 +1406,7 @@ import { dueStateOf, horizonOf, localToday, type DueState } from "@/lib/due-warn
 import { toAppError, type AppErrorShape } from "@/lib/ipc";
 import { EXPIRY_KINDS, type Expiry } from "@/types/expiry";
 
-// 到期日的空值不在面板里折 NULL：`req_date` 要收到 "" 才能回一句点名「到期日期」的 invalid_input，
-// 所以这里原样传字符串（后端 Option<String>，空串与缺键同样拒）。
+// 下拉默认值取词表第一格：四类只在 `EXPIRY_KINDS` 一份，面板里不许再抄一遍（三处同源由 lib.rs 那条文本门钉）。
 const KIND = EXPIRY_KINDS[0];
 
 export function ExpiryPanel({ projectId }: { projectId: string }) {
