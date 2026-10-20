@@ -3,10 +3,14 @@
 import type { Project } from "@/types/project";
 import type { Milestone } from "@/types/milestone";
 import type { Todo } from "@/types/todo";
+import type { Expiry } from "@/types/expiry";
 
 export const DUE_HORIZON_DAYS = 7;
 
-export type DueKind = "todo" | "milestone" | "deadline";
+/** 到期事项单独一个更长的窗口（spec D3）：域名/证书续费要走合同与审批，7 天等于到期当天才亮红、那天已经晚了。 */
+export const EXPIRY_HORIZON_DAYS = 30;
+
+export type DueKind = "todo" | "milestone" | "deadline" | "expiry";
 export type DueState = "overdue" | "soon";
 
 export interface DueItem {
@@ -21,6 +25,8 @@ export interface DueItem {
   state: DueState;
   /** 距今天的日历日数：overdue 为负，含今天为 0。 */
   days: number;
+  /** 所属项目是否已归档（D4：归档项目的到期事项照常亮，但界面必须念出来，别让人以为录错）。 */
+  archived: boolean;
 }
 
 export interface DueReport {
@@ -32,6 +38,7 @@ export interface DueReport {
 export interface DueInput {
   todos: Todo[];
   milestones: Milestone[];
+  expiries: Expiry[];
   projects: Project[];
 }
 
@@ -74,7 +81,13 @@ export function dueStateOf(
   return { state: days < 0 ? "overdue" : "soon", days };
 }
 
-/** 项目筛选把三份输入**一起**缩小（终审 I1）。抽成纯函数不是为了复用，是为了让那一格有可红的断言：
+/** 窗口按类只在这一处选（M9 终审 I2 的同一条规矩：比较本体 `dueStateOf` 只有一份，谁也不许再写第二份日期比较）。
+ *  把「到期事项用 30 天」写成两份（一处 emit、一处面板）就是下一次分叉的开始。 */
+export function horizonOf(kind: DueKind): number {
+  return kind === "expiry" ? EXPIRY_HORIZON_DAYS : DUE_HORIZON_DAYS;
+}
+
+/** 项目筛选把四份输入**一起**缩小（终审 I1；M11-a Task 4 起含到期事项）。抽成纯函数不是为了复用，是为了让那一格有可红的断言：
  *  页面本身没有组件测试网（门只有 `tsc` + `vite build`），原先预警块与「共 N 条」那行吃的是未筛选的全量
  *  ⇒ 用户筛到甲项目时仍看见乙/丙的红黄与全局 `unparsed` 数，而且没人守得住。
  *  `projectId === null` = 全部项目，原样返回。 */
@@ -83,6 +96,7 @@ export function scopeDueInput(input: DueInput, projectId: string | null): DueInp
   return {
     todos: input.todos.filter((t) => t.projectId === projectId),
     milestones: input.milestones.filter((m) => m.projectId === projectId),
+    expiries: input.expiries.filter((e) => e.projectId === projectId),
     projects: input.projects.filter((p) => p.id === projectId),
   };
 }
@@ -90,7 +104,9 @@ export function scopeDueInput(input: DueInput, projectId: string | null): DueInp
 export function buildDueWarnings(
   input: DueInput,
   today: string,
-  horizonDays: number = DUE_HORIZON_DAYS,
+  /** 给定时**所有类**都用它（既有的覆盖位，M9 T7 变异 M⑦ 那条常量的消费点）；
+   *  省略时按类走 `horizonOf(kind)` —— 这才是 D3「到期事项单独 30 天」的唯一落点。 */
+  horizonOverride?: number,
 ): DueReport {
   const byId = new Map(input.projects.map((p) => [p.id, p]));
   let unparsed = 0;
@@ -102,7 +118,8 @@ export function buildDueWarnings(
       unparsed += 1;
       return;
     }
-    const hit = dueStateOf(raw, today, horizonDays);
+    // `??` 而不是 `||`：0 是合法的覆盖值（既有测试「horizonDays 传 0」吃的就是它），写 `||` 那条会恒绿。
+    const hit = dueStateOf(raw, today, horizonOverride ?? horizonOf(kind));
     if (hit === null) return;
     const p = byId.get(projectId);
     items.push({
@@ -112,8 +129,9 @@ export function buildDueWarnings(
       projectLabel: p ? projectLabel(p) : "（项目缺失）",
       label,
       date: raw,
-      days: hit.days,
       state: hit.state,
+      days: hit.days,
+      archived: p?.status === "归档",
     });
   };
 
@@ -126,9 +144,13 @@ export function buildDueWarnings(
     emit("milestone", m.id, m.projectId, m.stage, m.planDate);
   }
   for (const p of input.projects) {
-    // 判据⑤：归档 = 不再催事。这一类没有 done 勾选态，用「未归档」当等价门。
+    // 判据⑤：**只有这一类**带归档门（交付截止不催已退役的项目）。到期事项不跟着这道门走 —— 见 D4。
     if (p.status === "归档") continue;
     emit("deadline", p.id, p.id, "交付截止", p.deliveryDeadline);
+  }
+  for (const e of input.expiries) {
+    // D4：归档项目的到期事项照常亮（归档是管理上的退役，域名/证书/维保是还在计费的事实）。
+    emit("expiry", e.id, e.projectId, `${e.kind} ${e.label}`, e.expireDate);
   }
 
   items.sort((a, b) => {

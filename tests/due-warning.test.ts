@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildDueWarnings, dueStateOf, localToday, scopeDueInput, DUE_HORIZON_DAYS } from "../src/lib/due-warning.ts";
+import { buildDueWarnings, dueStateOf, localToday, scopeDueInput, DUE_HORIZON_DAYS, EXPIRY_HORIZON_DAYS, horizonOf } from "../src/lib/due-warning.ts";
+import type { Expiry } from "../src/types/expiry.ts";
 import type { Todo } from "../src/types/todo.ts";
 import type { Milestone } from "../src/types/milestone.ts";
 import type { Project } from "../src/types/project.ts";
@@ -52,7 +53,24 @@ const milestone = (over: Partial<Milestone> = {}): Milestone => ({
   ...over,
 });
 
-const empty = { todos: [] as Todo[], milestones: [] as Milestone[], projects: [] as Project[] };
+const expiry = (over: Partial<Expiry> = {}): Expiry => ({
+  id: "x1",
+  projectId: "p1",
+  kind: "域名",
+  label: "oa.gov.cn",
+  expireDate: iso(20),
+  note: "",
+  createdAt: "2026-10-01 00:00:00",
+  updatedAt: "2026-10-01 00:00:00",
+  ...over,
+});
+
+const empty = {
+  todos: [] as Todo[],
+  milestones: [] as Milestone[],
+  expiries: [] as Expiry[],
+  projects: [] as Project[],
+};
 
 test("昨天到期 ⇒ overdue 且 days 为负", () => {
   const r = buildDueWarnings({ ...empty, todos: [todo({ dueDate: iso(-1) })], projects: [project()] }, TODAY);
@@ -97,6 +115,7 @@ test("没日期的行整个跳过，且不进 unparsed", () => {
     {
       todos: [todo({ id: "t-null", dueDate: null }), todo({ id: "t-empty", dueDate: "" })],
       milestones: [milestone({ id: "m-null", planDate: null })],
+      expiries: [],
       projects: [project()],
     },
     TODAY,
@@ -130,6 +149,7 @@ test("三来源汇总 + 排序：overdue 在前、再按日期、再按项目名
     {
       todos: [todo({ id: "ta", projectId: "pa", dueDate: iso(1), title: "待办甲" })],
       milestones: [milestone({ id: "ma", projectId: "pb", stage: "上线", planDate: iso(-1) })],
+      expiries: [],
       projects: [pA, pB],
     },
     TODAY,
@@ -170,6 +190,7 @@ test("同一天两条 ⇒ 第三级键走项目名的拼音序，不是码点序
         todo({ id: "t-jia", projectId: "pj", dueDate: iso(2), title: "甲项目那条" }),
       ],
       milestones: [],
+      expiries: [],
       projects: [project({ id: "py", name: "乙项目", code: null }), project({ id: "pj", name: "甲项目", code: null })],
     },
     TODAY,
@@ -210,24 +231,32 @@ test("dueStateOf 把「形状对、历法错」的日期滚进下一档（I2 之
 
 // ── 终审 I1：预警块与计数原先吃的是未筛选的全量（只有列表行走过 scoped）。
 // 页面本身没有组件测试网（门只有 `tsc` + `vite build`），所以把「三份一起缩」抽成纯函数来守这一格。
-test("scopeDueInput：三份一起缩 ⇒ 别项目的行既不出现、也不计进 unparsed", () => {
+test("scopeDueInput：四份一起缩 ⇒ 别项目的行既不出现、也不计进 unparsed", () => {
   const input = {
     todos: [
       todo({ id: "t-jia", projectId: "pj", dueDate: iso(-1) }),
       todo({ id: "t-yi", projectId: "py", dueDate: iso(-1) }),
     ],
     milestones: [milestone({ id: "m-yi", projectId: "py", planDate: iso(-1) })],
+    expiries: [
+      expiry({ id: "x-jia", projectId: "pj", label: "甲的域名" }),
+      expiry({ id: "x-yi", projectId: "py", label: "乙的证书" }),
+    ],
     projects: [
       project({ id: "pj", name: "甲项目", code: null }),
       project({ id: "py", name: "乙项目", code: null, deliveryDeadline: "10月底前" }),
     ],
   };
   const all = buildDueWarnings(input, TODAY);
-  assert.equal(all.items.length, 3, "不筛时三行都该在（下面那半条的对照读数）");
+  assert.equal(all.items.length, 5, "不筛时五行都该在（t-jia / t-yi / m-yi / x-jia / x-yi；下面那半条的对照读数）");
   assert.equal(all.unparsed, 1, "乙项目那个「10月底前」在全量口径里计 unparsed");
 
   const scoped = buildDueWarnings(scopeDueInput(input, "pj"), TODAY);
-  assert.deepEqual(scoped.items.map((i) => [i.kind, i.id]), [["todo", "t-jia"]], "筛到甲项目 ⇒ 预警只剩甲的行");
+  assert.deepEqual(
+    scoped.items.map((i) => [i.kind, i.id]),
+    [["todo", "t-jia"], ["expiry", "x-jia"]],
+    "筛到甲项目 ⇒ 预警只剩甲的行（第四类也一起缩，摘掉 expiries 那份筛选这条当场红）",
+  );
   assert.equal(scoped.unparsed, 0, "别的项目的坏日期不该记进当前筛选的 unparsed 数");
   assert.equal(scopeDueInput(input, null), input, "null = 全部项目，原样返回同一份引用");
 });
@@ -240,4 +269,61 @@ test("localToday 回本机日历日的 ISO 形状", () => {
 // （T4 评审带回，T7 变异 M⑦ 打的就是这条 —— 没有这条断言，M⑦ 无处可红）。
 test("DUE_HORIZON_DAYS 钉死为 7", () => {
   assert.equal(DUE_HORIZON_DAYS, 7);
+});
+
+test("第四类来源：到期事项进 items，label 念出种类与名称，kind 是 expiry", () => {
+  const r = buildDueWarnings({ ...empty, expiries: [expiry()], projects: [project()] }, TODAY);
+  assert.deepEqual(r.items.map((i) => [i.kind, i.label, i.state, i.days]), [["expiry", "域名 oa.gov.cn", "soon", 20]]);
+  assert.equal(r.unparsed, 0);
+});
+
+test("到期事项第 30 天亮、第 31 天不亮（D3 的边界，两边都要钉）", () => {
+  const in30 = buildDueWarnings({ ...empty, expiries: [expiry({ expireDate: iso(30) })], projects: [project()] }, TODAY);
+  assert.equal(in30.items.length, 1, "第 30 天必须亮（含边界）");
+  const in31 = buildDueWarnings({ ...empty, expiries: [expiry({ expireDate: iso(31) })], projects: [project()] }, TODAY);
+  assert.equal(in31.items.length, 0, "第 31 天不许亮 —— 把 30 改成 31 或把窗口拉宽都要在这里红");
+  const past = buildDueWarnings({ ...empty, expiries: [expiry({ expireDate: iso(-3) })], projects: [project()] }, TODAY);
+  assert.deepEqual(past.items.map((i) => [i.state, i.days]), [["overdue", -3]], "过去的到期日亮红且 days 为负");
+});
+
+test("归档项目的到期事项照常亮，且 archived=true（D4，与 M10 工时那格同形）", () => {
+  const r = buildDueWarnings(
+    { ...empty, expiries: [expiry()], projects: [project({ status: "归档" })] },
+    TODAY,
+  );
+  assert.equal(r.items.length, 1, "归档门只包交付截止那一类，不包到期事项");
+  assert.equal(r.items[0].archived, true, "界面要靠这个布尔在行尾念「（归档项目）」");
+  const live = buildDueWarnings({ ...empty, expiries: [expiry()], projects: [project({ status: "开发" })] }, TODAY);
+  assert.equal(live.items[0].archived, false, "未归档的项目不能误标");
+});
+
+test("待办/里程碑/交付截止仍用 7 天：第 8 天的待办不因本轮变亮（防把 30 传给他们）", () => {
+  const r = buildDueWarnings(
+    {
+      ...empty,
+      todos: [todo({ dueDate: iso(8) })],
+      milestones: [milestone({ planDate: iso(8) })],
+      projects: [project({ deliveryDeadline: iso(8) })],
+    },
+    TODAY,
+  );
+  assert.equal(r.items.length, 0, "三来源落在第 8 天 ⇒ 7 天窗口外，一条都不该亮");
+  assert.equal(horizonOf("todo"), DUE_HORIZON_DAYS);
+  assert.equal(horizonOf("milestone"), DUE_HORIZON_DAYS);
+  assert.equal(horizonOf("deadline"), DUE_HORIZON_DAYS);
+  assert.equal(horizonOf("expiry"), EXPIRY_HORIZON_DAYS, "只有到期事项用长窗口");
+});
+
+test("形状不对的到期日计入 unparsed，不亮也不静默吞（判据②搬到第四类）", () => {
+  const r = buildDueWarnings(
+    { ...empty, expiries: [expiry({ expireDate: "10月底前" })], projects: [project()] },
+    TODAY,
+  );
+  assert.equal(r.items.length, 0);
+  assert.equal(r.unparsed, 1, "坏形状的到期日要计数，界面那句「N 条无法解析」才念得对");
+});
+
+test("EXPIRY_HORIZON_DAYS 钉死为 30（阈值钉值，不钉符号）", () => {
+  assert.equal(EXPIRY_HORIZON_DAYS, 30);
+  assert.equal(DUE_HORIZON_DAYS, 7, "= 上一条同理由：常量漂了要在这里红，别靠边界用例间接发现");
 });

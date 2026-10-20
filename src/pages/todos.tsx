@@ -18,6 +18,7 @@ import { Separator } from "@/components/ui/separator";
 import {
   createTodo,
   deleteTodo,
+  listExpiries,
   listMilestones,
   listProjects,
   listTodos,
@@ -29,6 +30,7 @@ import { toAppError, type AppErrorShape } from "@/lib/ipc";
 import { dueOrNull, type Todo } from "@/types/todo";
 import type { Milestone } from "@/types/milestone";
 import type { Project } from "@/types/project";
+import type { Expiry } from "@/types/expiry";
 
 const VIEWS: { key: TodoView; label: string }[] = [
   { key: "all", label: "全部" },
@@ -122,6 +124,7 @@ function Row({
 export function TodosPage() {
   const [todos, setTodos] = useState<Todo[]>([]);
   const [milestones, setMilestones] = useState<Milestone[]>([]);
+  const [expiries, setExpiries] = useState<Expiry[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [view, setView] = useState<TodoView>("all");
   const [filter, setFilter] = useState<string>(ALL_PROJECTS);
@@ -136,9 +139,15 @@ export function TodosPage() {
 
   const reload = useCallback(async () => {
     try {
-      const [t, m, p] = await Promise.all([listTodos(null), listMilestones(null), listProjects()]);
+      const [t, m, x, p] = await Promise.all([
+        listTodos(null),
+        listMilestones(null),
+        listExpiries(null),
+        listProjects(),
+      ]);
       setTodos(t);
       setMilestones(m);
+      setExpiries(x);
       setProjects(p);
       setError(null);
     } catch (e) {
@@ -160,8 +169,8 @@ export function TodosPage() {
   // 只有列表行走过 scoped ⇒ 用户筛到甲项目时仍看见乙/丙的红黄与全局的 unparsed 数。
   // 缩的动作抽成 `scopeDueInput`（纯函数），这一格才有可红的断言 —— 页面本身只有 `tsc` + `vite build` 两道门。
   const scoped = useMemo(
-    () => scopeDueInput({ todos, milestones, projects }, filter === ALL_PROJECTS ? null : filter),
-    [todos, milestones, projects, filter],
+    () => scopeDueInput({ todos, milestones, expiries, projects }, filter === ALL_PROJECTS ? null : filter),
+    [todos, milestones, expiries, projects, filter],
   );
 
   const due = useMemo(() => buildDueWarnings(scoped, localToday()), [scoped]);

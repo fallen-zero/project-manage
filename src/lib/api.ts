@@ -19,6 +19,7 @@ import type { DocHit, DocRow, IndexOverview, IndexProgress } from "@/types/index
 import type { BackupSummary, ImportOutcome, PackageInfo } from "@/types/backup";
 import type { Todo, TodoInput, TodoEdit } from "@/types/todo";
 import type { Milestone, MilestoneInput, MilestoneEdit } from "@/types/milestone";
+import type { Expiry, ExpiryInput, ExpiryUpdate } from "@/types/expiry";
 import type {
   DailyReport,
   DailyReportEdit,
@@ -109,6 +110,13 @@ export const createDailyReport = (input: DailyReportInput) =>
 export const updateDailyReport = (id: string, input: DailyReportEdit) =>
   invoke<void>("daily_report_update", { id, input });
 export const deleteDailyReport = (id: string) => invoke<void>("daily_report_delete", { id });
+
+// —— M11-a 到期事项：四个封装 ——
+// list 的 projectId 传显式 `null` 而不是省键（同 M9/M10 那条告诫）。
+export const listExpiries = (projectId: string | null) => invoke<Expiry[]>("expiry_list", { projectId });
+export const createExpiry = (input: ExpiryInput) => invoke<Expiry>("expiry_create", { input });
+export const updateExpiry = (id: string, input: ExpiryUpdate) => invoke<void>("expiry_update", { id, input });
+export const deleteExpiry = (id: string) => invoke<void>("expiry_delete", { id });
 
 // —— M10 日报导出 ——
 export async function pickXlsxSavePath(defaultName: string): Promise<string | null> {
