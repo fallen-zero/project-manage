@@ -24,7 +24,15 @@ import {
   listTodos,
   updateTodo,
 } from "@/lib/api";
-import { buildDueWarnings, localToday, projectLabel, scopeDueInput, type DueItem } from "@/lib/due-warning";
+import {
+  buildDueWarnings,
+  DUE_HORIZON_DAYS,
+  EXPIRY_HORIZON_DAYS,
+  localToday,
+  projectLabel,
+  scopeDueInput,
+  type DueItem,
+} from "@/lib/due-warning";
 import { groupByProject, sortTodos, type TodoView } from "@/lib/todo-view";
 import { toAppError, type AppErrorShape } from "@/lib/ipc";
 import { dueOrNull, type Todo } from "@/types/todo";
@@ -165,7 +173,7 @@ export function TodosPage() {
     return (id: string) => byId.get(id) ?? "（项目缺失）";
   }, [projects]);
 
-  // 筛选只做一次，而且**三份数据一起缩**（终审 I1）：原先预警块与「共 N 条未完成」那行吃的是未筛选的全量，
+  // 筛选只做一次，而且**四份数据一起缩**（终审 I1）：原先预警块与「共 N 条未完成」那行吃的是未筛选的全量，
   // 只有列表行走过 scoped ⇒ 用户筛到甲项目时仍看见乙/丙的红黄与全局的 unparsed 数。
   // 缩的动作抽成 `scopeDueInput`（纯函数），这一格才有可红的断言 —— 页面本身只有 `tsc` + `vite build` 两道门。
   const scoped = useMemo(
@@ -204,7 +212,8 @@ export function TodosPage() {
       <section className="rounded-xl border bg-background p-4">
         <h2 className="text-sm font-medium">到期预警</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          三处一起算：未完成的待办截止、未勾选的里程碑计划日期、未归档项目的交付截止。红=已逾期，描边=今天起 7 天内。
+          四处一起算：未完成的待办截止、未勾选的里程碑计划日期、未归档项目的交付截止、到期事项。
+          红=已逾期，描边=今天起 {DUE_HORIZON_DAYS} 天内；到期事项单独看 {EXPIRY_HORIZON_DAYS} 天内（续费要走审批，窗口更长），归档项目的到期事项照常提醒。
         </p>
         {due.unparsed > 0 && (
           <p className="mt-2 text-xs text-destructive">
@@ -222,6 +231,7 @@ export function TodosPage() {
                 </Badge>
                 <span className="min-w-0 flex-1 truncate">
                   {i.projectLabel} · {i.label}
+                  {i.archived && <span className="text-muted-foreground">（归档项目）</span>}
                 </span>
                 <span className="font-mono text-xs text-muted-foreground">{i.date}</span>
               </li>
