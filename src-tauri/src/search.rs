@@ -292,9 +292,13 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
 
     // 到期事项：搜名称与备注两列（spec D6 / §八）。**日期列不进 WHERE** —— 搜「10」「2027」这种
     // 短串会把一堆到期日捞成命中，那是噪声；日期只进副标题的 bit。种类也只进副标题。
+    // 第三个 bit 用 `SUBSTR(e.note, 1, 80)` 而不是裸 `e.note`：`note` 长度无上限，仓内两格先例
+    // （上面 note 那条的 `SUBSTR(n.body, 1, 80)`、daily 那条的 `SUBSTR(d.content, 1, 80)`）对长
+    // 自由文本一律截 80 再进副标题，否则结果页一行能被备注撑成整段。
     hits.append(&mut collect(
         "expiry",
-        "SELECT e.id, e.project_id, p.name, e.label, e.kind, e.expire_date, NULL
+        "SELECT e.id, e.project_id, p.name, e.label, e.kind, e.expire_date,
+                SUBSTR(e.note, 1, 80)
            FROM project_expiries e
            JOIN projects p ON p.id = e.project_id AND p.deleted_at IS NULL
           WHERE e.deleted_at IS NULL
@@ -995,6 +999,13 @@ mod tests {
 
         let by_note = only_hit(&conn, "信息中心审批", "expiry", "oa-gateway.gov.cn");
         assert_eq!(by_note.title, "oa-gateway.gov.cn", "备注命中出来的还是这一行");
+        // 第三条 detail bit 是 `SUBSTR(e.note, 1, 80)`（spec §八）。少了它，「靠备注命中」和
+        // 「靠名称命中」两行在结果页渲染成逐字相同的行，用户看不出命中的是哪一列。
+        assert!(
+            by_note.detail.contains("信息中心审批"),
+            "靠备注命中时副标题要念得出备注：{}",
+            by_note.detail
+        );
 
         // 日期列不进匹配：单独搜日期片段必须一条台账命中也没有（正文段是另一条通路，本夹具里没有正文）。
         assert!(
@@ -1034,6 +1045,17 @@ mod tests {
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM project_expiries", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 1, "行留在库里，恢复项目即原样可搜");
+        assert_eq!(n, 1, "软删项目只挡住读，行本身留在库里");
+
+        // 把项目恢复回活状态再搜一次：这一句才是上面那句断言里「恢复项目即原样可搜」的兑现点，
+        // 一次同时钉住两件事 —— 库里的行是活的（不是被连带软删了）、`p.deleted_at IS NULL`
+        // 那道门是可逆的（不是把行读没了）。
+        conn.execute("UPDATE projects SET deleted_at = NULL WHERE id = ?1", [&pid])
+            .unwrap();
+        assert_eq!(
+            sources(&field_hits(&conn, "tls-wildcard").unwrap()),
+            vec!["expiry"],
+            "恢复项目后到期事项要原样搜得到"
+        );
     }
 }
