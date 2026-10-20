@@ -13,7 +13,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { createMilestone, deleteMilestone, listMilestones, updateMilestone } from "@/lib/api";
-import { dueStateOf, localToday, type DueState } from "@/lib/due-warning";
+import { dueStateOf, localToday, DUE_HORIZON_DAYS, type DueState } from "@/lib/due-warning";
 import { toAppError, type AppErrorShape } from "@/lib/ipc";
 import { MILESTONE_STAGES, type Milestone } from "@/types/milestone";
 
@@ -74,7 +74,7 @@ export function MilestonePanel({ projectId }: { projectId: string }) {
       <div className="mb-1 flex items-center justify-between">
         <h2 className="text-sm font-medium">项目里程碑</h2>
         <span className="text-xs text-muted-foreground">
-          阶段固定五段；勾掉=已完成，不再进预警。徽标与预警块同判据：红=已逾期，描边=今天起 7 天内
+          阶段固定五段；勾掉=已完成，不再进预警。徽标与预警块同判据：红=已逾期，描边=今天起 {DUE_HORIZON_DAYS} 天内
         </span>
       </div>
 

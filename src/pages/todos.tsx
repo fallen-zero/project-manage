@@ -212,8 +212,7 @@ export function TodosPage() {
       <section className="rounded-xl border bg-background p-4">
         <h2 className="text-sm font-medium">到期预警</h2>
         <p className="mt-1 text-xs text-muted-foreground">
-          四处一起算：未完成的待办截止、未勾选的里程碑计划日期、未归档项目的交付截止、到期事项。
-          红=已逾期，描边=今天起 {DUE_HORIZON_DAYS} 天内；到期事项单独看 {EXPIRY_HORIZON_DAYS} 天内（续费要走审批，窗口更长），归档项目的到期事项照常提醒。
+          四处一起算：未完成的待办截止、未勾选的里程碑计划日期、未归档项目的交付截止、到期事项。红=已逾期，描边=今天起 {DUE_HORIZON_DAYS} 天内；到期事项单独看 {EXPIRY_HORIZON_DAYS} 天内（续费要走审批，窗口更长），归档项目的行照常提醒并在行尾标出「（归档项目）」—— 只有交付截止那一类不催已退役的项目。
         </p>
         {due.unparsed > 0 && (
           <p className="mt-2 text-xs text-destructive">
@@ -229,10 +228,17 @@ export function TodosPage() {
                 <Badge variant={i.state === "overdue" ? "destructive" : "outline"}>
                   {i.state === "overdue" ? `逾期 ${-i.days} 天` : i.days === 0 ? "今天" : `${i.days} 天后`}
                 </Badge>
-                <span className="min-w-0 flex-1 truncate">
+                {/* 归档标注刻意放在 truncate 容器**之外**：Tailwind 的 `truncate` = overflow:hidden
+                    + text-overflow:ellipsis + white-space:nowrap，裁的是**整个容器**。把标注塞进容器末尾
+                    就等于让它跟着 `{项目名} · {标题}` 一起被省略号挤掉 —— 而这枚标注是 D4 那句
+                    「归档项目的到期事项照常亮，但界面必须念出来，别让人以为录错」的唯一防线，
+                    不能是一行里最先牺牲的那一段。容器本身补 `title` 兜全文（本仓先例：
+                    expiry-panel.tsx、app-shell.tsx、ledger-panel.tsx、search-bundle.tsx）。
+                    `shrink-0` 让标注永远保住自己的宽度，行名长了先被裁的是中间那段。 */}
+                <span className="min-w-0 flex-1 truncate" title={`${i.projectLabel} · ${i.label}`}>
                   {i.projectLabel} · {i.label}
-                  {i.archived && <span className="text-muted-foreground">（归档项目）</span>}
                 </span>
+                {i.archived && <span className="shrink-0 text-xs text-muted-foreground">（归档项目）</span>}
                 <span className="font-mono text-xs text-muted-foreground">{i.date}</span>
               </li>
             ))}
