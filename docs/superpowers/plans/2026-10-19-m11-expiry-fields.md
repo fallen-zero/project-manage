@@ -1402,7 +1402,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { createExpiry, deleteExpiry, listExpiries, updateExpiry } from "@/lib/api";
-import { dueStateOf, horizonOf, localToday, type DueState } from "@/lib/due-warning";
+import { dueStateOf, horizonOf, localToday, EXPIRY_HORIZON_DAYS, type DueState } from "@/lib/due-warning";
 import { toAppError, type AppErrorShape } from "@/lib/ipc";
 import { EXPIRY_KINDS, type Expiry } from "@/types/expiry";
 
@@ -1460,7 +1460,7 @@ export function ExpiryPanel({ projectId }: { projectId: string }) {
       <div className="mb-1 flex items-center justify-between">
         <h2 className="text-sm font-medium">到期事项</h2>
         <span className="text-xs text-muted-foreground">
-          种类固定四类（维保/域名/证书/其他）；续期就改日期，不再生效就删掉。天数徽标与预警块同判据同两档色：红=已逾期，描边=今天起 30 天内
+          种类那一格从下拉里选（词表只有一份，这里不重抄一遍）；续期就改日期，不再生效就删掉。天数徽标与预警块同判据同两档色：红=已逾期，描边=今天起 {EXPIRY_HORIZON_DAYS} 天内
         </span>
       </div>
 
@@ -1524,22 +1524,19 @@ export function ExpiryPanel({ projectId }: { projectId: string }) {
         return (
           <div key={e.id} className="flex flex-wrap items-center gap-2 border-b px-1 py-2 last:border-b-0">
             <Badge variant="secondary">{e.kind}</Badge>
-            {/* 第二枚徽标念「距今多少天」（spec §七），两档色沿用预警块那一份写法（`todos.tsx` 行里同一串：
-                逾期红、今天与 30 天内描边）。`hit === null` 只可能是库里躺着非 YYYY-MM-DD 的历史值 ——
-                后端的 `req_date` 只挡新写入，整库快照导入进来的旧包不重过这道门，所以给它第三档、不染红不描边。 */}
-            <Badge
-              variant={
-                hit?.state === "overdue" ? "destructive" : hit?.state === "soon" ? "outline" : "secondary"
-              }
-            >
-              {hit === null
-                ? "形状未知"
-                : hit.state === "overdue"
-                  ? `逾期 ${-hit.days} 天`
-                  : hit.days === 0
-                    ? "今天"
-                    : `${hit.days} 天后`}
-            </Badge>
+            {/* 天数徽标只在 `hit` 有值时出现。`dueStateOf` 回 null 有两条成因（落在 `horizonOf("expiry")`
+                之外 / 形状不是 YYYY-MM-DD），而**这一页上前者才是多数行**：30 天以外的合法日期照样回 null
+                （本机实测 `2026-11-25` 对 2026-10-20 ⇒ null）。坏形状那支在命令路径到不了这里 ——
+                `create`/`update` 先过 `req_date` + `is_iso_date`（`todo.rs:27`，只判形状不判历法）。
+                两条成因面板分不开，也**不许自己算天数**（那要在 `dueStateOf` 之外再写一份日期比较，
+                M9 终审 I2 那格的红线）⇒ 窗口外的行只念日期，不念任何档位。
+                编辑态（`editing`）也一并把这枚徽标藏掉：那会儿屏幕上正在改的就是日期，挂着旧日期的档位
+                要等到保存 + `reload()` 才变，读起来像「改了没生效」（Task 5 评审 M-3）。 */}
+            {hit && !editing && (
+              <Badge variant={hit.state === "overdue" ? "destructive" : "outline"}>
+                {hit.state === "overdue" ? `逾期 ${-hit.days} 天` : hit.days === 0 ? "今天" : `${hit.days} 天后`}
+              </Badge>
+            )}
             <span className="min-w-0 flex-1 truncate text-sm" title={e.label}>
               {e.label}
             </span>
@@ -1854,6 +1851,7 @@ npm run tauri -- dev -c '{"identifier":"dev.zero.pfm.m11test"}' -- --port 9222 &
 - **格 1**：底栏 `schema=7 wal`（`db_status` 往返）。
 - **格 3**：到期日留空点「记一笔」⇒ 界面念出的错误文本含「到期日期」且库里 `expiry_list` 条数不变（前端没折 NULL，见 Task 5 的注释）。
 - **格 7 / 格 8**：同一份数据里既有归档项目（带到期行）又有归档项目（带 `deliveryDeadline`）⇒ 前者**亮**且行尾念「（归档项目）」，后者**不亮**。这两格是同一条 `if (p.status === "归档") continue;` 的两面，跑反了就是判据搬错。
+- **格 2 / 格 11 的面板读数（Task 5 评审的 ⚠️ 项在这里结清，别到跑真机时才现场编预期）**：格 2 那条 `+20 天` 的行 ⇒ 面板上**两枚**徽标（`kind` 中性 + 描边「20 天后」）；格 11 把它续到 `+200 天` ⇒ 面板**只剩 `kind` 徽标与日期那一列，天数徽标整枚消失**（`dueStateOf` 对窗口外回 `null`，裁定见 spec §七 订正①），预警块里那一行整条不见。断言口径按「两枚/一枚徽标 + 徽标文本」计数，**只回布尔与文本类别，别把备注正文打印进日志**（坑 11）。`+200` 这一格同时是「窗口外的合法日期 ≠ 形状未知」这条裁定的唯一真机证据 —— 单元层没有面板测试网，跑掉了就要在映射表里标未验。
 
 - [ ] **Step 5: 收口前写 `spec-plan-mapping.md` 双向映射表**
 
