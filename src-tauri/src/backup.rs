@@ -20,7 +20,7 @@ pub const MANIFEST_ENTRY: &str = "manifest.json";
 /// D6 的代价不粉饰：库里只封四列 `*_cipher`，其余全是明文列，一个没加密的包 ≈ 一份内网入口清单。
 /// 界面念的是这一句，manifest 里存的也是这一句 —— 一份文本，两处出（别抄两遍再漂）。
 pub fn warn_plaintext_columns() -> &'static str {
-    "包内非 *_cipher 列为明文：项目名/编号/负责人/客户/联系人/合同号、服务器 ip 与堡垒机、各类 url、各表 note、待办内容、里程碑备注、日报内容。"
+    "包内非 *_cipher 列为明文：项目名/编号/负责人/客户/联系人/合同号、服务器 ip 与堡垒机、各类 url、各表 note、待办内容、里程碑备注、日报内容、到期事项名称与备注。"
 }
 
 /// manifest 里的一条文件记录 `{name,size,sha256}`：`size`/`sha256` 都打在条目的**原始字节**上。
@@ -659,14 +659,18 @@ mod tests {
         assert!(c.contains_key("ledgerCredentials"), "counts 必须出 camelCase：{:?}", c.keys().collect::<Vec<_>>());
     }
 
-    /// 包里躺着什么明文，这句必须念全 —— M9 加了两张明文表，漏念就是「用户以为没泄露」。
+    /// 包里躺着什么明文，这句必须念全 —— M9 加了两张明文表、M10 加了日报、M11-a 加了到期事项。
+    /// 这条是**文本门性质**的行为断言：判据本体（哪些列真明文）在 V7 的 DDL 与 `expiry::SELECT_COLUMNS` 里。
     #[test]
-    fn plaintext_warning_names_the_two_m9_tables() {
+    fn plaintext_warning_names_every_plain_text_table_since_m9() {
         let warn = warn_plaintext_columns();
         assert!(warn.contains("待办内容"), "漏了待办的明文列：{warn}");
         assert!(warn.contains("里程碑备注"), "漏了里程碑的明文列：{warn}");
-        // M10 的第三张：`daily_reports.content` 既随整库快照进包，又因 D4 进全局搜索结果页（spec §九.2）。
+        // M10 的第三张：`daily_reports.content` 既随整库快照进包，又因 D4 进全局搜索结果页（M10 spec §九.2）。
         assert!(warn.contains("日报内容"), "漏了日报的明文列：{warn}");
+        // M11-a 的第四张（spec §九.6）：到期事项的名称与备注都是明文，且**都进全局检索**（D6）。
+        // M10 那次是这句话没被分配到任何一格任务，于是九次任务评审结构性看不见它 —— 本轮它是一格的必改文件。
+        assert!(warn.contains("到期事项"), "漏了到期事项的明文列：{warn}");
     }
 
     /// 计数从库里现数，且必须与 V2/V3 建的表**逐张对上**。
