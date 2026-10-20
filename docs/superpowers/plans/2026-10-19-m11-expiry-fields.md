@@ -1452,14 +1452,15 @@ export function ExpiryPanel({ projectId }: { projectId: string }) {
 
   const today = localToday();
   // 与预警块**同一份**判据与同一个窗口（`horizonOf("expiry")` = 30 天）：面板自己不许再写一份日期比较。
-  const stateOf = (date: string): DueState | null => dueStateOf(date, today, horizonOf("expiry"))?.state ?? null;
+  const stateOf = (date: string): { state: DueState; days: number } | null =>
+    dueStateOf(date, today, horizonOf("expiry"));
 
   return (
     <div>
       <div className="mb-1 flex items-center justify-between">
         <h2 className="text-sm font-medium">到期事项</h2>
         <span className="text-xs text-muted-foreground">
-          种类固定四类（维保/域名/证书/其他）；续期就改日期，不再生效就删掉。徽标与预警块同判据：红=已逾期，描边=今天起 30 天内
+          种类固定四类（维保/域名/证书/其他）；续期就改日期，不再生效就删掉。天数徽标与预警块同判据同两档色：红=已逾期，描边=今天起 30 天内
         </span>
       </div>
 
@@ -1522,8 +1523,22 @@ export function ExpiryPanel({ projectId }: { projectId: string }) {
         const editing = editingId === e.id;
         return (
           <div key={e.id} className="flex flex-wrap items-center gap-2 border-b px-1 py-2 last:border-b-0">
-            <Badge variant={hit === "overdue" ? "destructive" : hit === "soon" ? "outline" : "secondary"}>
-              {e.kind}
+            <Badge variant="secondary">{e.kind}</Badge>
+            {/* 第二枚徽标念「距今多少天」（spec §七），两档色沿用预警块那一份写法（`todos.tsx` 行里同一串：
+                逾期红、今天与 30 天内描边）。`hit === null` 只可能是库里躺着非 YYYY-MM-DD 的历史值 ——
+                后端的 `req_date` 只挡新写入，整库快照导入进来的旧包不重过这道门，所以给它第三档、不染红不描边。 */}
+            <Badge
+              variant={
+                hit?.state === "overdue" ? "destructive" : hit?.state === "soon" ? "outline" : "secondary"
+              }
+            >
+              {hit === null
+                ? "形状未知"
+                : hit.state === "overdue"
+                  ? `逾期 ${-hit.days} 天`
+                  : hit.days === 0
+                    ? "今天"
+                    : `${hit.days} 天后`}
             </Badge>
             <span className="min-w-0 flex-1 truncate text-sm" title={e.label}>
               {e.label}
