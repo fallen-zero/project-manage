@@ -111,7 +111,7 @@ pub struct ExpiryUpdate { expire_date: Option<String>, note: Option<String> }   
 
 ## 八、检索第 9 条与备份那句明文告警
 
-- **检索**：新增一条 `collect("expiry", …)`。`SELECT` 七列按 `collect` 现形对齐：`id`、`project_id`、`project_name`、`title = e.label`，detail 的 bits 给 `e.kind` 与 `e.expire_date` 与 `e.note`；`WHERE` **只在 `e.label` 与 `e.note` 上做 LIKE** —— **日期不参与匹配**（否则搜「10」能捞出一堆命中，那是噪声不是结果）；软删门 `p.deleted_at IS NULL` 与 `e.deleted_at IS NULL` 两道都要。
+- **检索**：新增一条 `collect("expiry", …)`。`SELECT` 七列按 `collect` 现形对齐：`id`、`project_id`、`project_name`、`title = e.label`，detail 的 bits 给 `e.kind` 与 `e.expire_date` 与 `SUBSTR(e.note, 1, 80)`（截断不是新发明：`note` 长度无上限，仓内两条先例对长自由文本一律截 80 再进副标题 —— `search.rs` 的 `SUBSTR(n.body, 1, 80)` 与 `SUBSTR(d.content, 1, 80)`；不截则结果页一行能被备注撑成整段，也不截则「靠备注命中」那行没有任何自动化守得住内容）；`WHERE` **只在 `e.label` 与 `e.note` 上做 LIKE** —— **日期不参与匹配**（否则搜「10」能捞出一堆命中，那是噪声不是结果）；软删门 `p.deleted_at IS NULL` 与 `e.deleted_at IS NULL` 两道都要。
 - **备份那句明文告警必须改**（这是 M10 终审 I1 的**同一格**）：[src-tauri/src/backup.rs:23](../../../src-tauri/src/backup.rs) 现在结尾是「…待办内容、里程碑备注、日报内容。」，本轮补「到期事项名称与备注」。M10 那次是九格里没有任何一格分配到这句话，所以九次任务级评审结构性看不见它 ⇒ **本轮把它写成一条不变量（§九.6）并钉进某一格的必改文件清单与验收格（§十.14）**，不再靠运气。
 - `backup::Counts` 七字段**不进**新表条数（沿用 M9 D9 与 M10 缩量二：旧包没这项、补默认值只能显示 `0`，而「这个包里有 0 条到期事项」对一份装着到期事项的旧包是句假话）。
 

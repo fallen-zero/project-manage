@@ -860,6 +860,13 @@ git push origin feat/m11-expiry-fields
 
         let by_note = only_hit(&conn, "信息中心审批", "expiry", "oa-gateway.gov.cn");
         assert_eq!(by_note.title, "oa-gateway.gov.cn", "备注命中出来的还是这一行");
+        // 第三条 detail bit 是 `SUBSTR(e.note, 1, 80)`（spec §八）。少了它，「靠备注命中」和
+        // 「靠名称命中」两行在结果页渲染成逐字相同的行，用户看不出命中的是哪一列。
+        assert!(
+            by_note.detail.contains("信息中心审批"),
+            "靠备注命中时副标题要念得出备注：{}",
+            by_note.detail
+        );
 
         // 日期列不进匹配：单独搜日期片段必须一条台账命中也没有（正文段是另一条通路，本夹具里没有正文）。
         assert!(
@@ -899,7 +906,18 @@ git push origin feat/m11-expiry-fields
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM project_expiries", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 1, "行留在库里，恢复项目即原样可搜");
+        assert_eq!(n, 1, "软删项目只挡住读，行本身留在库里");
+
+        // 把项目恢复回活状态再搜一次：这一句才是上面那句断言里「恢复项目即原样可搜」的兑现点，
+        // 一次同时钉住两件事 —— 库里的行是活的（不是被连带软删了）、`p.deleted_at IS NULL`
+        // 那道门是可逆的（不是把行读没了）。
+        conn.execute("UPDATE projects SET deleted_at = NULL WHERE id = ?1", [&pid])
+            .unwrap();
+        assert_eq!(
+            sources(&field_hits(&conn, "tls-wildcard").unwrap()),
+            vec!["expiry"],
+            "恢复项目后到期事项要原样搜得到"
+        );
     }
 ```
 
@@ -913,9 +931,13 @@ Expected：`exit=101`，两条都红（`assert_eq!(sources(...), vec!["expiry"])
 ```rust
     // 到期事项：搜名称与备注两列（spec D6 / §八）。**日期列不进 WHERE** —— 搜「10」「2027」这种
     // 短串会把一堆到期日捞成命中，那是噪声；日期只进副标题的 bit。种类也只进副标题。
+    // 第三个 bit 用 `SUBSTR(e.note, 1, 80)` 而不是裸 `e.note`：`note` 长度无上限，仓内两格先例
+    // （上面 note 那条的 `SUBSTR(n.body, 1, 80)`、daily 那条的 `SUBSTR(d.content, 1, 80)`）对长
+    // 自由文本一律截 80 再进副标题，否则结果页一行能被备注撑成整段。
     hits.append(&mut collect(
         "expiry",
-        "SELECT e.id, e.project_id, p.name, e.label, e.kind, e.expire_date, NULL
+        "SELECT e.id, e.project_id, p.name, e.label, e.kind, e.expire_date,
+                SUBSTR(e.note, 1, 80)
            FROM project_expiries e
            JOIN projects p ON p.id = e.project_id AND p.deleted_at IS NULL
           WHERE e.deleted_at IS NULL
@@ -1835,6 +1857,7 @@ Expected：`git status` 干净（除了那颗永不动的 `?? Python/`）；若 
 - Modify: `docs/开发进度.md`（里程碑表加 M11-a 行、「## M11-a 验收证据」一节、变更日志一条、「没能自动验证」清单）
 - Modify: `docs/HANDOFF.md`（快照头、§0 加 M11-a bullet、§3 卡点与下一格、§4-A 那串命令的期望数、§6 指针表补三行、必要时新增一条坑）
 - Modify: `docs/superpowers/specs/2026-10-14-m9-todos-milestones-design.md`（**顶部加一行指针**，§一 对照表与 §十一 原文不动 —— 沿用 M10 对 M9 的处理法）
+- Modify: `src-tauri/src/expiry.rs`（模块头那句前向引用已经兑现、时态要改准 —— Task 3 评审 Minor-2，见 Step 4b；纯注释，行为零改动）
 
 **Interfaces:**
 - Consumes：Task 8 的终态读数与映射表。
@@ -1872,6 +1895,20 @@ project_expiries    到期事项（M11-a 新增，V7）：id / project_id→proj
 > **后续指针（2026-10-19）**：本文 §一 对照表与 §十一 里推给 M11 的「维保 / 域名 / 证书三类到期字段」已由 M11-a 兑现（`docs/superpowers/specs/2026-10-19-m11-expiry-fields-design.md`）。本文正文**不 retro-edit**，欠账的结算记在 M11-a spec §一 与本行。
 ```
 
+- [ ] **Step 4b: `src-tauri/src/expiry.rs` 模块头那句前向引用改准（Task 3 评审 Minor-2）**
+
+`src-tauri/src/expiry.rs` 第 4 行现在写的是「检索侧的第二处由 Task 3 那条 collect 落，届时两处各自有守卫测试」—— Task 3 已交付，这句仍是将来时 = 假话（M10 终审 I1 同族：写在计划里却没被分配到任何一格的句子）。整句换成现在时并给出可 grep 的落点：
+
+```rust
+//! `p.deleted_at IS NULL` 在本表这一处（检索侧的第二处已在 `search.rs` 的到期事项那条 collect 落，
+//! 两处各自有守卫测试：本文件 cross_project_list_hides_expiries_of_a_soft_deleted_project 与
+//! search.rs 的 soft_deleted_project_hides_expiry_hits）。
+```
+
+> 注释里别写字面量 `collect("expiry", …)` 的完整形态：`grep -c 'hits.append(&mut collect('` 是原始计数门（坑 42）。上面这行拆成「到期事项那条 collect」就是为它。
+
+改完复跑 `cd src-tauri && cargo test -j 1 --lib > /tmp/t9.log 2>&1; echo "exit=$?"; grep -E "^test result" /tmp/t9.log`（期望终态读数不变）与 `cargo clippy --all-targets --all-features -- -D warnings`（`exit=0`）。
+
 - [ ] **Step 5: 文档级复跑与提交**
 
 文档改动不动行为，但按本仓规矩复跑受影响的结构门（grep 类）一次并记录：
@@ -1883,8 +1920,8 @@ grep -rn "八段 SQL\|八条同形状" docs/*.md | wc -l
 Expected：前者 ≥1；后者 **0**（活文档里的旧条数要一起改准；历史规格文档里的基线句不 retro-edit，所以这里的 0 只统计 `docs/*.md` 这一层）。
 
 ```bash
-git add docs/技术方案.md docs/开发进度.md docs/HANDOFF.md docs/superpowers/specs/2026-10-14-m9-todos-milestones-design.md
-git commit -m "docs(m11-a): 活文档回写 —— 技术方案补 V7 与九段 SQL、开发进度加 M11-a 验收证据与没验清单、HANDOFF §0/§3/§4-A/§6 换成 64·7·7·1·616 终态并把下一格改成 M11-b、M9 spec 顶部加结算指针"
+git add docs/技术方案.md docs/开发进度.md docs/HANDOFF.md docs/superpowers/specs/2026-10-14-m9-todos-milestones-design.md src-tauri/src/expiry.rs
+git commit -m "docs(m11-a): 活文档回写 —— 技术方案补 V7 与九段 SQL、开发进度加 M11-a 验收证据与没验清单、HANDOFF §0/§3/§4-A/§6 换成 64·7·7·1·616 终态并把下一格改成 M11-b、M9 spec 顶部加结算指针、expiry.rs 模块头前向引用改准"
 git push origin feat/m11-expiry-fields
 ```
 
