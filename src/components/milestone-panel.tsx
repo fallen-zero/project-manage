@@ -62,7 +62,7 @@ export function MilestonePanel({ projectId }: { projectId: string }) {
 
   // 与预警块**同一份**单行判据（终审 I2 抽成 `dueStateOf` 之前这里是第二份实现：字符串比较 + 自己的 shiftDate，
   // 把 `<` 写成 `<=` 谁也不会红）。面板手里只有本项目的里程碑，所以只判「这一行自己」是不是命中，
-  // 不去跑三来源汇总 —— 共享的是判据本身，不是汇总。
+  // 不去跑整份预警汇总 —— 共享的是判据本身，不是汇总。
   const today = localToday();
   const stateOf = (m: Milestone): DueState | null => {
     if (m.done || m.planDate === null) return null;

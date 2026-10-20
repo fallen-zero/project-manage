@@ -1,9 +1,10 @@
 //! 到期事项：维保 / 域名 / 证书 / 其他 四操作（M11-a spec §五、§六）。
 //!
 //! 形制整段照 `milestone.rs`（M9 Task 3）：一条 `list` SQL 同时管「跨项目全部」与「按项目筛」，
-//! `p.deleted_at IS NULL` 在本表这一处（检索侧的第二处已在 `search.rs` 的到期事项那条 collect 落，
-//! 两处各自有守卫测试：本文件 cross_project_list_hides_expiries_of_a_soft_deleted_project 与
-//! search.rs 的 soft_deleted_project_hides_expiry_hits）。
+//! `p.deleted_at IS NULL` 在到期事项的读路径上落**三处**（spec §九.3）：本文件的 `list` 与 `get`、
+//! 以及 `search.rs` 的到期事项那条 collect；三处各自有守卫测试 —— 本文件
+//! cross_project_list_hides_expiries_of_a_soft_deleted_project 同时钉 `list` 与 `get`，
+//! search.rs 的 soft_deleted_project_hides_expiry_hits 钉那条 collect。
 //! 日期形状判据复用 `todo::req_date`（必填日期**不能**走 `norm_date`：它把空白折成 NULL，
 //! 而 NULL 进 `expire_date NOT NULL` 会由 SQLite 冒成 `db_failed`，用户看到的是「数据库操作失败」
 //! 而不是「你的日期没填」—— M10 为 `report_date` 立的同一条理由）。
@@ -114,7 +115,10 @@ pub fn list(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<Expiry
 
 pub fn get(conn: &Connection, id: &str) -> AppResult<Expiry> {
     let sql = format!(
-        "SELECT {SELECT_COLUMNS} FROM project_expiries e WHERE e.id = ?1 AND e.deleted_at IS NULL"
+        "SELECT {SELECT_COLUMNS}
+           FROM project_expiries e
+           JOIN projects p ON p.id = e.project_id AND p.deleted_at IS NULL
+          WHERE e.id = ?1 AND e.deleted_at IS NULL"
     );
     conn.query_row(&sql, [id], map_expiry)
         .optional()?
@@ -222,6 +226,18 @@ mod tests {
         for bad in ["备案", "订阅", "维保中", "上线", ""] {
             let err = create(&conn, &input("p1", bad, "一行", Some("2027-01-31"), None)).unwrap_err();
             assert_eq!(err.code, "invalid_input", "「{bad}」要的是应用层那句，不是 db_failed");
+            assert!(err.message.contains("种类"), "错误文本要点名「种类」：{}", err.message);
+        }
+        // spec §五/§十.4：错误文本还要**列出四个合法值**、各出现一次。挑「备案」测而不是
+        // 「维保中」—— 后者在「种类「维保中」」里也含「维保」，会把计数抬成 2。
+        let err = create(&conn, &input("p1", "备案", "一行", Some("2027-01-31"), None)).unwrap_err();
+        for good in KINDS {
+            assert_eq!(
+                err.message.matches(good).count(),
+                1,
+                "合法值「{good}」要恰好列一次：{}",
+                err.message
+            );
         }
         for good in KINDS {
             create(&conn, &input("p1", good, "一行", Some("2027-01-31"), None)).unwrap();
@@ -330,6 +346,11 @@ mod tests {
 
         let labels: Vec<String> = list(&conn, None).unwrap().into_iter().map(|e| e.label).collect();
         assert_eq!(labels, vec!["a.gov.cn"], "软删项目的到期事项不能进跨项目列表（预警就是这条查询）");
+        assert_eq!(
+            get(&conn, &dead.id).unwrap_err().code,
+            "not_found",
+            "软删项目的行单条 get 也不许读出来（spec §九.3 的第三处）"
+        );
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM project_expiries WHERE id = ?1", [&dead.id], |r| r.get(0))
             .unwrap();

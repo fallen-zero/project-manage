@@ -71,7 +71,7 @@ CREATE INDEX ix_expiry_project ON project_expiries(project_id);
 | `label` 非空 | `expiry::create`/`update` 里用既有 `norm` | `invalid_input` | 点名「名称」 |
 | `expire_date` 形状与必填 | 复用 `todo::req_date`，列名传「到期日期」 | `invalid_input` | 含 `YYYY-MM-DD` 示例与非空要求 |
 | 行不存在 / 已软删 | `expiry::get` 那一路 | `not_found` | 沿用 `todo`/`milestone` 现文本 |
-| 项目不存在或已软删 | `project_exists` 既有那道 | `invalid_input` | 沿用现文本 |
+| 项目不存在或已软删 | `project_exists` 既有那道 | `not_found` | 沿用现文本（2026-10-20 终审 N4 订正：既有三个模块的 project_exists 一律 not_found） |
 
 - **不新开错误码**：只用 `invalid_input` / `not_found`（M10 §八 那份五码表不扩）。
 - **SQL 里零日期比较**：30 天、7 天、逾期与否全在前端纯函数（M9 D7 / M10 D9 那条不变量，本轮续着）。
