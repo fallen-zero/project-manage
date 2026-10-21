@@ -9,6 +9,7 @@ mod index_job;
 mod index_scan;
 mod index_store;
 mod ledger;
+pub mod ledger_export;
 mod legacy_office;
 mod milestone;
 mod ocr;
