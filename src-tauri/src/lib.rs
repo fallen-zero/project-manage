@@ -9,7 +9,7 @@ mod index_job;
 mod index_scan;
 mod index_store;
 mod ledger;
-pub mod ledger_export;
+mod ledger_export;
 mod legacy_office;
 mod milestone;
 mod ocr;
@@ -24,7 +24,7 @@ mod watch;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
 use crate::daily_report::{DailyReport, DailyReportEdit, DailyReportInput, ExportRow, ImportOutcome, ImportPreview};
@@ -788,6 +788,36 @@ fn expiry_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
     expiry::delete(&conn, &id)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LedgerExportInput {
+    project_id: String,
+    format: String,
+    include_secrets: bool,
+    path: String,
+}
+
+/// 台账导出（M11-b spec D5/D7）：**先守卫、再取数、最后写盘**。
+/// 顺序是承重的 —— `Write`/`File::create` 会 CREATE_ALWAYS 截断，落点指进数据目录会毁掉用户唯一的库。
+/// `include_secrets` 为假时**不碰 `unlocked_mk`**：默认路径不导明文，锁着也能导（spec D3）。
+#[tauri::command]
+fn ledger_export(
+    state: State<'_, AppState>,
+    input: LedgerExportInput,
+) -> AppResult<ledger_export::LedgerExportSummary> {
+    ledger_export::format_of(&input.format)?;
+    backup::guard_destination(&state.data_dir, std::path::Path::new(&input.path))?;
+    let mk_guard = if input.include_secrets {
+        Some(unlocked_mk(&state)?)
+    } else {
+        None
+    };
+    let mk = mk_guard.as_ref().and_then(|g| g.as_ref());
+    let conn = db(&state)?;
+    let doc = ledger_export::collect(&conn, mk, &input.project_id)?;
+    ledger_export::write(&input.path, &input.format, &doc)
+}
+
 /// 日报四条命令（M10 Task 2，形制照 `todo_*`）：同步、函数体不写 await 点。
 /// `db(&state)?` 取回的 `MutexGuard` 不是 `Send`，**在 async fn 里让它横跨 await 点**才编不过（M8 D11）。
 /// 只挂 async 属性、函数体照常同步是合法的 —— `backup_import` 与 `doc_preview` 就是这个形态，
@@ -976,7 +1006,8 @@ pub fn run() {
             expiry_list,
             expiry_create,
             expiry_update,
-            expiry_delete
+            expiry_delete,
+            ledger_export
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
@@ -1111,6 +1142,25 @@ mod tests {
             guard_at < write_at,
             "守卫必须早于任何写盘：本函数里守卫在第 {guard_at} 字节、写盘在第 {write_at} 字节"
         );
+    }
+
+    /// M11-b Task 5：`ledger_export` 里「先守卫、再取数、最后写盘」这条接线的落点（spec §六 / D7）。
+    /// 判据本体在 `backup::guard_destination`（M8 坑 31），这里只钉命令层**恰好调用一次**且**早于写盘**；
+    /// 照上面 `backup_export_wires_the_guard_before_any_write` 的同一形制（`include_str!` 读本文件）。
+    /// needle 一律 `concat!` 拼：写成字面量会把本测试自己数进去（与 `backup_export` 那条同款坑）。
+    #[test]
+    fn ledger_export_wires_the_guard_before_any_write() {
+        let src = include_str!("lib.rs");
+        let start = src
+            .find(concat!("fn ledger_", "export("))
+            .expect("ledger_export 必须还在 lib.rs 里");
+        let body = &src[start..start + src[start..].find("\n}").expect("函数体收尾")];
+        let guard = concat!("backup::guard_", "destination(");
+        let write = concat!("ledger_export::", "write(");
+        assert_eq!(body.matches(guard).count(), 1, "命令层必须恰好调用一次落点守卫");
+        let guard_at = body.find(guard).expect("守卫调用不见了");
+        let write_at = body.find(write).expect("写盘调用不见了");
+        assert!(guard_at < write_at, "守卫必须早于写盘：守卫在 {guard_at}、写盘在 {write_at}");
     }
 
     /// 五个阶段词在三个地方各存一份（V5 的 CHECK、`milestone.rs` 的 `STAGES`、

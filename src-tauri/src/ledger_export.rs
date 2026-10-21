@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension};
+use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
 use crate::ledger::ENV_ORDER_SQL;
@@ -41,6 +42,16 @@ pub struct ExportDoc {
     pub generated_at: String,
     pub included_secrets: bool,
     pub sheets: Vec<Sheet>,
+}
+
+/// IPC 回执（spec §四）：`sheets` 恒 5、`rows` 是五表行数合计，供界面念「5 张表 / 共 N 行」。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LedgerExportSummary {
+    pub path: String,
+    pub sheets: usize,
+    pub rows: usize,
+    pub included_secrets: bool,
 }
 
 /// 五张表的固定顺序与名字（spec §三）。xlsx 的工作表名与 Markdown 的小节名共用这一份。
@@ -392,6 +403,24 @@ pub fn write_markdown(path: &Path, doc: &ExportDoc) -> AppResult<()> {
         out.push('\n');
     }
     std::fs::write(path, out).map_err(|e| AppError::io(path, &e))
+}
+
+/// 按 `format` 分派到两个渲染器，并回执（spec §四）。**这里不判落点**：落点守卫在命令层、
+/// 且早于本函数（spec §六：判据只在命令层落一次）。`format_of` 在这里再校一次是给公开入口
+/// 自带边界 —— 命令层先校验是为了「格式不合法时连数据目录都不碰」，两层判据同一份。
+pub fn write(path: &str, format: &str, doc: &ExportDoc) -> AppResult<LedgerExportSummary> {
+    format_of(format)?;
+    let target = Path::new(path);
+    match format {
+        "xlsx" => write_xlsx(target, doc)?,
+        _ => write_markdown(target, doc)?,
+    }
+    Ok(LedgerExportSummary {
+        path: path.to_owned(),
+        sheets: doc.sheets.len(),
+        rows: doc.sheets.iter().map(|s| s.rows.len()).sum(),
+        included_secrets: doc.included_secrets,
+    })
 }
 
 #[cfg(test)]
@@ -858,6 +887,15 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("- 含明文：是"), "含明文路径要在文件内回显「含明文：是」");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn format_of_accepts_only_xlsx_and_md() {
+        assert!(format_of("xlsx").is_ok());
+        assert!(format_of("md").is_ok());
+        let err = format_of("csv").unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("xlsx") && err.message.contains("md"), "点名两个合法值：{}", err.message);
     }
 
     #[test]
