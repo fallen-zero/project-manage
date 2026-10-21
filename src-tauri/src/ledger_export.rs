@@ -18,9 +18,9 @@ fn not_found(id: &str) -> AppError {
     AppError::new("not_found", &format!("记录不存在：{id}"), Some("刷新后重试"))
 }
 
-// 两个渲染器（Task 3/4）落地前本模块整体是 pub 的，故这里先取同样可见性：
-// 等 `write` 命令接上、渲染器真的调用它之后可以收回 `fn`。
-pub fn write_fail(path: &Path, e: impl std::fmt::Display) -> AppError {
+/// 写盘失败按文件域报（spec §五）：码与文案对齐 `daily_report::write_fail`（`fs_failed` + 可操作 hint）。
+/// 两个渲染器共用，模块内私有。
+fn write_fail(path: &Path, e: impl std::fmt::Display) -> AppError {
     AppError::new(
         "fs_failed",
         &format!("写 {} 失败：{e}", path.display()),
@@ -284,6 +284,35 @@ fn collect_notes(conn: &Connection, project_id: &str) -> AppResult<Vec<Vec<Strin
         out.push(row?);
     }
     Ok(out)
+}
+
+/// 把 `ExportDoc` 写成单文件五工作表的 `.xlsx`：表头加粗、首行冻结、正文换行保留（spec D2/D6）。
+/// 表名与列头一律取 `doc.sheets`（源头是 `SHEET_NAMES` / `*_HEADERS`），渲染器不另抄一份名字。
+pub fn write_xlsx(path: &Path, doc: &ExportDoc) -> AppResult<()> {
+    use rust_xlsxwriter::{Format, Workbook};
+
+    let mut wb = Workbook::new();
+    let bold = Format::new().set_bold();
+    // 「备注」的正文带换行；只有 wrap 格式才会让 Excel 把 `\n` 显示成多行，值本身原样写进单元格。
+    let wrap = Format::new().set_text_wrap();
+    for sheet in &doc.sheets {
+        let ws = wb.add_worksheet();
+        ws.set_name(sheet.name).map_err(|e| write_fail(path, e))?;
+        ws.set_freeze_panes(1, 0).map_err(|e| write_fail(path, e))?;
+        for (col, head) in sheet.headers.iter().enumerate() {
+            ws.write_with_format(0, col as u16, *head, &bold)
+                .map_err(|e| write_fail(path, e))?;
+        }
+        for (i, row) in sheet.rows.iter().enumerate() {
+            let r = (i + 1) as u32;
+            for (col, cell) in row.iter().enumerate() {
+                ws.write_with_format(r, col as u16, cell.as_str(), &wrap)
+                    .map_err(|e| write_fail(path, e))?;
+            }
+        }
+    }
+    wb.save(path).map_err(|e| write_fail(path, e))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -623,5 +652,58 @@ mod tests {
         .unwrap();
         let err = collect(&conn, Some(&mk), &pid).unwrap_err();
         assert_eq!(err.code, "field_decrypt_failed", "密文坏掉要整份失败，不许静默导出半份");
+    }
+
+    fn read_sheets(path: &std::path::Path) -> Vec<(String, Vec<Vec<String>>)> {
+        use calamine::Reader as _;
+        let mut book = calamine::open_workbook_auto(path).unwrap();
+        let names = book.sheet_names().to_vec();
+        names
+            .into_iter()
+            .map(|n| {
+                let range = book.worksheet_range(&n).unwrap();
+                let rows = range
+                    .rows()
+                    .map(|r| r.iter().map(|c| c.to_string()).collect::<Vec<String>>())
+                    .collect::<Vec<Vec<String>>>();
+                (n, rows)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn write_xlsx_emits_five_worksheets_with_headers_and_multiline_note() {
+        let (conn, pid) = fixture();
+        ledger::create_note(&conn, &pid, &ledger::NoteInput {
+            title: "上线步骤".to_owned(),
+            body: Some("第一步\n第二步".to_owned()),
+            tag: Some("运维".to_owned()),
+        })
+        .unwrap();
+        let doc = collect(&conn, None, &pid).unwrap();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("m11b-xlsx-{}.xlsx", std::process::id()));
+        write_xlsx(&path, &doc).unwrap();
+        let sheets = read_sheets(&path);
+        let names: Vec<String> = sheets.iter().map(|(n, _)| n.clone()).collect();
+        assert_eq!(names, vec!["环境", "凭据", "服务器", "链接", "备注"]);
+        assert_eq!(sheets[3].1[0], vec!["类型", "标题", "地址", "备注"], "表头逐字是契约");
+        let note = &sheets[4].1[1];
+        assert_eq!(note[0], "上线步骤");
+        assert!(note[2].contains("第一步") && note[2].contains("第二步"), "多行正文要连换行一起写进单元格");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn write_xlsx_with_zero_rows_still_writes_headers() {
+        let (conn, pid) = fixture();
+        let doc = collect(&conn, None, &pid).unwrap();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("m11b-xlsx-empty-{}.xlsx", std::process::id()));
+        write_xlsx(&path, &doc).unwrap();
+        let sheets = read_sheets(&path);
+        assert_eq!(sheets.len(), 5);
+        assert_eq!(sheets[0].1.len(), 1, "零行也要有表头一行");
+        std::fs::remove_file(&path).ok();
     }
 }
