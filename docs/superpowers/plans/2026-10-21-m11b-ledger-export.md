@@ -138,6 +138,8 @@ Expected：`exit=101`，报 `cannot find function collect` / `cannot find value 
 
 - [ ] **Step 3: 写最小实现（行模型 + 默认取数）**
 
+> **执行期偏差（Task 1 修复轮 1）**：四张非环境表的排序在代码里补成了 `created_at, id`（同秒可复现），环境那段 `CASE env …` 抽成了 `ledger.rs` 的 `pub(crate) const ENV_ORDER_SQL` 并在 `ledger::list` 与导出两处共用。**下面代码块是初版**，以仓库实现与 spec §三 为准。
+
 ```rust
 //! 台账导出（M11-b spec）：把五张台账表摊成「导出行模型」，再由两个渲染器写成 xlsx / Markdown。
 //!
