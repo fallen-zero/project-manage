@@ -80,6 +80,7 @@ pub struct LedgerExportSummary { pub path: String, pub sheets: usize, pub rows: 
 | 项目不存在或已软删 | `not_found` | 沿用现文本 |
 | 解密失败 | `field_decrypt_failed` | 「该字段无法解密」+ 既有 hint |
 | 目录不存在 / 无写权限 | `fs_failed` | 沿用 `daily_report::write_fail` 那条（`fs_failed`，消息带 OS 原因 + hint「确认该路径存在且可读写」；`error.rs:21` 的 `AppError::io` 同码） |
+| **某个单元格超过 Excel 的 32767 字符上限**（`rust_xlsxwriter` 会报 `MaxStringLengthExceeded`） | `invalid_input` | **写盘前**先查长度并点名「哪张表第几行太长」+ 给一条出路：「改用 Markdown 导出（没有这个上限）」；**不静默截断**（台账被悄悄截掉一段比失败更糟），也不把它落成 `fs_failed`（那个 hint 指错方向） |
 | 取消保存对话框 | ——（前端不 invoke） | 什么都不发生 |
 
 **不新开错误码**：`invalid_input` / `not_found` / `backup_destination_unsafe` / `field_decrypt_failed` / `fs_failed` 五支已够（五支都是树里现成的；`fs_failed` 出自 `error.rs:21` 与 `daily_report::write_fail`）。
