@@ -7,6 +7,7 @@ use std::path::Path;
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::error::{AppError, AppResult};
+use crate::ledger::ENV_ORDER_SQL;
 use crate::vault::MasterKey;
 
 fn invalid(msg: &str) -> AppError {
@@ -91,12 +92,13 @@ pub fn collect(conn: &Connection, mk: Option<&MasterKey>, project_id: &str) -> A
 }
 
 fn collect_envs(conn: &Connection, project_id: &str) -> AppResult<Vec<Vec<String>>> {
-    let mut stmt = conn.prepare(
+    // `created_at` 只到秒；`id` 是导出可复现性的兜底（`ledger::list` 的既有顺序不带它，导出层补上）。
+    let mut stmt = conn.prepare(&format!(
         "SELECT env, name, COALESCE(url,''), COALESCE(port,''), COALESCE(note,'')
            FROM ledger_envs
           WHERE project_id = ?1 AND deleted_at IS NULL
-          ORDER BY CASE env WHEN 'dev' THEN 0 WHEN 'test' THEN 1 WHEN 'pre' THEN 2 ELSE 3 END, created_at",
-    )?;
+          ORDER BY {ENV_ORDER_SQL}, created_at, id",
+    ))?;
     let rows = stmt.query_map([project_id], |r| {
         Ok(vec![r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?])
     })?;
@@ -118,7 +120,7 @@ fn collect_credentials(
            FROM ledger_credentials c
            LEFT JOIN ledger_envs e ON e.id = c.env_id
           WHERE c.project_id = ?1 AND c.deleted_at IS NULL
-          ORDER BY c.created_at",
+          ORDER BY c.created_at, c.id",
     )?;
     let rows = stmt.query_map([project_id], |r| {
         Ok(vec![
@@ -146,7 +148,7 @@ fn collect_servers(
         "SELECT name, COALESCE(ip,''), COALESCE(bastion,''), COALESCE(note,'')
            FROM ledger_servers
           WHERE project_id = ?1 AND deleted_at IS NULL
-          ORDER BY created_at",
+          ORDER BY created_at, id",
     )?;
     let rows = stmt.query_map([project_id], |r| {
         Ok(vec![
@@ -170,7 +172,7 @@ fn collect_links(conn: &Connection, project_id: &str) -> AppResult<Vec<Vec<Strin
         "SELECT kind, title, url, COALESCE(note,'')
            FROM ledger_links
           WHERE project_id = ?1 AND deleted_at IS NULL
-          ORDER BY created_at",
+          ORDER BY created_at, id",
     )?;
     let rows = stmt.query_map([project_id], |r| {
         Ok(vec![r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?])
@@ -187,7 +189,7 @@ fn collect_notes(conn: &Connection, project_id: &str) -> AppResult<Vec<Vec<Strin
         "SELECT title, COALESCE(tag,''), body
            FROM ledger_notes
           WHERE project_id = ?1 AND deleted_at IS NULL
-          ORDER BY created_at",
+          ORDER BY created_at, id",
     )?;
     let rows = stmt.query_map([project_id], |r| {
         Ok(vec![r.get(0)?, r.get(1)?, r.get(2)?])
@@ -228,13 +230,101 @@ mod tests {
         (conn, pid)
     }
 
+    /// 在 fixture 之上初始化主密钥（凭据/服务器的密文列需要它）。
+    fn fixture_with_secret() -> (Connection, String, MasterKey) {
+        let (conn, pid) = fixture();
+        let code = crate::vault::generate_recovery_code().unwrap();
+        let mk = crate::vault::initialize(&conn, "主密码-至少八位", &code).unwrap();
+        (conn, pid, mk)
+    }
+
     #[test]
     fn collect_always_returns_five_sheets_in_fixed_order() {
-        let (conn, pid) = fixture();
+        let (conn, pid, mk) = fixture_with_secret();
+        let env = ledger::create_env(&conn, &pid, &ledger::EnvInput {
+            env: "dev".to_owned(),
+            name: "开发环境".to_owned(),
+            url: Some("https://dev.example.gov.cn".to_owned()),
+            port: Some("8080".to_owned()),
+            note: Some("环境备注".to_owned()),
+        })
+        .unwrap();
+        ledger::create_credential(&conn, &mk, &pid, &ledger::CredentialInput {
+            env_id: Some(env.id),
+            title: "数据库密码".to_owned(),
+            username: Some("gov-admin".to_owned()),
+            password: Some("S3cret-值".to_owned()),
+            url: Some("https://db.example.gov.cn".to_owned()),
+            note: Some("凭据备注".to_owned()),
+        })
+        .unwrap();
+        ledger::create_server(&conn, &mk, &pid, &ledger::ServerInput {
+            name: "应用节点".to_owned(),
+            ip: Some("10.0.0.8".to_owned()),
+            bastion: Some("跳板机".to_owned()),
+            account: Some("root".to_owned()),
+            password: Some("P@ss-服务器".to_owned()),
+            note: Some("服务器备注".to_owned()),
+        })
+        .unwrap();
+        ledger::create_link(&conn, &pid, &ledger::LinkInput {
+            kind: "repo".to_owned(),
+            title: "代码仓库".to_owned(),
+            url: "https://git.example.gov.cn".to_owned(),
+            note: Some("链接备注".to_owned()),
+        })
+        .unwrap();
+        ledger::create_note(&conn, &pid, &ledger::NoteInput {
+            title: "上线检查单".to_owned(),
+            body: Some("上线检查单正文".to_owned()),
+            tag: Some("发布".to_owned()),
+        })
+        .unwrap();
+
         let doc = collect(&conn, None, &pid).unwrap();
+
         let names: Vec<&str> = doc.sheets.iter().map(|s| s.name).collect();
-        assert_eq!(names, SHEET_NAMES.to_vec(), "五张表的名字与顺序是线格式契约");
-        assert!(doc.sheets.iter().all(|s| s.rows.is_empty()));
+        assert_eq!(names, ["环境", "凭据", "服务器", "链接", "备注"], "五张表的名字与顺序是线格式契约");
+        let headers: Vec<Vec<&str>> = doc.sheets.iter().map(|s| s.headers.to_vec()).collect();
+        assert_eq!(
+            headers,
+            vec![
+                vec!["环境", "名称", "地址", "端口", "备注"],
+                vec!["标题", "所属环境", "账号", "密码", "地址", "备注"],
+                vec!["名称", "IP", "堡垒机", "账号", "密码", "备注"],
+                vec!["类型", "标题", "地址", "备注"],
+                vec!["标题", "标签", "正文"],
+            ],
+            "五组列头逐字（5/6/6/4/3 列），是线格式契约"
+        );
+        for sheet in &doc.sheets {
+            assert_eq!(sheet.rows.len(), 1, "五张表各有一行种子数据：{}", sheet.name);
+            assert_eq!(
+                sheet.rows[0].len(),
+                sheet.headers.len(),
+                "行宽必须等于列头数：{}",
+                sheet.name
+            );
+        }
+        assert_eq!(
+            doc.sheets[0].rows[0],
+            ["dev", "开发环境", "https://dev.example.gov.cn", "8080", "环境备注"]
+        );
+        assert_eq!(
+            doc.sheets[1].rows[0],
+            ["数据库密码", "开发环境", "", "", "https://db.example.gov.cn", "凭据备注"],
+            "所属环境按 env_id 关联出环境名（LEFT JOIN）；D3 默认账号/密码留空串"
+        );
+        assert_eq!(
+            doc.sheets[2].rows[0],
+            ["应用节点", "10.0.0.8", "跳板机", "", "", "服务器备注"],
+            "D3 默认账号/密码留空串"
+        );
+        assert_eq!(
+            doc.sheets[3].rows[0],
+            ["repo", "代码仓库", "https://git.example.gov.cn", "链接备注"]
+        );
+        assert_eq!(doc.sheets[4].rows[0], ["上线检查单", "发布", "上线检查单正文"]);
         assert!(!doc.included_secrets, "默认路径不算含明文");
         assert_eq!(doc.project_name, "政务云迁移");
     }
@@ -259,17 +349,56 @@ mod tests {
 
     #[test]
     fn collect_skips_soft_deleted_rows() {
-        let (conn, pid) = fixture();
+        let (conn, pid, mk) = fixture_with_secret();
         let env = ledger::create_env(&conn, &pid, &ledger::EnvInput {
             env: "dev".to_owned(),
-            name: "要删的".to_owned(),
+            name: "要删的环境".to_owned(),
             url: None,
             port: None,
             note: None,
         })
         .unwrap();
+        let cred = ledger::create_credential(&conn, &mk, &pid, &ledger::CredentialInput {
+            env_id: Some(env.id.clone()),
+            title: "要删的凭据".to_owned(),
+            username: None,
+            password: None,
+            url: None,
+            note: None,
+        })
+        .unwrap();
+        let server = ledger::create_server(&conn, &mk, &pid, &ledger::ServerInput {
+            name: "要删的服务器".to_owned(),
+            ip: None,
+            bastion: None,
+            account: None,
+            password: None,
+            note: None,
+        })
+        .unwrap();
+        let link = ledger::create_link(&conn, &pid, &ledger::LinkInput {
+            kind: "other".to_owned(),
+            title: "要删的链接".to_owned(),
+            url: "https://example.gov.cn".to_owned(),
+            note: None,
+        })
+        .unwrap();
+        let note = ledger::create_note(&conn, &pid, &ledger::NoteInput {
+            title: "要删的备注".to_owned(),
+            body: None,
+            tag: None,
+        })
+        .unwrap();
+
         ledger::delete_env(&conn, &env.id).unwrap();
+        ledger::delete_credential(&conn, &cred.id).unwrap();
+        ledger::delete_server(&conn, &server.id).unwrap();
+        ledger::delete_link(&conn, &link.id).unwrap();
+        ledger::delete_note(&conn, &note.id).unwrap();
+
         let doc = collect(&conn, None, &pid).unwrap();
-        assert!(doc.sheets[0].rows.is_empty(), "软删行不导（D4）");
+        for sheet in &doc.sheets {
+            assert!(sheet.rows.is_empty(), "软删行不导（D4）：{}", sheet.name);
+        }
     }
 }

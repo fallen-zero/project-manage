@@ -12,6 +12,11 @@ use crate::vault::{self, MasterKey};
 
 const ENVS: [&str; 4] = ["dev", "test", "pre", "prod"];
 
+/// 环境的展示顺序（dev→test→pre→prod）。**唯一一处**：台账列表与台账导出共用它，
+/// 别再各抄一遍 —— 两处漂开的症状是「界面上 dev 在第一个、导出的文件里不是」。
+pub(crate) const ENV_ORDER_SQL: &str =
+    "CASE env WHEN 'dev' THEN 0 WHEN 'test' THEN 1 WHEN 'pre' THEN 2 ELSE 3 END";
+
 fn invalid(msg: &str) -> AppError {
     AppError::new("invalid_input", msg, Some("检查表单必填项"))
 }
@@ -229,10 +234,10 @@ fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
 
 pub fn list(conn: &Connection, project_id: &str) -> AppResult<Ledger> {
     let mut envs = Vec::new();
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, env, name, url, port, note FROM ledger_envs
-         WHERE project_id = ?1 AND deleted_at IS NULL ORDER BY CASE env WHEN 'dev' THEN 0 WHEN 'test' THEN 1 WHEN 'pre' THEN 2 ELSE 3 END",
-    )?;
+         WHERE project_id = ?1 AND deleted_at IS NULL ORDER BY {ENV_ORDER_SQL}, created_at"
+    ))?;
     let rows = stmt.query_map([project_id], |r| {
         Ok(Env {
             id: r.get(0)?,
