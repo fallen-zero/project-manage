@@ -58,14 +58,15 @@ pub fn collect(conn: &Connection, mk: Option<&MasterKey>, project_id: &str) -> A
 
 ```rust
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")]
-pub struct LedgerExportInput { pub project_id: String, pub format: String, pub include_secrets: bool, pub path: String }
+struct LedgerExportInput // crate 内部用，无需 pub { pub project_id: String, pub format: String, pub include_secrets: bool, pub path: String }
 
 #[derive(Serialize)] #[serde(rename_all = "camelCase")]
 pub struct LedgerExportSummary { pub path: String, pub sheets: usize, pub rows: usize, pub included_secrets: bool }
 ```
 
 - 命令：`ledger_export(state, input: LedgerExportInput) -> AppResult<LedgerExportSummary>`。
-- **前置顺序（不可换）**：`format` 合法性（只收 `xlsx` / `md`，否则 `invalid_input` 并点名两个合法值）→ `guard_destination(&state.data_dir, &path)` → `project_exists`（软删项目 ⇒ `not_found`）→ 取数（含解密，若勾选）→ 写盘。
+- **前置顺序（不可换）**：`format` 合法性（只收 `xlsx` / `md`，否则 `invalid_input` 并点名两个合法值）→ `guard_destination(&state.data_dir, &path)` → `db(&state)` 取连接 →（若勾选明文）`unlocked_mk` → `project_exists`（软删项目 ⇒ `not_found`）→ 取数（含解密）→ 写盘。
+  > **锁序是承重的**：`conn` 先于 `mk`（与 `ledger_reveal` 一致，且与 `backup_import` 失败臂的 conn→mk 同向）；反序（mk→conn）会与 `backup_import` 形成跨线程死锁环 —— Task 5 评审 I-1，2026-10-21 订正。
 - **解密失败**（密文损坏、或来自另一个密钥库）：整个导出失败并回 `field_decrypt_failed`（沿用 `vault` 的错误码），**不写半份文件** —— 先渲到内存，成功后才 `File::create`。
 - 返回 `sheets`（恒 5）与 `rows`（五表行数合计），供回执念数。
 - **「不留半份文件」的边界要说准**：取数与解密**全部**成功后才开始写（解密失败 ⇒ 一个字节都没写）；而**写盘本身**失败（磁盘满、权限）可能留下半份文件 —— 这是既有 `write_fail` 的实态，本轮不引入「先写临时文件再改名」的新机制（那会动写盘白名单的形制）。格 13 只断言解密失败那一条。
