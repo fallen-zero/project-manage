@@ -345,7 +345,13 @@ pub fn write_xlsx(path: &Path, doc: &ExportDoc) -> AppResult<()> {
 /// GFM 表格单元格转义（spec D9）：`|` 会截断单元格、换行会截断表格行，两者都必须在
 /// 渲染时变成表格能承载的形态；`\r` 直接丢掉（库里存的是 `\n`，这里只防手改库带进 CRLF）。
 pub fn escape_md(s: &str) -> String {
-    s.replace('|', "\\|").replace('\r', "").replace('\n', "<br>")
+    // 反斜杠必须**最先**翻倍：否则输入里的 `\|` 经管道替换后是 `\\|`，
+    // GFM 会把 `\\` 读成「转义的反斜杠」，后面的 `|` 重新变回单元格分隔符（整行多一格、行尾格丢失）。
+    // 顺序是承重的：先转 `|` 会把我们新加的反斜杠再翻倍。
+    s.replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('\r', "")
+        .replace('\n', "<br>")
 }
 
 /// 把 `ExportDoc` 写成单文件五小节的 Markdown（spec D9）：标题、导出时间、含明文标记，
@@ -818,10 +824,13 @@ mod tests {
 
     #[test]
     fn write_markdown_escapes_pipe_and_converts_newlines() {
+        // I-1：反斜杠必须先翻倍，否则 `a\|b` 会输出 `a\\|b`，GFM 把 `\\` 当转义的反斜杠、
+        // 后面的 `|` 重新成为单元格分隔符。逐字比，顺序颠倒（先转 `|`）也过不了这条。
+        assert_eq!(escape_md(r"a\|b"), r"a\\\|b", "反斜杠要先转义，再转管道");
         let (conn, pid) = fixture();
         ledger::create_note(&conn, &pid, &ledger::NoteInput {
             title: "含|竖线".to_owned(),
-            body: Some("第一行\n第二行".to_owned()),
+            body: Some("第一行\r\n第二行".to_owned()),
             tag: None,
         })
         .unwrap();
@@ -831,11 +840,23 @@ mod tests {
         write_markdown(&path, &doc).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("# 台账 — "), "标题行");
+        assert!(text.contains("- 导出时间："), "导出时间行");
+        assert!(text.contains("- 含明文：否"), "默认路径要在文件内回显「含明文：否」");
         for name in SHEET_NAMES {
             assert!(text.contains(&format!("## {name}")), "五个小节都要在：缺「{name}」");
         }
         assert!(text.contains("含\\|竖线"), "单元格里的 | 必须转义：{text}");
-        assert!(text.contains("第一行<br>第二行"), "换行转 <br>");
+        assert!(text.contains("第一行<br>第二行"), "CRLF 要折成单个 <br>");
+        assert!(!text.contains('\r'), "\\r 必须清掉：{text}");
+        std::fs::remove_file(&path).ok();
+
+        // D9 的「含明文」是 D3 的文件内回显：含明文路径写「是」，同一支测试内换个临时文件名再验一次。
+        let (conn, pid, mk) = fixture_with_secret();
+        let doc = collect(&conn, Some(&mk), &pid).unwrap();
+        let path = dir.join(format!("m11b-md-secret-{}.md", std::process::id()));
+        write_markdown(&path, &doc).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("- 含明文：是"), "含明文路径要在文件内回显「含明文：是」");
         std::fs::remove_file(&path).ok();
     }
 
