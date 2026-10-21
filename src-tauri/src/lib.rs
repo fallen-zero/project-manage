@@ -807,13 +807,14 @@ fn ledger_export(
 ) -> AppResult<ledger_export::LedgerExportSummary> {
     ledger_export::format_of(&input.format)?;
     backup::guard_destination(&state.data_dir, std::path::Path::new(&input.path))?;
+    // 锁序 conn→mk，与 ledger_reveal / backup_import 同向；反序会与导入失败臂成环（Task 5 评审 I-1）。
+    let conn = db(&state)?;
     let mk_guard = if input.include_secrets {
         Some(unlocked_mk(&state)?)
     } else {
         None
     };
     let mk = mk_guard.as_ref().and_then(|g| g.as_ref());
-    let conn = db(&state)?;
     let doc = ledger_export::collect(&conn, mk, &input.project_id)?;
     ledger_export::write(&input.path, &input.format, &doc)
 }
@@ -1159,8 +1160,10 @@ mod tests {
         let write = concat!("ledger_export::", "write(");
         assert_eq!(body.matches(guard).count(), 1, "命令层必须恰好调用一次落点守卫");
         let guard_at = body.find(guard).expect("守卫调用不见了");
+        let collect_at = body.find(concat!("ledger_export::", "collect(")).expect("取数调用不见了");
         let write_at = body.find(write).expect("写盘调用不见了");
         assert!(guard_at < write_at, "守卫必须早于写盘：守卫在 {guard_at}、写盘在 {write_at}");
+        assert!(guard_at < collect_at, "守卫必须早于取数：守卫在 {guard_at}、取数在 {collect_at}");
     }
 
     /// 五个阶段词在三个地方各存一份（V5 的 CHECK、`milestone.rs` 的 `STAGES`、

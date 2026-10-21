@@ -896,6 +896,12 @@ mod tests {
         let err = format_of("csv").unwrap_err();
         assert_eq!(err.code, "invalid_input");
         assert!(err.message.contains("xlsx") && err.message.contains("md"), "点名两个合法值：{}", err.message);
+        // N-5：`write` 的分派本身也要有牙 —— 分派先过 `format_of`，在任何写盘之前就拒；
+        // 落点指向不存在的目录，拒绝与否与路径无关。
+        let (conn, pid) = fixture();
+        let doc = collect(&conn, None, &pid).unwrap();
+        let err = write("/nonexistent-dir/x.csv", "csv", &doc).unwrap_err();
+        assert_eq!(err.code, "invalid_input", "非法格式不许进任何渲染器");
     }
 
     #[test]
