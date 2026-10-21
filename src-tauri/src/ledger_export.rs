@@ -258,6 +258,16 @@ mod tests {
             note: Some("凭据备注".to_owned()),
         })
         .unwrap();
+        // 第二条凭据故意不挂环境：LEFT JOIN（而非 INNER JOIN）才会保留它。
+        ledger::create_credential(&conn, &mk, &pid, &ledger::CredentialInput {
+            env_id: None,
+            title: "无环境的账号".to_owned(),
+            username: Some("散账号".to_owned()),
+            password: Some("N0-env-密".to_owned()),
+            url: Some("https://orphan.example.gov.cn".to_owned()),
+            note: Some("无环境备注".to_owned()),
+        })
+        .unwrap();
         ledger::create_server(&conn, &mk, &pid, &ledger::ServerInput {
             name: "应用节点".to_owned(),
             ip: Some("10.0.0.8".to_owned()),
@@ -297,23 +307,57 @@ mod tests {
             ],
             "五组列头逐字（5/6/6/4/3 列），是线格式契约"
         );
+        assert_eq!(
+            doc.sheets[1].rows.len(),
+            2,
+            "凭据表应有 2 行：一条挂环境 + 一条 env_id 为 None，INNER JOIN 会少一行"
+        );
+        for idx in [0, 2, 3, 4] {
+            assert_eq!(doc.sheets[idx].rows.len(), 1, "{} 表应有一行种子数据", doc.sheets[idx].name);
+        }
         for sheet in &doc.sheets {
-            assert_eq!(sheet.rows.len(), 1, "五张表各有一行种子数据：{}", sheet.name);
-            assert_eq!(
-                sheet.rows[0].len(),
-                sheet.headers.len(),
-                "行宽必须等于列头数：{}",
-                sheet.name
-            );
+            for (i, row) in sheet.rows.iter().enumerate() {
+                assert_eq!(
+                    row.len(),
+                    sheet.headers.len(),
+                    "行宽必须等于列头数：{} 第 {} 行",
+                    sheet.name,
+                    i + 1
+                );
+            }
         }
         assert_eq!(
             doc.sheets[0].rows[0],
             ["dev", "开发环境", "https://dev.example.gov.cn", "8080", "环境备注"]
         );
+        // 两条凭据同秒落库时 `ORDER BY created_at, id` 的先后由随机 id 决定，故按标题定位。
+        let cred_rows = &doc.sheets[1].rows;
+        let linked_idx = cred_rows
+            .iter()
+            .position(|r| r[0] == "数据库密码")
+            .expect("挂环境的凭据在导出行里");
         assert_eq!(
-            doc.sheets[1].rows[0],
+            cred_rows[linked_idx],
             ["数据库密码", "开发环境", "", "", "https://db.example.gov.cn", "凭据备注"],
-            "所属环境按 env_id 关联出环境名（LEFT JOIN）；D3 默认账号/密码留空串"
+            "所属环境按 env_id 关联出环境名（LEFT JOIN 保留）；D3 默认账号/密码留空串"
+        );
+        let orphan_idx = cred_rows
+            .iter()
+            .position(|r| r[0] == "无环境的账号")
+            .expect("env_id 为 None 的凭据也必须导出（LEFT JOIN 语义）");
+        assert_eq!(
+            cred_rows[orphan_idx][1], "",
+            "env_id 为 NULL 时「所属环境」是空串 —— LEFT JOIN 与 INNER JOIN 的分水岭"
+        );
+        assert_eq!(
+            (cred_rows[orphan_idx][2].as_str(), cred_rows[orphan_idx][3].as_str()),
+            ("", ""),
+            "D3 默认账号/密码留空串（无环境凭据同样适用）"
+        );
+        assert_eq!(
+            cred_rows[orphan_idx],
+            ["无环境的账号", "", "", "", "https://orphan.example.gov.cn", "无环境备注"],
+            "env_id 为 NULL 的行其余列照常导出"
         );
         assert_eq!(
             doc.sheets[2].rows[0],
