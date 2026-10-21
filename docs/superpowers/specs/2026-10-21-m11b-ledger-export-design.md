@@ -50,7 +50,7 @@ pub fn collect(conn: &Connection, mk: Option<&MasterKey>, project_id: &str) -> A
 | 4 | 链接 | 类型 / 标题 / 地址 / 备注 | 类型导 `kind` 原值 |
 | 5 | 备注 | 标题 / 标签 / 正文 | 正文保留换行（xlsx 单元格换行、md 用 `<br>`） |
 
-排序与 `ledger::list` 一致（环境按 dev→test→pre→prod，其余按 `created_at`），**不新增第二套排序**。
+排序：环境**复用 `ledger::list` 的同一段 `CASE env`（抽成共享常量 `ENV_ORDER_SQL`，两处共用）**；其余四表按 `created_at, id`（`id` 是**确定性兜底** —— `created_at` 只到秒，同秒插入的行在导出里必须可复现；`ledger::list` 的既有顺序不带这个兜底，导出层补上并在注释里说明，不算第二套排序判据）。
 
 `NULL` 一律渲染成空串（xlsx 与 md 同形）；布尔类（`username_set` 等）**不进导出**（它们是界面用的「有没有值」，不是数据）。
 
