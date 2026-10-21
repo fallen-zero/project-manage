@@ -289,7 +289,7 @@ fn collect_notes(conn: &Connection, project_id: &str) -> AppResult<Vec<Vec<Strin
 /// Excel 的单格文本上限（`rust_xlsxwriter` 会在 `save` 时抛 `MaxStringLengthExceeded`）。
 /// 写盘**之前**先查：台账导出是给用户拿走的文件，静默截断一段正文比明确失败更糟；
 /// 而把它落成 `fs_failed` 会让 hint 指向「检查路径可读写」，方向是错的。
-pub const EXCEL_CELL_LIMIT: usize = 32_767;
+const EXCEL_CELL_LIMIT: usize = 32_767;
 
 fn check_cell_lengths(doc: &ExportDoc) -> AppResult<()> {
     for sheet in &doc.sheets {
@@ -717,7 +717,7 @@ mod tests {
         assert_eq!(sheets[3].1[0], vec!["类型", "标题", "地址", "备注"], "表头逐字是契约");
         let note = &sheets[4].1[1];
         assert_eq!(note[0], "上线步骤");
-        assert!(note[2].contains("第一步") && note[2].contains("第二步"), "多行正文要连换行一起写进单元格");
+        assert_eq!(note[2], "第一步\n第二步", "多行正文要连换行一起写进单元格");
         std::fs::remove_file(&path).ok();
     }
 
@@ -736,6 +736,22 @@ mod tests {
 
     #[test]
     fn write_xlsx_refuses_cells_over_excel_limit_naming_the_sheet() {
+        // 恰好 32767 个「长」字：字符数在上限内、UTF-8 字节数约 98KB。
+        // 能写成功同时证明「32767 通过」与「按字符而非字节计」（误用 len() 会拒收）。
+        let (conn, pid) = fixture();
+        ledger::create_note(&conn, &pid, &ledger::NoteInput {
+            title: "临界正文".to_owned(),
+            body: Some("长".repeat(EXCEL_CELL_LIMIT)),
+            tag: None,
+        })
+        .unwrap();
+        let doc = collect(&conn, None, &pid).unwrap();
+        let ok_path =
+            std::env::temp_dir().join(format!("m11b-xlsx-limit-ok-{}.xlsx", std::process::id()));
+        write_xlsx(&ok_path, &doc).expect("恰好 32767 个字符必须写成功");
+        std::fs::remove_file(&ok_path).ok();
+
+        // 新库里的 32768 是第一行数据：拒收并点名表与数据行号。
         let (conn, pid) = fixture();
         ledger::create_note(&conn, &pid, &ledger::NoteInput {
             title: "超长正文".to_owned(),
@@ -748,6 +764,7 @@ mod tests {
         let err = write_xlsx(&path, &doc).unwrap_err();
         assert_eq!(err.code, "invalid_input");
         assert!(err.message.contains("备注"), "要点名是哪张表：{}", err.message);
+        assert!(err.message.contains("第 1 行"), "要点名数据行号：{}", err.message);
         assert!(err.hint.as_deref().unwrap_or("").contains("Markdown"), "要给出路：{:?}", err.hint);
         assert!(!path.exists(), "拒收时不许留下半份文件");
         std::fs::remove_file(&path).ok();
