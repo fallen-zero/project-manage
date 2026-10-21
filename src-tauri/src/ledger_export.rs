@@ -354,6 +354,8 @@ pub fn write_markdown(path: &Path, doc: &ExportDoc) -> AppResult<()> {
     let mut out = String::new();
     out.push_str(&format!("# 台账 — {}\n\n", doc.project_name));
     out.push_str(&format!("- 导出时间：{}\n", doc.generated_at));
+    // spec D9：这一行是 D3「含明文路径」的文件内回显 —— 拿到这份文件的人，不回头问也看得出
+    // 里面有没有明文，故不随之省略。
     out.push_str(&format!(
         "- 含明文：{}\n\n",
         if doc.included_secrets { "是" } else { "否" }
@@ -829,7 +831,9 @@ mod tests {
         write_markdown(&path, &doc).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("# 台账 — "), "标题行");
-        assert!(text.contains("## 备注"), "五个小节都在");
+        for name in SHEET_NAMES {
+            assert!(text.contains(&format!("## {name}")), "五个小节都要在：缺「{name}」");
+        }
         assert!(text.contains("含\\|竖线"), "单元格里的 | 必须转义：{text}");
         assert!(text.contains("第一行<br>第二行"), "换行转 <br>");
         std::fs::remove_file(&path).ok();
