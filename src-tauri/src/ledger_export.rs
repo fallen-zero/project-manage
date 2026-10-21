@@ -286,11 +286,38 @@ fn collect_notes(conn: &Connection, project_id: &str) -> AppResult<Vec<Vec<Strin
     Ok(out)
 }
 
+/// Excel 的单格文本上限（`rust_xlsxwriter` 会在 `save` 时抛 `MaxStringLengthExceeded`）。
+/// 写盘**之前**先查：台账导出是给用户拿走的文件，静默截断一段正文比明确失败更糟；
+/// 而把它落成 `fs_failed` 会让 hint 指向「检查路径可读写」，方向是错的。
+pub const EXCEL_CELL_LIMIT: usize = 32_767;
+
+fn check_cell_lengths(doc: &ExportDoc) -> AppResult<()> {
+    for sheet in &doc.sheets {
+        for (i, row) in sheet.rows.iter().enumerate() {
+            for cell in row {
+                if cell.chars().count() > EXCEL_CELL_LIMIT {
+                    return Err(AppError::new(
+                        "invalid_input",
+                        &format!(
+                            "「{}」第 {} 行的单元格超过 Excel 的 {EXCEL_CELL_LIMIT} 字符上限",
+                            sheet.name,
+                            i + 1
+                        ),
+                        Some("改用 Markdown 导出（没有这个上限），或先把那一段拆短"),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 把 `ExportDoc` 写成单文件五工作表的 `.xlsx`：表头加粗、首行冻结、正文换行保留（spec D2/D6）。
 /// 表名与列头一律取 `doc.sheets`（源头是 `SHEET_NAMES` / `*_HEADERS`），渲染器不另抄一份名字。
 pub fn write_xlsx(path: &Path, doc: &ExportDoc) -> AppResult<()> {
     use rust_xlsxwriter::{Format, Workbook};
 
+    check_cell_lengths(doc)?;
     let mut wb = Workbook::new();
     let bold = Format::new().set_bold();
     // 「备注」的正文带换行；只有 wrap 格式才会让 Excel 把 `\n` 显示成多行，值本身原样写进单元格。
@@ -704,6 +731,25 @@ mod tests {
         let sheets = read_sheets(&path);
         assert_eq!(sheets.len(), 5);
         assert_eq!(sheets[0].1.len(), 1, "零行也要有表头一行");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn write_xlsx_refuses_cells_over_excel_limit_naming_the_sheet() {
+        let (conn, pid) = fixture();
+        ledger::create_note(&conn, &pid, &ledger::NoteInput {
+            title: "超长正文".to_owned(),
+            body: Some("长".repeat(EXCEL_CELL_LIMIT + 1)),
+            tag: None,
+        })
+        .unwrap();
+        let doc = collect(&conn, None, &pid).unwrap();
+        let path = std::env::temp_dir().join(format!("m11b-xlsx-long-{}.xlsx", std::process::id()));
+        let err = write_xlsx(&path, &doc).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("备注"), "要点名是哪张表：{}", err.message);
+        assert!(err.hint.as_deref().unwrap_or("").contains("Markdown"), "要给出路：{:?}", err.hint);
+        assert!(!path.exists(), "拒收时不许留下半份文件");
         std::fs::remove_file(&path).ok();
     }
 }
