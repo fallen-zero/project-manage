@@ -258,7 +258,7 @@ fn collect_credentials(
            FROM ledger_credentials c
            LEFT JOIN ledger_envs e ON e.id = c.env_id
           WHERE c.project_id = ?1 AND c.deleted_at IS NULL
-          ORDER BY c.created_at",
+          ORDER BY c.created_at, c.id",
     )?;
     let rows = stmt.query_map([project_id], |r| {
         Ok(vec![
@@ -518,7 +518,7 @@ fn collect_credentials(
                FROM ledger_credentials c
                LEFT JOIN ledger_envs e ON e.id = c.env_id
               WHERE c.project_id = ?1 AND c.deleted_at IS NULL
-              ORDER BY c.created_at",
+              ORDER BY c.created_at, c.id",
         )?;
         let rows = stmt.query_map([project_id], |r| {
             Ok(vec![r.get(0)?, r.get(1)?, String::new(), String::new(), r.get(2)?, r.get(3)?])
@@ -536,7 +536,7 @@ fn collect_credentials(
            FROM ledger_credentials c
            LEFT JOIN ledger_envs e ON e.id = c.env_id
           WHERE c.project_id = ?1 AND c.deleted_at IS NULL
-          ORDER BY c.created_at",
+          ORDER BY c.created_at, c.id",
     )?;
     let rows = stmt.query_map([project_id], |r| {
         Ok((
