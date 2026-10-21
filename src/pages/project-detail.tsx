@@ -21,6 +21,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { ProjectForm } from "@/components/project-form";
 import { LedgerPanel } from "@/components/ledger-panel";
+import { LedgerExport } from "@/components/ledger-export";
 import { MilestonePanel } from "@/components/milestone-panel";
 import { ExpiryPanel } from "@/components/expiry-panel";
 import { copyText, openFolder, pickFolder, revealFolder } from "@/lib/api";
@@ -263,6 +264,7 @@ export function ProjectDetailPage() {
 
       <div className="mt-4 rounded-xl border bg-background p-4">
         <LedgerPanel projectId={project.id} />
+        <LedgerExport projectId={project.id} projectName={project.name} />
       </div>
 
       <div className="mt-4 rounded-xl border bg-background p-4">

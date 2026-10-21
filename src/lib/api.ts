@@ -9,6 +9,8 @@ import type {
   CredentialInput,
   EnvInput,
   Ledger,
+  LedgerExportInput,
+  LedgerExportSummary,
   LinkInput,
   NoteInput,
   SecretField,
@@ -226,3 +228,8 @@ export const installLibreOffice = () =>
 /** winget 不在时的退路：用系统默认浏览器打开 LibreOffice 下载页（opener:default 已含 https://* scope）。 */
 export const openLibreOfficeDownloadPage = () =>
   openUrl("https://www.libreoffice.org/download/download-libreoffice/");
+
+// —— M11-b 台账导出（spec §四/§七）——
+// 意图（格式/明文/落点）都由前端收集，取数与写盘全在后端；`path` 来自保存对话框的当场选择。
+export const exportLedger = (input: LedgerExportInput) =>
+  invoke<LedgerExportSummary>("ledger_export", { input });
