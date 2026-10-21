@@ -96,7 +96,7 @@ pub struct LedgerExportSummary { pub path: String, pub sheets: usize, pub rows: 
 
 ## 七、前端交互（`project-detail.tsx` 台账面板旁）
 
-1. 「导出台账」按钮 → 展开一行小工具条：格式下拉（Excel / Markdown）、勾选框「包含账号与密码明文」。
+1. 台账面板下方**常显一行**导出工具条（不做「先点按钮再展开」：台账面板本来就是一屏内的固定块，常显少一次点击、也少一个需要真机验的折叠态）：格式下拉（Excel / Markdown）、勾选框「包含账号与密码明文」、按钮「导出台账」。
 2. 点「导出」：勾了明文 ⇒ 先弹 **in-app 二次确认**（shadcn `Dialog`，文案明确「导出文件不受主密码保护，任何拿到文件的人都能看到明文」）；不勾 ⇒ 直接进保存对话框。
 3. 保存对话框复用 `@tauri-apps/plugin-dialog` 的 `save`；默认名按 D8（`台账-<项目名>-<今天>.<ext>`），扩展名过滤器随格式变。
 4. 成功回执：`已导出 5 张表 / 共 N 行（含明文）`；失败显示 `toAppError` 的 message + hint。
