@@ -342,6 +342,50 @@ pub fn write_xlsx(path: &Path, doc: &ExportDoc) -> AppResult<()> {
     Ok(())
 }
 
+/// GFM 表格单元格转义（spec D9）：`|` 会截断单元格、换行会截断表格行，两者都必须在
+/// 渲染时变成表格能承载的形态；`\r` 直接丢掉（库里存的是 `\n`，这里只防手改库带进 CRLF）。
+pub fn escape_md(s: &str) -> String {
+    s.replace('|', "\\|").replace('\r', "").replace('\n', "<br>")
+}
+
+/// 把 `ExportDoc` 写成单文件五小节的 Markdown（spec D9）：标题、导出时间、含明文标记，
+/// 五节各一张 GFM 表；空表写「（无记录）」。小节名与列头一律取 `doc.sheets`。
+pub fn write_markdown(path: &Path, doc: &ExportDoc) -> AppResult<()> {
+    let mut out = String::new();
+    out.push_str(&format!("# 台账 — {}\n\n", doc.project_name));
+    out.push_str(&format!("- 导出时间：{}\n", doc.generated_at));
+    out.push_str(&format!(
+        "- 含明文：{}\n\n",
+        if doc.included_secrets { "是" } else { "否" }
+    ));
+    for sheet in &doc.sheets {
+        out.push_str(&format!("## {}\n\n", sheet.name));
+        if sheet.rows.is_empty() {
+            out.push_str("（无记录）\n\n");
+            continue;
+        }
+        out.push_str("| ");
+        out.push_str(
+            &sheet
+                .headers
+                .iter()
+                .map(|h| escape_md(h))
+                .collect::<Vec<_>>()
+                .join(" | "),
+        );
+        out.push_str(" |\n|");
+        out.push_str(&sheet.headers.iter().map(|_| " --- ").collect::<Vec<_>>().join("|"));
+        out.push_str("|\n");
+        for row in &sheet.rows {
+            out.push_str("| ");
+            out.push_str(&row.iter().map(|c| escape_md(c)).collect::<Vec<_>>().join(" | "));
+            out.push_str(" |\n");
+        }
+        out.push('\n');
+    }
+    std::fs::write(path, out).map_err(|e| AppError::io(path, &e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,6 +811,39 @@ mod tests {
         assert!(err.message.contains("第 1 行"), "要点名数据行号：{}", err.message);
         assert!(err.hint.as_deref().unwrap_or("").contains("Markdown"), "要给出路：{:?}", err.hint);
         assert!(!path.exists(), "拒收时不许留下半份文件");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn write_markdown_escapes_pipe_and_converts_newlines() {
+        let (conn, pid) = fixture();
+        ledger::create_note(&conn, &pid, &ledger::NoteInput {
+            title: "含|竖线".to_owned(),
+            body: Some("第一行\n第二行".to_owned()),
+            tag: None,
+        })
+        .unwrap();
+        let doc = collect(&conn, None, &pid).unwrap();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("m11b-md-{}.md", std::process::id()));
+        write_markdown(&path, &doc).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# 台账 — "), "标题行");
+        assert!(text.contains("## 备注"), "五个小节都在");
+        assert!(text.contains("含\\|竖线"), "单元格里的 | 必须转义：{text}");
+        assert!(text.contains("第一行<br>第二行"), "换行转 <br>");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn write_markdown_marks_empty_sheet_as_no_records() {
+        let (conn, pid) = fixture();
+        let doc = collect(&conn, None, &pid).unwrap();
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("m11b-md-empty-{}.md", std::process::id()));
+        write_markdown(&path, &doc).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("（无记录）").count(), 5, "五张空表各写一次：{text}");
         std::fs::remove_file(&path).ok();
     }
 }
