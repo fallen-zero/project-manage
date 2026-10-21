@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::error::{AppError, AppResult};
 use crate::ledger::ENV_ORDER_SQL;
-use crate::vault::MasterKey;
+use crate::vault::{self, EncryptedField, MasterKey};
 
 fn invalid(msg: &str) -> AppError {
     AppError::new("invalid_input", msg, Some("检查导出参数"))
@@ -28,12 +28,14 @@ pub fn write_fail(path: &Path, e: impl std::fmt::Display) -> AppError {
     )
 }
 
+#[derive(Debug)]
 pub struct Sheet {
     pub name: &'static str,
     pub headers: &'static [&'static str],
     pub rows: Vec<Vec<String>>,
 }
 
+#[derive(Debug)]
 pub struct ExportDoc {
     pub project_name: String,
     pub generated_at: String,
@@ -109,60 +111,143 @@ fn collect_envs(conn: &Connection, project_id: &str) -> AppResult<Vec<Vec<String
     Ok(out)
 }
 
+/// 含明文路径的一列：cipher 与 nonce 两格都在才解密；任一为空即「这一列没登记过」，导出空串。
+/// 密文坏了由 `vault::decrypt_field` 报 `field_decrypt_failed`，整份 collect 随之失败。
+fn decrypt_or_empty(
+    mk: &MasterKey,
+    row_id: &str,
+    field: &str,
+    cipher: Option<Vec<u8>>,
+    nonce: Option<Vec<u8>>,
+) -> AppResult<String> {
+    match (cipher, nonce) {
+        (Some(cipher), Some(nonce)) => {
+            vault::decrypt_field(mk, row_id, field, &EncryptedField { cipher, nonce })
+        }
+        _ => Ok(String::new()),
+    }
+}
+
 fn collect_credentials(
     conn: &Connection,
-    _mk: Option<&MasterKey>,
+    mk: Option<&MasterKey>,
     project_id: &str,
 ) -> AppResult<Vec<Vec<String>>> {
     // 默认路径：SQL 里**没有** username_cipher / password_cipher —— 这一条是 D3 的可证伪形态。
+    let Some(mk) = mk else {
+        let mut stmt = conn.prepare(
+            "SELECT c.title, COALESCE(e.name,''), COALESCE(c.url,''), COALESCE(c.note,'')
+               FROM ledger_credentials c
+               LEFT JOIN ledger_envs e ON e.id = c.env_id
+              WHERE c.project_id = ?1 AND c.deleted_at IS NULL
+              ORDER BY c.created_at, c.id",
+        )?;
+        let rows = stmt.query_map([project_id], |r| {
+            Ok(vec![
+                r.get(0)?,
+                r.get(1)?,
+                String::new(),
+                String::new(),
+                r.get(2)?,
+                r.get(3)?,
+            ])
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        return Ok(out);
+    };
+
+    // 显式含明文路径独立一条 SQL（spec D3）：只有调用方传了 mk，密文列才会被读出来。
+    // `column` 传逻辑列名（AAD 拼的是 `aad(row_id, column)`，与 ledger::reveal 一致）。
     let mut stmt = conn.prepare(
-        "SELECT c.title, COALESCE(e.name,''), COALESCE(c.url,''), COALESCE(c.note,'')
+        "SELECT c.id, c.title, COALESCE(e.name,''), COALESCE(c.url,''), COALESCE(c.note,''),
+                c.username_cipher, c.username_nonce, c.password_cipher, c.password_nonce
            FROM ledger_credentials c
            LEFT JOIN ledger_envs e ON e.id = c.env_id
           WHERE c.project_id = ?1 AND c.deleted_at IS NULL
           ORDER BY c.created_at, c.id",
     )?;
     let rows = stmt.query_map([project_id], |r| {
-        Ok(vec![
-            r.get(0)?,
-            r.get(1)?,
-            String::new(),
-            String::new(),
-            r.get(2)?,
-            r.get(3)?,
-        ])
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, Option<Vec<u8>>>(5)?,
+            r.get::<_, Option<Vec<u8>>>(6)?,
+            r.get::<_, Option<Vec<u8>>>(7)?,
+            r.get::<_, Option<Vec<u8>>>(8)?,
+        ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        out.push(row?);
+        let (id, title, env_name, url, note, uc, un, pc, pn) = row?;
+        let username = decrypt_or_empty(mk, &id, "username", uc, un)?;
+        let password = decrypt_or_empty(mk, &id, "password", pc, pn)?;
+        out.push(vec![title, env_name, username, password, url, note]);
     }
     Ok(out)
 }
 
 fn collect_servers(
     conn: &Connection,
-    _mk: Option<&MasterKey>,
+    mk: Option<&MasterKey>,
     project_id: &str,
 ) -> AppResult<Vec<Vec<String>>> {
+    // 默认路径：同样不出现 account_cipher / password_cipher（D3）。
+    let Some(mk) = mk else {
+        let mut stmt = conn.prepare(
+            "SELECT name, COALESCE(ip,''), COALESCE(bastion,''), COALESCE(note,'')
+               FROM ledger_servers
+              WHERE project_id = ?1 AND deleted_at IS NULL
+              ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map([project_id], |r| {
+            Ok(vec![
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                String::new(),
+                String::new(),
+                r.get(3)?,
+            ])
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        return Ok(out);
+    };
+
     let mut stmt = conn.prepare(
-        "SELECT name, COALESCE(ip,''), COALESCE(bastion,''), COALESCE(note,'')
+        "SELECT id, name, COALESCE(ip,''), COALESCE(bastion,''), COALESCE(note,''),
+                account_cipher, account_nonce, password_cipher, password_nonce
            FROM ledger_servers
           WHERE project_id = ?1 AND deleted_at IS NULL
           ORDER BY created_at, id",
     )?;
     let rows = stmt.query_map([project_id], |r| {
-        Ok(vec![
-            r.get(0)?,
-            r.get(1)?,
-            r.get(2)?,
-            String::new(),
-            String::new(),
-            r.get(3)?,
-        ])
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, Option<Vec<u8>>>(5)?,
+            r.get::<_, Option<Vec<u8>>>(6)?,
+            r.get::<_, Option<Vec<u8>>>(7)?,
+            r.get::<_, Option<Vec<u8>>>(8)?,
+        ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        out.push(row?);
+        let (id, name, ip, bastion, note, ac, an, pc, pn) = row?;
+        let account = decrypt_or_empty(mk, &id, "account", ac, an)?;
+        let password = decrypt_or_empty(mk, &id, "password", pc, pn)?;
+        out.push(vec![name, ip, bastion, account, password, note]);
     }
     Ok(out)
 }
@@ -444,5 +529,99 @@ mod tests {
         for sheet in &doc.sheets {
             assert!(sheet.rows.is_empty(), "软删行不导（D4）：{}", sheet.name);
         }
+    }
+
+    #[test]
+    fn collect_without_secrets_leaves_secret_cells_empty() {
+        let (conn, pid, mk) = fixture_with_secret();
+        ledger::create_credential(&conn, &mk, &pid, &ledger::CredentialInput {
+            env_id: None,
+            title: "运维账号".to_owned(),
+            username: Some("gov-admin".to_owned()),
+            password: Some("S3cret-值".to_owned()),
+            url: None,
+            note: None,
+        })
+        .unwrap();
+        let doc = collect(&conn, None, &pid).unwrap();
+        let row = &doc.sheets[1].rows[0];
+        assert_eq!(row[2], "", "默认路径账号列留空");
+        assert_eq!(row[3], "", "默认路径密码列留空");
+        assert!(!doc.included_secrets);
+    }
+
+    #[test]
+    fn collect_with_secrets_decrypts_and_matches_reveal() {
+        let (conn, pid, mk) = fixture_with_secret();
+        let cred = ledger::create_credential(&conn, &mk, &pid, &ledger::CredentialInput {
+            env_id: None,
+            title: "运维账号".to_owned(),
+            username: Some("gov-admin".to_owned()),
+            password: Some("S3cret-值".to_owned()),
+            url: None,
+            note: None,
+        })
+        .unwrap();
+        let doc = collect(&conn, Some(&mk), &pid).unwrap();
+        let row = &doc.sheets[1].rows[0];
+        assert_eq!(row[2], ledger::reveal(&conn, &mk, "credential", &cred.id, "username").unwrap());
+        assert_eq!(row[3], ledger::reveal(&conn, &mk, "credential", &cred.id, "password").unwrap());
+        assert!(doc.included_secrets);
+    }
+
+    #[test]
+    fn collect_with_secrets_decrypts_server_account_and_password() {
+        let (conn, pid, mk) = fixture_with_secret();
+        let srv = ledger::create_server(&conn, &mk, &pid, &ledger::ServerInput {
+            name: "跳板机".to_owned(),
+            ip: Some("10.0.0.8".to_owned()),
+            bastion: None,
+            account: Some("root".to_owned()),
+            password: Some("P@ss-服务器".to_owned()),
+            note: None,
+        })
+        .unwrap();
+        let doc = collect(&conn, Some(&mk), &pid).unwrap();
+        let row = &doc.sheets[2].rows[0];
+        assert_eq!(row[3], ledger::reveal(&conn, &mk, "server", &srv.id, "account").unwrap());
+        assert_eq!(row[4], ledger::reveal(&conn, &mk, "server", &srv.id, "password").unwrap());
+    }
+
+    #[test]
+    fn collect_with_secrets_keeps_empty_secret_columns_empty() {
+        let (conn, pid, mk) = fixture_with_secret();
+        ledger::create_credential(&conn, &mk, &pid, &ledger::CredentialInput {
+            env_id: None,
+            title: "只有标题".to_owned(),
+            username: None,
+            password: None,
+            url: None,
+            note: None,
+        })
+        .unwrap();
+        let doc = collect(&conn, Some(&mk), &pid).unwrap();
+        assert_eq!(doc.sheets[1].rows[0][2], "");
+        assert_eq!(doc.sheets[1].rows[0][3], "");
+    }
+
+    #[test]
+    fn collect_returns_field_decrypt_failed_on_tampered_cipher() {
+        let (conn, pid, mk) = fixture_with_secret();
+        let cred = ledger::create_credential(&conn, &mk, &pid, &ledger::CredentialInput {
+            env_id: None,
+            title: "会被改坏".to_owned(),
+            username: Some("u".to_owned()),
+            password: Some("p".to_owned()),
+            url: None,
+            note: None,
+        })
+        .unwrap();
+        conn.execute(
+            "UPDATE ledger_credentials SET password_cipher = X'00' WHERE id = ?1",
+            [&cred.id],
+        )
+        .unwrap();
+        let err = collect(&conn, Some(&mk), &pid).unwrap_err();
+        assert_eq!(err.code, "field_decrypt_failed", "密文坏掉要整份失败，不许静默导出半份");
     }
 }
