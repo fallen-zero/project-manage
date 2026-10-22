@@ -904,7 +904,10 @@ import type { ProjectInput } from "@/types/project";
 import type { ProjectTemplate } from "@/types/project-template";
 
 const filled = (v: string | null): v is string => v !== null && v.trim() !== "";
-const pick = (current: string, next: string | null): string => (filled(next) ? next : current);
+// ProjectInput 的可空字段是 string | null（types/project.ts），所以 current 也要接 null；
+// 模板空/null 时原样保留 null，不退化成 ""。
+const pick = (current: string | null, next: string | null): string | null =>
+  filled(next) ? next : current;
 
 export function applyTemplate(input: ProjectInput, template: ProjectTemplate): ProjectInput {
   return {
