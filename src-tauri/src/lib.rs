@@ -14,6 +14,7 @@ mod legacy_office;
 mod milestone;
 mod ocr;
 mod project;
+mod project_template;
 mod scratch;
 mod search;
 mod tokenize;
@@ -819,6 +820,40 @@ fn ledger_export(
     ledger_export::write(&input.path, &input.format, &doc)
 }
 
+/// 项目模板四条命令（M12 Task 2，形制照 `expiry_*`）：同步、函数体不写 await 点。
+/// `db(&state)?` 取回的 `MutexGuard` 不是 `Send`，在 async fn 里让它横跨 await 点才编不过（M8 D11）；
+/// 本批四条不碰文件，所以 async 标记那扇门**保持 7 条不动**（spec §六）。
+#[tauri::command]
+fn template_list(state: State<'_, AppState>) -> AppResult<Vec<project_template::ProjectTemplate>> {
+    let conn = db(&state)?;
+    project_template::list(&conn)
+}
+
+#[tauri::command]
+fn template_create(
+    state: State<'_, AppState>,
+    input: project_template::TemplateInput,
+) -> AppResult<project_template::ProjectTemplate> {
+    let conn = db(&state)?;
+    project_template::create(&conn, &input)
+}
+
+#[tauri::command]
+fn template_update(
+    state: State<'_, AppState>,
+    id: String,
+    input: project_template::TemplateInput,
+) -> AppResult<project_template::ProjectTemplate> {
+    let conn = db(&state)?;
+    project_template::update(&conn, &id, &input)
+}
+
+#[tauri::command]
+fn template_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    let conn = db(&state)?;
+    project_template::delete(&conn, &id)
+}
+
 /// 日报四条命令（M10 Task 2，形制照 `todo_*`）：同步、函数体不写 await 点。
 /// `db(&state)?` 取回的 `MutexGuard` 不是 `Send`，**在 async fn 里让它横跨 await 点**才编不过（M8 D11）。
 /// 只挂 async 属性、函数体照常同步是合法的 —— `backup_import` 与 `doc_preview` 就是这个形态，
@@ -1008,7 +1043,11 @@ pub fn run() {
             expiry_create,
             expiry_update,
             expiry_delete,
-            ledger_export
+            ledger_export,
+            template_list,
+            template_create,
+            template_update,
+            template_delete
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
@@ -1031,7 +1070,7 @@ mod tests {
             .unwrap();
         // 提 pub(crate) 是给 M8 的验包判据用的，这条顺带改成直接引用它 ——
         // 原来写字面 4 的那两句注释（「lib.rs 够不着」）已经不成立。
-        assert_eq!(ver, crate::db::TARGET_VERSION, "= db.rs 的 TARGET_VERSION，链头已随 M9 V5 走到 5");
+        assert_eq!(ver, crate::db::TARGET_VERSION, "= db.rs 的 TARGET_VERSION，链头已随 M12 V8 走到 8");
     }
 
     /// 第 42 条命令必须是**零参数**的（spec §四：这条命令能启动外部安装器，
