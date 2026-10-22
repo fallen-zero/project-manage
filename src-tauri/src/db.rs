@@ -95,7 +95,7 @@ fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
 
 /// 线性版本迁移：一个版本一段 DDL，只追加不改历史，便于备份包跨版本恢复。
 /// 提 `pub(crate)` 是给 M8 的验包判据比：包里的库比本机新就该拒（`backup::read_package`）。
-pub(crate) const TARGET_VERSION: i64 = 7;
+pub(crate) const TARGET_VERSION: i64 = 8;
 
 /// `pub(crate)` 是 M8 加的：`backup_import` 灌完包内库要能重放迁移（包里可能是旧版本）。
 pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
@@ -123,6 +123,7 @@ pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
             5 => V5,
             6 => V6,
             7 => V7,
+            8 => V8,
             _ => "",
         };
         apply_version(conn, target, ddl)?;
@@ -412,6 +413,28 @@ CREATE TABLE project_expiries (
 CREATE INDEX ix_expiry_project ON project_expiries(project_id);
 ";
 
+/// v8：项目模板（M12 spec §三）。只存项目基础信息；模板名 UNIQUE；tags 是 JSON 数组；
+/// **硬删除，没有 deleted_at**（配置型快捷方式，不是业务记录）。零回填。
+const V8: &str = "
+CREATE TABLE project_templates (
+    id                TEXT PRIMARY KEY,
+    name              TEXT NOT NULL UNIQUE,
+    code              TEXT,
+    manager           TEXT,
+    customer          TEXT,
+    contact_name      TEXT,
+    contact_phone     TEXT,
+    contract_no       TEXT,
+    contract_period   TEXT,
+    delivery_deadline TEXT,
+    status            TEXT NOT NULL DEFAULT '立项'
+                      CHECK (status IN ('立项','需求','开发','测试','预发','上线','运维','归档')),
+    tags              TEXT NOT NULL DEFAULT '[]',
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,13 +703,52 @@ mod tests {
     }
 
     #[test]
-    fn v7_schema_meta_reaches_target_version_seven() {
+    fn v8_schema_meta_reaches_target_version_eight() {
         let conn = open_in_memory().unwrap();
         let ver: i64 = conn
             .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, 7, "迁移必须跑到 7");
-        assert_eq!(TARGET_VERSION, 7, "= 上一条，两处别各写各的");
+        assert_eq!(ver, 8, "迁移必须跑到 8");
+        assert_eq!(TARGET_VERSION, 8, "= 上一条，两处别各写各的");
+    }
+
+    /// V8 必须把模板表与 name 唯一索引建出来，且迁移不带任何模板行（零回填）。
+    #[test]
+    fn v8_project_templates_table_and_unique_name_exist() {
+        let conn = open_in_memory().unwrap();
+        let table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'project_templates'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table, 1, "V8 必须建 project_templates");
+        let mut stmt = conn.prepare("PRAGMA index_list('project_templates')").unwrap();
+        let indexes: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(1)?, r.get(3)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        // `id TEXT PRIMARY KEY` 也会生成一条 origin='pk' 的唯一索引；只认 origin='u' 的约束，
+        // 再用 index_info 精确断它落在 name 上 —— 直接数「唯一索引恰好 1 条」会恒红（实测 2 条）。
+        let unique = indexes
+            .iter()
+            .find(|(_, origin)| origin == "u")
+            .expect("name 必须有 UNIQUE 约束");
+        let mut cols = conn
+            .prepare(&format!("PRAGMA index_info('{}')", unique.0))
+            .unwrap();
+        let names: Vec<String> = cols
+            .query_map([], |r| r.get(2))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(names, vec!["name"], "UNIQUE 约束必须落在 name 上");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_templates", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "V8 零回填：老库迁移后模板表必须为空");
     }
 
     /// D4：`stage` 是 CHECK 枚举。这五个词是需求原文那五个（思维导图.md:35-36），
