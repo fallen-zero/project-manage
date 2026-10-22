@@ -1,6 +1,6 @@
 # 交接文档 —— 项目资料管理（写给一个完全没有上下文的新对话）
 
-**快照时间**：2026-10-22（**M11-b 已 fast-forward 合入 `master`（合并点 `3efbc18`）**：Task 1–10 complete（含 Task 6 修复轮、Task 7 真机十一格、Task 8 活文档、Task 9 整分支终审 Ready to merge 0C/0I/7M、Task 10 修复波 + 限定范围复审 6/6 ADDRESSED）；合并后在 `master` 树上复跑整套门全绿；M11-a 已于 2026-10-20 合入 `master`（合并点 `b99f154`）。**所有 sha 与读数一律现取**（`git rev-parse --short master` / `git ls-remote --heads origin` / §4-A 那串命令），本文不写死「同指」。详见 §3。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。
+**快照时间**：2026-10-22（**M12 项目模板代码 + 取证全完、待整分支终审/合并**：Task 1–8 complete（含 Task 6 的 live 值修复轮）；M11-b 已合入 `master`（合并点 `3efbc18`），M11-a 已合入 `master`（合并点 `b99f154`）。**所有 sha 与读数一律现取**（`git rev-parse --short master` / `git ls-remote --heads origin` / §4-A 那串命令），本文不写死「同指」。详见 §3。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。
 
 ## 0. 先读这一段
 
@@ -14,7 +14,9 @@
 
 - **M11-a（到期事项：维保 / 域名 / 证书 / 其他 + 到期预警补第四类来源）已合入 `master`（2026-10-20，合并点 `b99f154`，fast-forward，全历史 merge commit 仍 0；`master` 已推 `origin`）**。走完了 `brainstorming`（七格口径逐题拍定 + 一条命令数破例批准）→ spec → `writing-plans`（九格 60 步，每步带可粘贴代码）→ SDD 逐格派发 + 任务级评审（**Task 3 一轮修复、Task 5 两轮、Task 6 一轮**，起因与裁定逐条写在 `docs/开发进度.md`「## M11-a 验收证据」的「本轮的评审轮次与裁定」）→ Task 8 由控制方自跑（全量门禁 + 八处靶十次下靶 + 真机十四格 + spec §十 ↔ 计划的双向映射表）→ Task 9 活文档回写。代码与取证在功能分支 `feat/m11-expiry-fields`，**已按需求方当次批准合入 `master`（2026-10-20，合并点 `b99f154`）**，合并后在 `master` 的树上复跑整套门已通过；分支/远端 sha 一律现取（`git rev-parse --short master` / `git ls-remote --heads origin`），本文不写死「同指」。**整分支终审与修复波已做，结论与修复记录见 `.superpowers/sdd/2026-10-19-m11-expiry-fields/final-review.md` 与账本。****每格的 Ruling、修复轮裁定、控制方自纠与本轮计划文本自有缺陷的全文，都在账本 `.superpowers/sdd/2026-10-19-m11-expiry-fields/progress.md`；原始读数在同目录 `mutation-evidence.txt` / `real-machine-readings.md` / `spec-plan-mapping.md`**（那个目录 git-ignored、但被文档按路径引用，`git clean -fdx` 会把它们一起清掉 —— 坑 26 同族的处置：收口时别清）。已交付的面：V7 建 `project_expiries`（**零回填**、四类 `kind` 有 SQL CHECK 兜底、`expire_date NOT NULL` 不加形状 CHECK、只建项目维度索引）+ `src-tauri/src/expiry.rs` 四操作 + `expiry_*` 四条**同步**命令（命令数 **60→64**，需求方当次批准的第 5 次破例；`tauri::command(async)` 仍 **7**）+ 到期事项进全局检索（台账侧同形状 per-table LIKE 从 **8 条变 9 条**，只匹配 `label`/`note`，**日期列不进 WHERE**）。**Task 4–9 的交付面**：`/todos` 预警块第四类与 `EXPIRY_HORIZON_DAYS = 30`（含拉第四份数据、四份一起缩）、项目详情页 `expiry-panel.tsx`、预警块展示层（块头四处 / 双窗口从常量念 + 归档标注挪出裁切区并给容器补 `title`）、备份那句明文告警补「到期事项名称与备注」（**M10 终审 I1 的同一格，本轮特意分配成独立一格**）、全量门禁 + 八处靶十次下靶 + 真机十四格 + spec↔计划双向映射表、活文档回写。**终态读数**（Task 8 在终态树现跑、退出码逐个真取）：`cargo test -j 1 --lib` **318 passed / exit=0**、两条 clippy `-D warnings` **exit=0**、`cargo build -j 1 --lib` **exit=0**、仓库根 `node --test` **47/47/0**、`npm run build` **exit=0 且 `error TS` 0**、结构门 **64 / 7 / `TARGET_VERSION: i64 = 7` / 豁免 1 / `Cargo.lock` 616 / collect 9**、`git diff --stat origin/master..HEAD -- src-tauri/Cargo.toml src-tauri/Cargo.lock package.json` **空输出**、`git rev-list --merges --count --all` **0**。规格与计划的落点见 §6；关键口径：**续期 = 改日期、不留勾选态**（表里没有 `done` 列）；**到期事项单独 30 天窗口**（`EXPIRY_HORIZON_DAYS = 30`，其余三类仍 7 天，且既有第三参数必须用 `??` 而不是 `||` 处理覆盖位 —— 0 是合法覆盖值）；**归档项目的到期事项照常亮**（与 M10 工时那格同形，`p.status === "归档"` 那道门只包交付截止一类）；`ExpiryUpdate` 只有 `expire_date` 与 `note` 两字段（按界面反推接口，堵 M9 终审 I4 那格「有字段没界面消费者」）；**窗口外的到期行不渲染天数徽标**（`dueStateOf` 回 `null` 在这一页的多数成因是「落在 `horizonOf("expiry")` 之外」，坏形状在命令路径上根本进不了库 ⇒ 面板**不许**自己再算一份日期差值，M9 终审 I2 红线；真机格 11 就是这条裁定的唯一证据）；**检索的到期条目把备注截到 80 字符**（`SUBSTR(e.note, 1, 80)`，与仓内 `ledger` 两格先例同形）。
 
-- **M11-b（台账导出，按项目 Excel/Markdown）已合入 `master`（2026-10-22，合并点 `3efbc18`，fast-forward）**：规格与计划已落盘（`docs/superpowers/specs/2026-10-21-m11b-ledger-export-design.md` / `docs/superpowers/plans/2026-10-21-m11b-ledger-export.md`，需求方逐题拍定 D1–D12、命令数 64→65 当次批准）。**Task 1–10 complete**；整分支终审 **Ready to merge（0C/0I/7M）**、修复波 + 限定范围复审 **6/6 ADDRESSED**。**合并后在 `master` 树上复跑整套门全绿**：cargo **337 passed / exit=0（22.06 s）**、node **52/52/0**、`npm run build` **0 错**、命令 **65**、async **7**、`TARGET_VERSION 7`、豁免 **1**、`Cargo.lock` **616**、collect **9**、依赖 diff **空**、merge commit **0**。关键口径：默认路径**不读密文列**、显式勾选 + in-app 二次确认才含明文、落点守卫在写盘前、默认名**按 Unicode 码点截 60**。终审 7 条 Minor 中 N-1/N-2/N-3/N-4/N-5/N-7 已在修复波 `18db2ad` 落地；**N-6（格 9 的「不收到 invoke」无 IPC 计数）保持取证限制，终审裁定不阻塞**。全文与原始读数在账本 `.superpowers/sdd/2026-10-21-m11b-ledger-export/{progress.md,real-machine-readings.md,mutation-evidence.txt,spec-plan-mapping.md,final-review.md,final-fix-report.md,recheck-fix-report.md}`。**M11-b 已收口；M11 剩余候选见 §4-B。**
+- **M11-b（台账导出，按项目 Excel/Markdown）已合入 `master`（2026-10-22，合并点 `3efbc18`，fast-forward）**：规格与计划已落盘（`docs/superpowers/specs/2026-10-21-m11b-ledger-export-design.md` / `docs/superpowers/plans/2026-10-21-m11b-ledger-export.md`，需求方逐题拍定 D1–D12、命令数 64→65 当次批准）。**Task 1–10 complete**；整分支终审 **Ready to merge（0C/0I/7M）**、修复波 + 限定范围复审 **6/6 ADDRESSED**。**合并后在 `master` 树上复跑整套门全绿**：cargo **337 passed / exit=0（22.06 s）**、node **52/52/0**、`npm run build` **0 错**、命令 **65**、async **7**、`TARGET_VERSION 7`、豁免 **1**、`Cargo.lock` **616**、collect **9**、依赖 diff **空**、merge commit **0**。关键口径：默认路径**不读密文列**、显式勾选 + in-app 二次确认才含明文、落点守卫在写盘前、默认名**按 Unicode 码点截 60**。终审 7 条 Minor 中 N-1/N-2/N-3/N-4/N-5/N-7 已在修复波 `18db2ad` 落地；**N-6（格 9 的「不收到 invoke」无 IPC 计数）保持取证限制，终审裁定不阻塞**。全文与原始读数在账本 `.superpowers/sdd/2026-10-21-m11b-ledger-export/{progress.md,real-machine-readings.md,mutation-evidence.txt,spec-plan-mapping.md,final-review.md,final-fix-report.md,recheck-fix-report.md}`。
+
+- **M12（项目模板，新建项目一键填充）代码 + 取证全完（2026-10-22），待整分支终审/合并**：V8 `project_templates`（**硬删、name UNIQUE、tags JSON**、`TARGET_VERSION 8` 零回填）+ `template_list/create/update/delete` 四条同步命令（命令数 **65→69**，第 7 次批准破例；async 仍 7）+ 项目页模板管理弹窗 + 新建项目「从模板填充」下拉（项目名保留、空字段不清空、可切模板）。终态读数：cargo **346 passed**、node **57/57/0**、命令 **69**、`TARGET_VERSION 8`、结构门 69·7·8·1·616·9、依赖 diff 空、merge 0；**真机 12 格全过、十处变异全红并还原**。**Task 6 首版 live 值不同步（先输项目名再选模板会丢名字）被控制方从 Minor 升为 Important**，已用 `ProjectForm onChange` 同步 live 值 + 限定范围复审 ADDRESSED。证据在 `.superpowers/sdd/2026-10-22-m12-project-templates/{progress.md,real-machine-readings.md,mutation-evidence.txt,spec-plan-mapping.md,probe/,m12-cdp.mjs}`；**整分支终审与合并未做**（合并需当次批准）。
 
 **给下一个对话的一句提醒**：这一轮里「已验证」这三个字被伪造过两次，两次都是控制方自己（一次是凭空写 `Task 9: complete`，一次是从一份 **0 字节**的子代理输出里"读出"整份终审裁决并提交了）。教训与三条可敲的防线在坑 29。**本文任何结论都别直接当读数用 —— 照它附的命令自己跑一遍。**
 
@@ -88,52 +90,52 @@
 
 ## 3. 当前卡在哪
 
-**M11-b 收口点（2026-10-22，本文当前最该先读的一段）**：**M11-b 已 fast-forward 合入 `master`（合并点 `3efbc18`）**，合并后在 `master` 树上复跑整套门全绿。**Task 1–10 complete**；整分支终审 **Ready to merge（0C/0I/7M）**、修复波 + 限定范围复审 **6/6 ADDRESSED**（`18db2ad`）。**当前门禁读数见 §4-A**（cargo 337 / node 52 / 命令 65 / async 7 / `TARGET_VERSION 7` / 豁免 1 / `Cargo.lock` 616 / collect 9 / 依赖 diff 空 / merge 0）。**接下来**：M11 整批剩余候选（项目模板 / 父子项目 / 操作日志 / 多工作区，见 §4-B）；M11-b 无需再动。**唯一保留的取证限制**：格 9 的「不收到 invoke」无 IPC 计数（终审 N-6 裁定不阻塞）；全部证据在 `.superpowers/sdd/2026-10-21-m11b-ledger-export/{progress.md,real-machine-readings.md,mutation-evidence.txt,spec-plan-mapping.md,final-review.md,final-fix-report.md,recheck-fix-report.md,probe/}`（git-ignored，收口前别清）。
+**M12 收口点（2026-10-22，本文当前最该先读的一段）**：M11-b 已合 `master`（合并点 `3efbc18`）；**M12 代码 + 取证全完、未合并**（分支 `feat/m12-project-templates`，HEAD 现取 `git rev-parse --short HEAD`）。Task 1–8 complete；Task 6 的 live 值修复轮已复审 ADDRESSED。**当前门禁读数见 §4-A**（cargo 346 / node 57 / 命令 69 / async 7 / `TARGET_VERSION 8` / 豁免 1 / `Cargo.lock` 616 / collect 9 / 依赖 diff 空 / merge 0）。**接下来**：整分支终审 → 修复 → 合并 `master`（**需需求方当次批准**）→ 在 `master` 树上复跑整套门。证据在 `.superpowers/sdd/2026-10-22-m12-project-templates/{progress.md,real-machine-readings.md,mutation-evidence.txt,spec-plan-mapping.md,probe/}`（git-ignored，收口前别清）。未验：备份格走直接 IPC（未点原生保存框）、嵌套删除确认焦点、tags 溢出外观、几十条模板的性能。
 
-**终态（这一节是本文最重要的三行）**：**M0–M11-b 已全部合入 `master`**（现取 `git rev-parse --short master`）；`master` 已推 `origin`（远端与本地 sha 现取 `git ls-remote --heads origin master`）；**待办无**。M11-b 在 `master` 树上的实跑读数：cargo **337 passed**、node **52/52/0**、`npm run build` **0 错**、结构门 **65 / async 7 / `TARGET_VERSION: i64 = 7` / 豁免 1 / `Cargo.lock` 616 / collect 9**、依赖 diff **空**、merge commit **0**。工作树干净（只有一颗未跟踪的 `Python/` —— 它绝不 stage、绝不删）。**这些数一定漂，用 §4-A 那串命令现跑一遍再信。**
+**终态（这一节是本文最重要的三行）**：M0–M11-b 已全部合入 `master`（现取 `git rev-parse --short master`）；`master` 已推 `origin`（远端与本地 sha 现取 `git ls-remote --heads origin master`）；**M12 的代码与取证在 `feat/m12-project-templates` 上、未合并**（现取 HEAD 与远端）；**待办是 M12 整分支终审 → 合并批准 → `master` 树上复跑**。M12 在分支上的实跑读数：cargo **346 passed**、node **57/57/0**、`npm run build` **0 错**、结构门 **69 / async 7 / `TARGET_VERSION: i64 = 8` / 豁免 1 / `Cargo.lock` 616 / collect 9**、依赖 diff **空**、merge commit **0**。工作树干净（只有一颗未跟踪的 `Python/` —— 它绝不 stage、绝不删）。**这些数一定漂，用 §4-A 那串命令现跑一遍再信。**
 
-**M11-a 的 Task 3 / 5 / 6 findings 与修复裁定已全闭**，全文在 `.superpowers/sdd/2026-10-19-m11-expiry-fields/progress.md`；本档不再复述。M11-b 的 Task 1–6 修复轮与裁定在 `.superpowers/sdd/2026-10-21-m11b-ledger-export/progress.md`，其中 Task 6 的 emoji 代理对截断是一条真实的实现缺陷，已修并限定范围复审 **0C/0I/0N**。
+**M11-a / M11-b 的 findings 与修复裁定已全闭**，全文在各自账本；M12 的 Task 1–6 评审与 Task 6 修复轮在 `.superpowers/sdd/2026-10-22-m12-project-templates/progress.md`，其中「先输项目名再选模板会丢名字」是 spec D3 / 格 6 的真实缺陷，已修并限定范围复审 ADDRESSED。
 
-**下一步动作**：M11-b 已合入 `master`（合并点 `3efbc18`），不需要再动。若继续开发，下一格是 **M11 整批剩余候选**：项目模板 / 父子项目关联 / 操作日志 / 多工作区（`docs/思维导图.md:71-74`）；开工前先读原文（坑 34），按 `brainstorming → spec → writing-plans → SDD → 整分支终审 → 合并批准` 走。**别重派 M11-b 的 Task 1–10 实现者** —— 提交在 `git log` 里、结论在账本里。
+**下一步动作**：`git checkout feat/m12-project-templates`（若不在上面）→ `git log --oneline master..HEAD` 对账 → **M12 整分支终审** → 修复 + 限定范围复审 → 合并 `master`（**需需求方当次批准**；合并前核 `git rev-list --merges --count --all` 期望 0、`git merge-base --is-ancestor master feat/m12-project-templates` 期望 exit=0、`git rev-list --count master..feat/m12-project-templates` 看领先几笔）→ 在 `master` 的树上复跑 §4-A 整套门 → 推 `origin`（`master` 要单独指示，常驻授权只覆盖功能分支）。**别重派 M12 Task 1–8 的实现者**（Task 7/8 由控制方跑）—— 提交在 `git log` 里、结论在账本里。
 
 **卡住的两件事，没有一件是代码问题**：
 
-1. **代码面没有「卡住」**：M11-b 已合入 `master`（合并点 `3efbc18`），整合分支终审 Ready to merge、修复波复审 6/6 ADDRESSED。**另一件别以为做完了**：页面与路由层始终没有自动化测试网（深链渲染、`unparsed` 文案、`daily-reports.tsx` / `expiry-panel.tsx` / `ledger-export.tsx` 的接线只能靠真机与人眼 —— M10/M11-a 已把聚合与预警判据搬到前端纯函数，`cargo test` 不再守它们；M11-b 真机虽用真 DOM 点了导出按钮、勾选与二次确认，并由 Windows UI Automation 驱动了原生保存对话框，但**页面观感与大台账耗时未量**）。M11-b 唯一保留的取证限制是格 9 的 IPC 计数（终审 N-6，不阻塞），见 §3 顶部与 `docs/开发进度.md`「## M11-b 验收证据」。
+1. **代码面没有「卡住」**：M12 代码 + 取证全完（Task 1–8 complete），**尚未整分支终审、未合并**；下一步就是终审 → 修复 → 走合并批准。**另一件别以为做完了**：页面与路由层始终没有自动化测试网（深链渲染、`unparsed` 文案、`daily-reports.tsx` / `expiry-panel.tsx` / `ledger-export.tsx` / 本轮 `template-manager.tsx` 与新建项目下拉的接线只能靠真机与人眼 —— M10/M11-a 已把聚合与预警判据搬到前端纯函数，`cargo test` 不再守它们；M12 真机虽用真 DOM 点了模板 CRUD、下拉预填、删除确认，但**页面观感、嵌套确认焦点与几十条模板的性能未量**）。M12 的未验清单见 §3 顶部与 `docs/开发进度.md`「## M12 验收证据」。
 2. **这台机的提交内存是常态瓶颈**：16 G 机，`FreeVirtual` 掉到 ~1 G 时 cargo 会报 `os error 1455`，且症状包括「报编译失败却一行 `error[Exxxx]` 都没有」（坑 32）。要跑门禁前先看 `Get-CimInstance Win32_OperatingSystem` 的 `FreeVirtualMemory`，低于 ~2 G 就叫需求方腾内存，别去改代码。
 
 **只剩需求方能做的四格（一直挂着，不阻塞代码）**：① `/backup` 上「另存为」/「打开」两个原生对话框各真点一次 —— 三个结果块与覆盖确认框的**块内渲染**至今没有真机证据；② 故意把导出目标选进 `%APPDATA%\dev.zero.pfm\`，亲眼看 `backup_destination_unsafe` 报错（守卫的调用点只有文本门守着，M8.1 之后这条更要看一眼）；③ M7 欠的那一下：真按一次 `/index` 的「安装 LibreOffice」（`libreoffice_install` 全程没真调用过）；④ 远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`（本机无 `gh`）⇒ 只能在 Settings → Branches 手改。
 
 ## 4. 下一步计划
 
-**M11-b 的门禁清单（已在 `master` 树上跑过（合并点 `3efbc18`）；后续改动继续用这串）**：cargo **337**、node **52**、命令 **65**、async 7、`TARGET_VERSION: i64 = 7`、豁免 1、`Cargo.lock` 616、collect 9、依赖 diff 空、merge commit 0；数命令数的 `sed` 范围式用 `/^\s*\])/` 版。**这些数会漂，下面这串现跑为准。**
+**M12 的门禁清单（已在分支 `feat/m12-project-templates` 上跑过；合并前还要在 `master` 树上复跑）**：cargo **346**、node **57**、命令 **69**、async 7、`TARGET_VERSION: i64 = 8`、豁免 1、`Cargo.lock` 616、collect 9、依赖 diff 空、merge commit 0；数命令数的 `sed` 范围式用 `/^\s*\])/` 版。**这些数会漂，下面这串现跑为准。**
 
-**A（收口 / 合并用的门禁清单 —— M11-b 已在 `master` 树上跑过（合并点 `3efbc18`））**。M11-b 的**终态期望串**是 `命令 65 / async 7 / TARGET_VERSION 7 / 豁免 1 / Cargo.lock 616 / collect 9 / cargo 337 / node 52`（另有 `cargo build -j 1 --lib` exit=0、依赖 diff 空、merge commit 0）。**任何一格收口都用这串现跑，别信写死的数**：
+**A（收口 / 合并用的门禁清单 —— M12 已在分支树上跑过，合并后还要在 `master` 树上再跑一遍）**。M12 的**终态期望串**是 `命令 69 / async 7 / TARGET_VERSION 8 / 豁免 1 / Cargo.lock 616 / collect 9 / cargo 346 / node 57`（另有 `cargo build -j 1 --lib` exit=0、依赖 diff 空、merge commit 0）。**任何一格收口都用这串现跑，别信写死的数**：
 
 ```
-git rev-parse --abbrev-ref HEAD                              # 应在 master（M11-b 已合入）
+git rev-parse --abbrev-ref HEAD                              # 应在 feat/m12-project-templates（未合并，终审与合并都在它上面跑）
 git status --porcelain                                       # 期望只有 ?? Python/
 git log --oneline master..HEAD                               # 分支上已有什么（与账本逐条对上，别重派已完成的格）
 git rev-list --merges --count --all                          # 期望 0
-cd src-tauri && cargo test -j 1 --lib                        # master 树上 337 passed / exit=0（基线 318 → T1 321 → T2 326 → T3 329 → T4 331 → T5 333 → 终审修复波 +4 = 337；T6/T7 零新增）
+cd src-tauri && cargo test -j 1 --lib                        # M12 终态 346 passed / exit=0（基线 337 → T1 339 → T2 346；T3 起 node 增、cargo 零增）
 cargo clippy --lib -- -D warnings; cargo clippy --all-targets --all-features -- -D warnings   # 两个都期望 exit=0、0 warning
 cargo build -j 1 --lib                                       # exit=0
-cd .. && node --test "tests/**/*.test.ts"                    # master 树上 tests 52 / pass 52 / fail 0（47→51 T6 →52 T6 修复轮 emoji；在仓库根跑）
+cd .. && node --test "tests/**/*.test.ts"                    # M12 终态 tests 57 / pass 57 / fail 0（52→57 全在 apply-template.test.ts；在仓库根跑）
 npm run build                                                # exit=0，且 grep -c "error TS" 为 0
-sed -n '/generate_handler/,/^\s*\])/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"   # 65（范围实测 66 行）；结束式必须是 `^\s*\]`：旧的 `/^      \]/` 对不上收尾行 `        ])`，范围跑到 EOF，读数全靠后面没有匹配行才碰巧对 —— 本仓 2026-10-19 由 Task 2 评审带回，已按新版在终态树实跑
-grep -c 'tauri::command(async)' src-tauri/src/lib.rs         # 7（M11-b 的新命令同步；也别在注释里写这个字面量，门是原始 grep，注释里的字面量会被数进去）
-grep -oE 'TARGET_VERSION: [a-z0-9]+ = [0-9]+' src-tauri/src/db.rs   # 7（本批无迁移）
+sed -n '/generate_handler/,/^\s*\])/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"   # 69（范围实测 66 行）；结束式必须是 `^\s*\]`：旧的 `/^      \]/` 对不上收尾行 `        ])`，范围跑到 EOF
+grep -c 'tauri::command(async)' src-tauri/src/lib.rs         # 7（M12 四条命令同步；也别在注释里写这个字面量，门是原始 grep）
+grep -oE 'TARGET_VERSION: [a-z0-9]+ = [0-9]+' src-tauri/src/db.rs   # 8（M12 走 V8）
 grep -c 'hits.append(&mut collect(' src-tauri/src/search.rs  # 9（本批未动检索）
-grep -rn "allow(dead_code)" src-tauri/src/ | wc -l           # 1（仍只有 db.rs:30，M11-b 没开新豁免）
+grep -rn "allow(dead_code)" src-tauri/src/ | wc -l           # 1（仍只有 db.rs:30，M12 没开新豁免）
 grep -c '^\[\[package\]\]' src-tauri/Cargo.lock              # 616
-git diff --stat origin/master..HEAD -- src-tauri/Cargo.toml src-tauri/Cargo.lock package.json   # 必须空输出（本批零新依赖）
-git ls-remote --heads origin | grep -E "master|m11b"         # 现取；origin/master 应与本地逐字一致（功能分支仍在远端）
+git diff --stat master..HEAD -- src-tauri/Cargo.toml src-tauri/Cargo.lock package.json   # 必须空输出（本批零新依赖）
+git ls-remote --heads origin | grep -E "master|m12"          # 现取；origin/feat/m12-project-templates 应与本地逐字一致
 ```
 
 **执行这一串时的两个本机坑（本轮真踩过）**：① cargo/clippy 前要 `cd src-tauri`，而 **cwd 在多次工具调用之间会残留** —— 本轮第一次批量跑就因 `cd: src-tauri: No such file or directory` 让一条 clippy 根本没执行、`exit=1` 是 `cd` 的退出码（坑 4）；② `cd ..` 之后所有仓库根路径都按仓库根算。**合并本身**要另外核的两条例行是 `git merge-base --is-ancestor master <功能分支>; echo $?` 期望 **0**、`git rev-list --count master..<功能分支>` 看领先几笔，然后 `git checkout master && git merge --ff-only <功能分支>`；合完**在 `master` 的树上**复跑上面整套门，别拿分支读数交差。
 
 **M8.1 这一格没有真机验证**（§2 末），需要人手的那四格一条也没被这次合并兑掉（见 §3 末「只剩需求方能做的四格」）。
 
-**B（M11 整批收口后的候选增强）**：M11-a / M11-b 都已合入 `master`。`思维导图.md:71-74` 的剩余候选是项目模板 / 父子项目关联 / 操作日志 / 多工作区；开工前先回 `docs/思维导图.md` 读原文（坑 34），并沿用本仓的 `brainstorming → spec → writing-plans → SDD → 终审 → 合并` 流程。**下面「已勘察完的事实」那几条是 M9 当轮的历史记录，保留不改。**
+**B（M12 收口后的候选增强）**：M11-a / M11-b 已合入 `master`；M12 代码 + 取证在 `feat/m12-project-templates`，待整分支终审/合并。M12 完成后，`思维导图.md:71-74` 的剩余候选是**父子项目关联 / 操作日志 / 多工作区**；开工前先回 `docs/思维导图.md` 读原文（坑 34），并沿用本仓的 `brainstorming → spec → writing-plans → SDD → 终审 → 合并` 流程。**下面「已勘察完的事实」那几条是 M9 当轮的历史记录，保留不改。**
 
 已勘察完的事实（下一个对话不必重读，但建议复核）：
 
@@ -258,6 +260,11 @@ git ls-remote --heads origin | grep -E "master|m11b"         # 现取；origin/m
 47. **Tauri 的页内 `window.__TAURI_INTERNALS__.invoke` 不可 patch；要驱动原生保存对话框只能走 Windows UI Automation/Win32**。实测 `Object.getOwnPropertyDescriptor(window.__TAURI_INTERNALS__, 'invoke')` = `{writable:false, enumerable:false, configurable:false}` ⇒ 赋值静默失败，第一版「拦截 `plugin:dialog|save` 返回预设路径」的探针根本没生效，点击后弹的是真原生框、按钮卡在 busy（`saveDialog` 的 promise 不返回）。可行手法（全部在 `probe/drive-save2.ps1`）：① `EnumWindows` 按 PID 找 `#32770`，`AutomationElement.FromHandle` 取元素树（**UIA 的 `RootElement.Children` 按 ProcessId 过滤在这台机找不到该对话框，别用**）；② 文件名不是 Edit/ValuePattern，是 DirectUI **Pane**（AutomationId 1001），只能读 `Current.Name` 拿默认名；③ Ctrl+L 聚焦地址栏后要按**两次** Enter 才真正切目录（只按一次文件仍落「文档」—— 别把探针没提交导航读成导出写错路径）；④ 保存/取消是 autoID 1/2 的 Pane 或 Button，用 `BM_CLICK`；⑤ Python 的 stdout 在 Windows 默认 GBK，Node 按 UTF-8 读会把中文表名读成乱码 ⇒ `sys.stdout.reconfigure(encoding="utf-8")`。**判据**：UI 回执只证明命令成功，落盘位置要用对话框地址栏（UIA 的「地址:」）或文件系统二次确认。
 48. **JS 的 `.slice(0, N)` 按 UTF-16 码元计数，会把 emoji 切成孤立代理，而 Tauri IPC 的 `JSON.stringify` → Rust `serde_json` 会直接拒绝这种串**（M11-b Task 6 I-1，真机阻断）：59 个汉字 + 一个 emoji 时 `.slice(0,60)` 留下孤立高位代理 `\ud83d`，保存对话框的 invoke 在打开前就报 `LoneLeadingSurrogateInHexEscape`。修法：`Array.from(s).slice(0,60).join("")`（按码点），并加「59 汉字 + 😀」断言；同时补一个 C0 控制字符样本，免得正则的 `\u0000-\u001F` 被删了还全绿。**防线**：任何「截用户可见文本到 N」的纯函数都要问一句「N 是码元还是码点」，`isWellFormed()` 可作断言（Node ≥ 20）。
 
+**M12（项目模板，2026-10-22）新增的坑**：
+
+49. **`id TEXT PRIMARY KEY` 也会生成一条唯一索引**：`PRAGMA index_list('project_templates')` 返回**2 条** unique（`id` 的 `origin='pk'` + `name` 的 `origin='u'`）。写「唯一索引恰好 1 条」会恒红（M12 Task 1 的计划预检当场抓到）。要断某列唯一，先按 `origin='u'` 找 UNIQUE 约束，再用 `PRAGMA index_info(<index>)` 看列名；别数 unique 总数。
+50. **受控表单的 live 值不在父组件 state 里**：`ProjectForm` 用内部 `useState`，页面只有 `initial`；模板套用若读 `editing.input`，先输项目名再选模板会在 `formKey` 重挂时丢名字（M12 Task 6 首版，评审初判 Minor、控制方按 spec D3/格 6 升为 Important）。修法是给表单加可选 `onChange`，每次字段/tags 变化回传 live `ProjectInput`，父组件同步后再 `applyTemplate`；「项目名保留」必须上真机格验，纯函数测试只覆盖数据层。
+
 ## 6. 关键指针
 
 | 主题 | 位置 |
@@ -270,6 +277,9 @@ git ls-remote --heads origin | grep -E "master|m11b"         # 现取；origin/m
 | **M11-b 实施计划（8 格 46 步；数链 cargo 318→333、终审修复波 333→337、node 47→52、命令 64→65；Task 6 的执行期修复轮与数链订正写在正文）** | `docs/superpowers/plans/2026-10-21-m11b-ledger-export.md` |
 | **M11-b SDD 账本（T1–T10 complete；含 Task 1–6 各修复轮 Ruling、Task 6 emoji 代理对裁定、Task 7 真机/变异、Task 8 活文档、Task 9 终审、Task 10 修复波与复审；8 条派发前裁定与三条具名缺口的裁定）** | `.superpowers/sdd/2026-10-21-m11b-ledger-export/progress.md`（同目录另有 `final-review.md` / `final-fix-report.md` / `recheck-fix-report.md`、`task-N-brief/report`、`review-*`、`recheck-*`；git-ignored，收口前别清） |
 | **M11-b 真机读数 + 七处变异 + spec §九 ↔ 计划格映射（沙盒 `dev.zero.pfm.m11btest` + CDP 9333；真机十一格 + 格 13 真机坏密文；原生保存框由 Windows UIA/Win32 驱动；四条探针自纠；真实数据目录三文件开工/收工逐字一致）** | 同目录 `real-machine-readings.md`、`mutation-evidence.txt`、`spec-plan-mapping.md`、`final-review.md`、`final-fix-report.md`、`recheck-fix-report.md`、`m11b-cdp.mjs`、`probe/{drive-save2.ps1,xlsx_probe.py,tamper_cipher.py,mutate.py,check_default_sql.py}`、`realdir-{before,after}.txt`、`find-own-procs.ps1`（**照坑 9 的一次性 identifier 与坑 1 的按 PID 精确回收，绝不按映像名通杀**） |
+| **M12 规格（项目模板：D1–D10、V8 硬删/name UNIQUE/JSON tags、12 格验收、10 处变异靶；明确不做从项目另存/复制排序/台账目录进模板）** | `docs/superpowers/specs/2026-10-22-m12-project-templates-design.md` |
+| **M12 实施计划（8 格；cargo 337→346、node 52→57、命令 65→69、TARGET_VERSION 7→8；含 Task 6 live 值修复轮的计划订正）** | `docs/superpowers/plans/2026-10-22-m12-project-templates.md` |
+| **M12 SDD 账本 + 真机读数 + 十处变异 + 映射（T1–T8；沙盒 `dev.zero.pfm.m12test` + CDP 9333；真机 1–11 ALL-PASS；备份包 schema 8 / Counts 7 / 模板 3 行；真实目录三文件逐字一致）** | `.superpowers/sdd/2026-10-22-m12-project-templates/{progress.md,real-machine-readings.md,mutation-evidence.txt,spec-plan-mapping.md,m12-cdp.mjs,probe/,realdir-{before,after}.txt}`（git-ignored，收口前别清） |
 | **M11-a SDD 账本（每格 Ruling、Task 3/5/6 三轮修复的裁定起因、Task 5 的两条控制方自纠、Task 6 的「同一 diff 两个评审座位取覆盖更全的一方」（坑 46）、Task 4 派发前预检两处计划缺陷）** | `.superpowers/sdd/2026-10-19-m11-expiry-fields/progress.md`（同目录另有 `task-N-brief.md` / `task-N-report.md` / `recheck-*.md` / `review-*.diff`；**该目录 git-ignored，`git clean -fdx` 会连它一起清掉** —— 见坑 26 同族处置：本轮四份证据件被 `docs/` 按路径引用，收口时**不许**清） |
 | **M11-a 变异取证（八处靶、十次下靶逐个具名打红：`expiry.rs:330` / `search.rs:1041` / `expiry.rs:349` / `expiry.rs:222` / node 5 条 / `expiry.rs:301` / node 1 条 / `expiry.rs:236` / `search.rs:516` / `backup.rs:673`，含 `perl -i` 因 CRLF 失锚与 M⑥「第一条断言先停」两条探针自纠；行号是取证当时的，只当线索）** | `.superpowers/sdd/2026-10-19-m11-expiry-fields/mutation-evidence.txt` |
 | **M11-a 真机读数 + spec §十 ↔ 计划双向映射表（沙盒 `dev.zero.pfm.m11test` + CDP 9333；格 1–14 逐格读数、格 9 与格 14 各半格未验、四条探针自纠（坑 45）、真实数据目录开工/收工 sha 逐字一致的三行快照）** | 同目录 `real-machine-readings.md` 与 `spec-plan-mapping.md`；探针脚本 `m11-cdp.mjs` / `m11-cdp-reread.mjs` / `m11-cdp-c8.mjs` / `m11-cdp-c10.mjs` / `m11-cdp-c10b.mjs` / `m11-cdp-ui.mjs` / `m11-cdp-ui2.mjs`、真实目录快照 `realdir-snapshot.mjs` + `realdir-{before,after}.txt`、进程回收 `find-own-procs.ps1`（**照坑 9 的一次性 identifier 与坑 1 的按 PID 精确回收，绝不按映像名通杀**） |
@@ -300,4 +310,4 @@ git ls-remote --heads origin | grep -E "master|m11b"         # 现取；origin/m
 | 旧版累加 HANDOFF（100+ 条编号坑与账本交叉引用） | `git show 0aa0d30:docs/HANDOFF.md` |
 | **需求原文（待办 / 日报 / 工时 / Excel / 增强项的逐条口径）** | `docs/思维导图.md` —— §二 `:38-45` 待办清单、§三 `:47-58` 日报与 Excel、§四.3 `:70-74` 可选增强；**开工前先读它，别读里程碑表**（坑 34） |
 | **M8.1 四格小账的证据（含两次变异取证与「④b 遮蔽了 !exists」这条）** | `docs/开发进度.md`「## M8.1 收口（备份包那四格小账）」一节 + `.superpowers/sdd/2026-10-13-m8-backup/progress.md` 末尾的 `M8.1` 段 |
-| 本文坑编号：M7 起续到 **21**、M8 起续到 **33**、M8.1 起续到 **36**（15–21 是 LibreOffice / 外部 CLI 的账，22–33 是备份包 / zip / rusqlite Backup API / 门禁取证 / 子代理证据可信度，34–36 是需求出处、防线的可证伪性、文档与行尾的手艺）；**M9 起续到 38、M10 起续到 40、M11-a 起续到 46、M11-b 起续到 48**（37–38 是规格判据与工具接口形状，39 是斜杠被印成连字符 ⇒ 拒收日期样本必须按码点确认，40 是「计划真机网格 ≠ spec 验收网格」⇒ 总括句只能按 spec 那张表核，41–44 是「计划里的代码块要当场跑」「grep 门对注释字面量敏感 + sed 区间要匹配得上」「新建文件的工作树行尾要与仓一致」「长期文档别写瞬时状态句」，45–46 是「真机与变异探针的否定读数先怀疑探针自己（本轮八条自纠全在这）」与「同一笔 diff 别开两个评审座位、已经开了就取覆盖更全的那一份」，47–48 是「页内 `invoke` 不可 patch ⇒ 原生保存框用 UIA/Win32 驱动」与「JS 截断按 UTF-16 码元会切坏 emoji 代理对」）；**编号只增不改 —— 别的文档按号引用 1–33** | 旧版那套 100+ 编号在本版没有连续号可查 ⇒ 挖账看 `git show 0aa0d30:docs/HANDOFF.md` 与 `.superpowers/sdd/<plan>/progress.md` |
+| 本文坑编号：M7 起续到 **21**、M8 起续到 **33**、M8.1 起续到 **36**（15–21 是 LibreOffice / 外部 CLI 的账，22–33 是备份包 / zip / rusqlite Backup API / 门禁取证 / 子代理证据可信度，34–36 是需求出处、防线的可证伪性、文档与行尾的手艺）；**M9 起续到 38、M10 起续到 40、M11-a 起续到 46、M11-b 起续到 48、M12 起续到 50**（37–38 是规格判据与工具接口形状，39 是斜杠被印成连字符 ⇒ 拒收日期样本必须按码点确认，40 是「计划真机网格 ≠ spec 验收网格」⇒ 总括句只能按 spec 那张表核，41–44 是「计划里的代码块要当场跑」「grep 门对注释字面量敏感 + sed 区间要匹配得上」「新建文件的工作树行尾要与仓一致」「长期文档别写瞬时状态句」，45–46 是「真机与变异探针的否定读数先怀疑探针自己（本轮八条自纠全在这）」与「同一笔 diff 别开两个评审座位、已经开了就取覆盖更全的那一份」，47–48 是「页内 `invoke` 不可 patch ⇒ 原生保存框用 UIA/Win32 驱动」与「JS 截断按 UTF-16 码元会切坏 emoji 代理对」，49–50 是「`id TEXT PRIMARY KEY` 也会生成唯一索引」与「受控表单的 live 值不在父组件 state 里，套用前必须 `onChange` 同步」）；**编号只增不改 —— 别的文档按号引用 1–33** | 旧版那套 100+ 编号在本版没有连续号可查 ⇒ 挖账看 `git show 0aa0d30:docs/HANDOFF.md` 与 `.superpowers/sdd/<plan>/progress.md` |
