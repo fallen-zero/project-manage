@@ -33,12 +33,16 @@ export function ProjectForm({
   saving,
   onSubmit,
   onCancel,
+  nameLabel = "项目名称",
+  nameRequiredMessage = "项目名称不能为空",
 }: {
   initial?: ProjectInput;
   statuses: string[];
   saving: boolean;
   onSubmit: (input: ProjectInput) => Promise<boolean>;
   onCancel: () => void;
+  nameLabel?: string;
+  nameRequiredMessage?: string;
 }) {
   const [form, setForm] = useState<ProjectInput>(initial ?? EMPTY_INPUT);
   const [tagsText, setTagsText] = useState((initial ?? EMPTY_INPUT).tags.join("，"));
@@ -49,7 +53,7 @@ export function ProjectForm({
 
   const submit = async () => {
     if (!form.name.trim()) {
-      setNameError("项目名称不能为空");
+      setNameError(nameRequiredMessage);
       return;
     }
     const ok = await onSubmit({ ...form, tags: parseTags(tagsText) });
@@ -60,7 +64,7 @@ export function ProjectForm({
     <div className="grid gap-3">
       <div className="grid gap-2">
         <Label htmlFor="p-name">
-          项目名称 <span className="text-destructive">*</span>
+          {nameLabel} <span className="text-destructive">*</span>
         </Label>
         <Input
           id="p-name"
