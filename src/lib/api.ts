@@ -4,6 +4,7 @@ import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { Project, ProjectInput } from "@/types/project";
+import type { ProjectTemplate, TemplateInput } from "@/types/project-template";
 import type { DocPreview, SearchBundle } from "@/types/search";
 import type {
   CredentialInput,
@@ -47,6 +48,14 @@ export const addEntryDir = (id: string, path: string, label?: string) =>
 export const removeDir = (id: string, dirId: string) =>
   invoke<void>("project_remove_dir", { id, dirId });
 export const statusOptions = () => invoke<string[]>("project_status_options");
+
+// —— M12 项目模板 ——
+export const listTemplates = () => invoke<ProjectTemplate[]>("template_list");
+export const createTemplate = (input: TemplateInput) =>
+  invoke<ProjectTemplate>("template_create", { input });
+export const updateTemplate = (id: string, input: TemplateInput) =>
+  invoke<ProjectTemplate>("template_update", { id, input });
+export const deleteTemplate = (id: string) => invoke<void>("template_delete", { id });
 
 export const searchAll = (query: string) => invoke<SearchBundle>("search_all", { query });
 // 点开正文命中：后端锁内查库、锁外重抽原文，返回窗口文本与码元区间。
