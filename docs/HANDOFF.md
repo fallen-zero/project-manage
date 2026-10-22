@@ -1,6 +1,6 @@
 # 交接文档 —— 项目资料管理（写给一个完全没有上下文的新对话）
 
-**快照时间**：2026-10-22（**M11-b 台账导出代码 + 取证 + 终审修复波全完、待合并批准**：Task 1–10 complete（含 Task 6 修复轮、Task 7 真机十一格、Task 8 活文档、Task 9 整分支终审 Ready to merge 0C/0I/7M、Task 10 修复波 + 限定范围复审 6/6 ADDRESSED），全在分支 `feat/m11b-ledger-export`（HEAD 现取，**未合并**）；M11-a 已于 2026-10-20 合入 `master`（合并点 `b99f154`，合并后整套门在 `master` 树上复跑通过）。**两处 sha 与全部读数一律现取**（`git rev-parse --short HEAD` / `git rev-parse --short master` / `git ls-remote --heads origin` / §4-A 那串命令），本文不写死「同指」。详见 §3。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。
+**快照时间**：2026-10-22（**M11-b 已 fast-forward 合入 `master`（合并点 `3efbc18`）**：Task 1–10 complete（含 Task 6 修复轮、Task 7 真机十一格、Task 8 活文档、Task 9 整分支终审 Ready to merge 0C/0I/7M、Task 10 修复波 + 限定范围复审 6/6 ADDRESSED）；合并后在 `master` 树上复跑整套门全绿；M11-a 已于 2026-10-20 合入 `master`（合并点 `b99f154`）。**所有 sha 与读数一律现取**（`git rev-parse --short master` / `git ls-remote --heads origin` / §4-A 那串命令），本文不写死「同指」。详见 §3。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。
 
 ## 0. 先读这一段
 
@@ -14,7 +14,7 @@
 
 - **M11-a（到期事项：维保 / 域名 / 证书 / 其他 + 到期预警补第四类来源）已合入 `master`（2026-10-20，合并点 `b99f154`，fast-forward，全历史 merge commit 仍 0；`master` 已推 `origin`）**。走完了 `brainstorming`（七格口径逐题拍定 + 一条命令数破例批准）→ spec → `writing-plans`（九格 60 步，每步带可粘贴代码）→ SDD 逐格派发 + 任务级评审（**Task 3 一轮修复、Task 5 两轮、Task 6 一轮**，起因与裁定逐条写在 `docs/开发进度.md`「## M11-a 验收证据」的「本轮的评审轮次与裁定」）→ Task 8 由控制方自跑（全量门禁 + 八处靶十次下靶 + 真机十四格 + spec §十 ↔ 计划的双向映射表）→ Task 9 活文档回写。代码与取证在功能分支 `feat/m11-expiry-fields`，**已按需求方当次批准合入 `master`（2026-10-20，合并点 `b99f154`）**，合并后在 `master` 的树上复跑整套门已通过；分支/远端 sha 一律现取（`git rev-parse --short master` / `git ls-remote --heads origin`），本文不写死「同指」。**整分支终审与修复波已做，结论与修复记录见 `.superpowers/sdd/2026-10-19-m11-expiry-fields/final-review.md` 与账本。****每格的 Ruling、修复轮裁定、控制方自纠与本轮计划文本自有缺陷的全文，都在账本 `.superpowers/sdd/2026-10-19-m11-expiry-fields/progress.md`；原始读数在同目录 `mutation-evidence.txt` / `real-machine-readings.md` / `spec-plan-mapping.md`**（那个目录 git-ignored、但被文档按路径引用，`git clean -fdx` 会把它们一起清掉 —— 坑 26 同族的处置：收口时别清）。已交付的面：V7 建 `project_expiries`（**零回填**、四类 `kind` 有 SQL CHECK 兜底、`expire_date NOT NULL` 不加形状 CHECK、只建项目维度索引）+ `src-tauri/src/expiry.rs` 四操作 + `expiry_*` 四条**同步**命令（命令数 **60→64**，需求方当次批准的第 5 次破例；`tauri::command(async)` 仍 **7**）+ 到期事项进全局检索（台账侧同形状 per-table LIKE 从 **8 条变 9 条**，只匹配 `label`/`note`，**日期列不进 WHERE**）。**Task 4–9 的交付面**：`/todos` 预警块第四类与 `EXPIRY_HORIZON_DAYS = 30`（含拉第四份数据、四份一起缩）、项目详情页 `expiry-panel.tsx`、预警块展示层（块头四处 / 双窗口从常量念 + 归档标注挪出裁切区并给容器补 `title`）、备份那句明文告警补「到期事项名称与备注」（**M10 终审 I1 的同一格，本轮特意分配成独立一格**）、全量门禁 + 八处靶十次下靶 + 真机十四格 + spec↔计划双向映射表、活文档回写。**终态读数**（Task 8 在终态树现跑、退出码逐个真取）：`cargo test -j 1 --lib` **318 passed / exit=0**、两条 clippy `-D warnings` **exit=0**、`cargo build -j 1 --lib` **exit=0**、仓库根 `node --test` **47/47/0**、`npm run build` **exit=0 且 `error TS` 0**、结构门 **64 / 7 / `TARGET_VERSION: i64 = 7` / 豁免 1 / `Cargo.lock` 616 / collect 9**、`git diff --stat origin/master..HEAD -- src-tauri/Cargo.toml src-tauri/Cargo.lock package.json` **空输出**、`git rev-list --merges --count --all` **0**。规格与计划的落点见 §6；关键口径：**续期 = 改日期、不留勾选态**（表里没有 `done` 列）；**到期事项单独 30 天窗口**（`EXPIRY_HORIZON_DAYS = 30`，其余三类仍 7 天，且既有第三参数必须用 `??` 而不是 `||` 处理覆盖位 —— 0 是合法覆盖值）；**归档项目的到期事项照常亮**（与 M10 工时那格同形，`p.status === "归档"` 那道门只包交付截止一类）；`ExpiryUpdate` 只有 `expire_date` 与 `note` 两字段（按界面反推接口，堵 M9 终审 I4 那格「有字段没界面消费者」）；**窗口外的到期行不渲染天数徽标**（`dueStateOf` 回 `null` 在这一页的多数成因是「落在 `horizonOf("expiry")` 之外」，坏形状在命令路径上根本进不了库 ⇒ 面板**不许**自己再算一份日期差值，M9 终审 I2 红线；真机格 11 就是这条裁定的唯一证据）；**检索的到期条目把备注截到 80 字符**（`SUBSTR(e.note, 1, 80)`，与仓内 `ledger` 两格先例同形）。
 
-- **M11-b（台账导出，按项目 Excel/Markdown）代码 + 取证 + 终审修复波全完（2026-10-22），待合并批准**：规格与计划已落盘（`docs/superpowers/specs/2026-10-21-m11b-ledger-export-design.md` / `docs/superpowers/plans/2026-10-21-m11b-ledger-export.md`，需求方逐题拍定 D1–D12、命令数 64→65 当次批准）。**Task 1–10 complete**；整分支终审 **Ready to merge（0C/0I/7M）**、修复波 + 限定范围复审 **6/6 ADDRESSED**。终态读数：cargo **337 passed**、node **52/52/0**、`npm run build` **0 错**、命令 **65**、async **7**、`TARGET_VERSION 7`、豁免 **1**、`Cargo.lock` **616**、collect **9**、依赖 diff **空**、merge commit **0**。关键口径：默认路径**不读密文列**、显式勾选 + in-app 二次确认才含明文、落点守卫在写盘前、默认名**按 Unicode 码点截 60**。**终审 7 条 Minor 中 N-1/N-2/N-3/N-4/N-5/N-7 已在修复波 `18db2ad` 落地**（默认支静态门、Markdown H1 项目名换行清洗、Markdown 表头断言、归档项目 cargo、xlsx 单表空 cargo、`collect<write` 门）；**N-6（格 9 的「不收到 invoke」无 IPC 计数）保持取证限制，终审裁定不阻塞**。全文与原始读数在账本 `.superpowers/sdd/2026-10-21-m11b-ledger-export/{progress.md,real-machine-readings.md,mutation-evidence.txt,spec-plan-mapping.md,final-review.md,final-fix-report.md,recheck-fix-report.md}`；**下一步是合并批准**（合并需当次批准）。
+- **M11-b（台账导出，按项目 Excel/Markdown）已合入 `master`（2026-10-22，合并点 `3efbc18`，fast-forward）**：规格与计划已落盘（`docs/superpowers/specs/2026-10-21-m11b-ledger-export-design.md` / `docs/superpowers/plans/2026-10-21-m11b-ledger-export.md`，需求方逐题拍定 D1–D12、命令数 64→65 当次批准）。**Task 1–10 complete**；整分支终审 **Ready to merge（0C/0I/7M）**、修复波 + 限定范围复审 **6/6 ADDRESSED**。**合并后在 `master` 树上复跑整套门全绿**：cargo **337 passed / exit=0（22.06 s）**、node **52/52/0**、`npm run build` **0 错**、命令 **65**、async **7**、`TARGET_VERSION 7`、豁免 **1**、`Cargo.lock` **616**、collect **9**、依赖 diff **空**、merge commit **0**。关键口径：默认路径**不读密文列**、显式勾选 + in-app 二次确认才含明文、落点守卫在写盘前、默认名**按 Unicode 码点截 60**。终审 7 条 Minor 中 N-1/N-2/N-3/N-4/N-5/N-7 已在修复波 `18db2ad` 落地；**N-6（格 9 的「不收到 invoke」无 IPC 计数）保持取证限制，终审裁定不阻塞**。全文与原始读数在账本 `.superpowers/sdd/2026-10-21-m11b-ledger-export/{progress.md,real-machine-readings.md,mutation-evidence.txt,spec-plan-mapping.md,final-review.md,final-fix-report.md,recheck-fix-report.md}`。**M11-b 已收口；M11 剩余候选见 §4-B。**
 
 **给下一个对话的一句提醒**：这一轮里「已验证」这三个字被伪造过两次，两次都是控制方自己（一次是凭空写 `Task 9: complete`，一次是从一份 **0 字节**的子代理输出里"读出"整份终审裁决并提交了）。教训与三条可敲的防线在坑 29。**本文任何结论都别直接当读数用 —— 照它附的命令自己跑一遍。**
 
@@ -88,36 +88,36 @@
 
 ## 3. 当前卡在哪
 
-**M11-b 收口点（2026-10-22，本文当前最该先读的一段）**：M11-a 已合 `master` 并推送（合并点 `b99f154`，合并后整套门在 `master` 树上复跑通过）；**M11-b 代码 + 取证 + 终审修复波全完、未合并**（分支 `feat/m11b-ledger-export`，HEAD 现取 `git rev-parse --short HEAD`，远端同名分支用 `git ls-remote --heads origin` 比）。工作树干净（只剩永不动的 `?? Python/`）。**Task 1–10 complete**；整分支终审 **Ready to merge（0C/0I/7M）**、修复波 + 限定范围复审 **6/6 ADDRESSED**（`18db2ad`）。**当前门禁读数见 §4-A**（cargo 337 / node 52 / 命令 65 / async 7 / `TARGET_VERSION 7` / 豁免 1 / `Cargo.lock` 616 / collect 9 / 依赖 diff 空 / merge 0）。**接下来**：合并 `master`（**需需求方当次批准**）→ 在 `master` 树上复跑整套门。**唯一保留的取证限制**：格 9 的「不收到 invoke」无 IPC 计数（终审 N-6 裁定不阻塞）；全部证据在 `.superpowers/sdd/2026-10-21-m11b-ledger-export/{progress.md,real-machine-readings.md,mutation-evidence.txt,spec-plan-mapping.md,final-review.md,final-fix-report.md,recheck-fix-report.md,probe/}`（git-ignored，收口前别清）。
+**M11-b 收口点（2026-10-22，本文当前最该先读的一段）**：**M11-b 已 fast-forward 合入 `master`（合并点 `3efbc18`）**，合并后在 `master` 树上复跑整套门全绿。**Task 1–10 complete**；整分支终审 **Ready to merge（0C/0I/7M）**、修复波 + 限定范围复审 **6/6 ADDRESSED**（`18db2ad`）。**当前门禁读数见 §4-A**（cargo 337 / node 52 / 命令 65 / async 7 / `TARGET_VERSION 7` / 豁免 1 / `Cargo.lock` 616 / collect 9 / 依赖 diff 空 / merge 0）。**接下来**：M11 整批剩余候选（项目模板 / 父子项目 / 操作日志 / 多工作区，见 §4-B）；M11-b 无需再动。**唯一保留的取证限制**：格 9 的「不收到 invoke」无 IPC 计数（终审 N-6 裁定不阻塞）；全部证据在 `.superpowers/sdd/2026-10-21-m11b-ledger-export/{progress.md,real-machine-readings.md,mutation-evidence.txt,spec-plan-mapping.md,final-review.md,final-fix-report.md,recheck-fix-report.md,probe/}`（git-ignored，收口前别清）。
 
-**终态（这一节是本文最重要的三行）**：M0–M11-a 已全部合入 `master`（现取 `git rev-parse --short master`）；**M11-b 的代码与取证在 `feat/m11b-ledger-export` 上、未合并**（现取 HEAD 与 `git ls-remote --heads origin`）；**待办是合并批准 → `master` 树上复跑**。M11-b 终态实跑读数：cargo **337 passed**、node **52/52/0**、`npm run build` **0 错**、结构门 **65 / async 7 / `TARGET_VERSION: i64 = 7` / 豁免 1 / `Cargo.lock` 616 / collect 9**、依赖 diff **空**、merge commit **0**。工作树干净（只有一颗未跟踪的 `Python/` —— 它绝不 stage、绝不删）。**这些数一定漂，用 §4-A 那串命令现跑一遍再信。**
+**终态（这一节是本文最重要的三行）**：**M0–M11-b 已全部合入 `master`**（现取 `git rev-parse --short master`）；`master` 已推 `origin`（远端与本地 sha 现取 `git ls-remote --heads origin master`）；**待办无**。M11-b 在 `master` 树上的实跑读数：cargo **337 passed**、node **52/52/0**、`npm run build` **0 错**、结构门 **65 / async 7 / `TARGET_VERSION: i64 = 7` / 豁免 1 / `Cargo.lock` 616 / collect 9**、依赖 diff **空**、merge commit **0**。工作树干净（只有一颗未跟踪的 `Python/` —— 它绝不 stage、绝不删）。**这些数一定漂，用 §4-A 那串命令现跑一遍再信。**
 
 **M11-a 的 Task 3 / 5 / 6 findings 与修复裁定已全闭**，全文在 `.superpowers/sdd/2026-10-19-m11-expiry-fields/progress.md`；本档不再复述。M11-b 的 Task 1–6 修复轮与裁定在 `.superpowers/sdd/2026-10-21-m11b-ledger-export/progress.md`，其中 Task 6 的 emoji 代理对截断是一条真实的实现缺陷，已修并限定范围复审 **0C/0I/0N**。
 
-**下一步动作**：`git checkout feat/m11b-ledger-export`（若不在上面）→ `git log --oneline master..HEAD` 对账 → **整分支终审已完成（Ready to merge）→ 修复波 + 限定范围复审已完成（6/6 ADDRESSED）** → 合并 `master`（**需需求方当次批准**；合并前核 `git rev-list --merges --count --all` 期望 0、`git merge-base --is-ancestor master feat/m11b-ledger-export` 期望 exit=0、`git rev-list --count master..feat/m11b-ledger-export` 看领先几笔）→ 在 `master` 的树上复跑 §4-A 整套门 → 推 `origin`（`master` 要单独指示，常驻授权只覆盖功能分支）。**别重派 Task 1–10 的实现者**（Task 7/9/10 由控制方/终审跑）—— 提交在 `git log` 里、结论在账本里。
+**下一步动作**：M11-b 已合入 `master`（合并点 `3efbc18`），不需要再动。若继续开发，下一格是 **M11 整批剩余候选**：项目模板 / 父子项目关联 / 操作日志 / 多工作区（`docs/思维导图.md:71-74`）；开工前先读原文（坑 34），按 `brainstorming → spec → writing-plans → SDD → 整分支终审 → 合并批准` 走。**别重派 M11-b 的 Task 1–10 实现者** —— 提交在 `git log` 里、结论在账本里。
 
 **卡住的两件事，没有一件是代码问题**：
 
-1. **代码面没有「卡住」**：M11-b 代码 + 取证 + 终审修复波全完（Task 1–10 complete），**终审 Ready to merge、修复波复审 6/6 ADDRESSED、未合并**；下一步就是合并批准。**另一件别以为做完了**：页面与路由层始终没有自动化测试网（深链渲染、`unparsed` 文案、`daily-reports.tsx` / `expiry-panel.tsx` / 本轮 `ledger-export.tsx` 的接线只能靠真机与人眼 —— M10/M11-a 已把聚合与预警判据搬到前端纯函数，`cargo test` 不再守它们；本轮真机虽用真 DOM 点了导出按钮、勾选与二次确认，并由 Windows UI Automation 驱动了原生保存对话框，但**页面观感与大台账耗时未量**）。M11-b 唯一保留的取证限制是格 9 的 IPC 计数（终审 N-6，不阻塞），见 §3 顶部与 `docs/开发进度.md`「## M11-b 验收证据」。
+1. **代码面没有「卡住」**：M11-b 已合入 `master`（合并点 `3efbc18`），整合分支终审 Ready to merge、修复波复审 6/6 ADDRESSED。**另一件别以为做完了**：页面与路由层始终没有自动化测试网（深链渲染、`unparsed` 文案、`daily-reports.tsx` / `expiry-panel.tsx` / `ledger-export.tsx` 的接线只能靠真机与人眼 —— M10/M11-a 已把聚合与预警判据搬到前端纯函数，`cargo test` 不再守它们；M11-b 真机虽用真 DOM 点了导出按钮、勾选与二次确认，并由 Windows UI Automation 驱动了原生保存对话框，但**页面观感与大台账耗时未量**）。M11-b 唯一保留的取证限制是格 9 的 IPC 计数（终审 N-6，不阻塞），见 §3 顶部与 `docs/开发进度.md`「## M11-b 验收证据」。
 2. **这台机的提交内存是常态瓶颈**：16 G 机，`FreeVirtual` 掉到 ~1 G 时 cargo 会报 `os error 1455`，且症状包括「报编译失败却一行 `error[Exxxx]` 都没有」（坑 32）。要跑门禁前先看 `Get-CimInstance Win32_OperatingSystem` 的 `FreeVirtualMemory`，低于 ~2 G 就叫需求方腾内存，别去改代码。
 
 **只剩需求方能做的四格（一直挂着，不阻塞代码）**：① `/backup` 上「另存为」/「打开」两个原生对话框各真点一次 —— 三个结果块与覆盖确认框的**块内渲染**至今没有真机证据；② 故意把导出目标选进 `%APPDATA%\dev.zero.pfm\`，亲眼看 `backup_destination_unsafe` 报错（守卫的调用点只有文本门守着，M8.1 之后这条更要看一眼）；③ M7 欠的那一下：真按一次 `/index` 的「安装 LibreOffice」（`libreoffice_install` 全程没真调用过）；④ 远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`（本机无 `gh`）⇒ 只能在 Settings → Branches 手改。
 
 ## 4. 下一步计划
 
-**M11-b 的门禁清单（已在分支 `feat/m11b-ledger-export` 的终态树跑过；合并前还要在 `master` 树上复跑）**：cargo **337**、node **52**、命令 **65**、async 7、`TARGET_VERSION: i64 = 7`、豁免 1、`Cargo.lock` 616、collect 9、依赖 diff 空、merge commit 0；数命令数的 `sed` 范围式用 `/^\s*\])/` 版。**这些数会漂，下面这串现跑为准。**
+**M11-b 的门禁清单（已在 `master` 树上跑过（合并点 `3efbc18`）；后续改动继续用这串）**：cargo **337**、node **52**、命令 **65**、async 7、`TARGET_VERSION: i64 = 7`、豁免 1、`Cargo.lock` 616、collect 9、依赖 diff 空、merge commit 0；数命令数的 `sed` 范围式用 `/^\s*\])/` 版。**这些数会漂，下面这串现跑为准。**
 
-**A（收口 / 合并用的门禁清单 —— M11-b 在分支终态树上已跑过，合并后还要在 `master` 树上再跑一遍）**。M11-b 的**终态期望串**是 `命令 65 / async 7 / TARGET_VERSION 7 / 豁免 1 / Cargo.lock 616 / collect 9 / cargo 337 / node 52`（另有 `cargo build -j 1 --lib` exit=0、依赖 diff 空、merge commit 0）。**任何一格收口都用这串现跑，别信写死的数**：
+**A（收口 / 合并用的门禁清单 —— M11-b 已在 `master` 树上跑过（合并点 `3efbc18`））**。M11-b 的**终态期望串**是 `命令 65 / async 7 / TARGET_VERSION 7 / 豁免 1 / Cargo.lock 616 / collect 9 / cargo 337 / node 52`（另有 `cargo build -j 1 --lib` exit=0、依赖 diff 空、merge commit 0）。**任何一格收口都用这串现跑，别信写死的数**：
 
 ```
-git rev-parse --abbrev-ref HEAD                              # 应在 feat/m11b-ledger-export（未合并，终审与合并都在它上面跑）
+git rev-parse --abbrev-ref HEAD                              # 应在 master（M11-b 已合入）
 git status --porcelain                                       # 期望只有 ?? Python/
 git log --oneline master..HEAD                               # 分支上已有什么（与账本逐条对上，别重派已完成的格）
 git rev-list --merges --count --all                          # 期望 0
-cd src-tauri && cargo test -j 1 --lib                        # M11-b 终态 337 passed / exit=0（基线 318 → T1 321 → T2 326 → T3 329 → T4 331 → T5 333 → 终审修复波 +4 = 337；T6/T7 零新增）
+cd src-tauri && cargo test -j 1 --lib                        # master 树上 337 passed / exit=0（基线 318 → T1 321 → T2 326 → T3 329 → T4 331 → T5 333 → 终审修复波 +4 = 337；T6/T7 零新增）
 cargo clippy --lib -- -D warnings; cargo clippy --all-targets --all-features -- -D warnings   # 两个都期望 exit=0、0 warning
 cargo build -j 1 --lib                                       # exit=0
-cd .. && node --test "tests/**/*.test.ts"                    # M11-b 终态 tests 52 / pass 52 / fail 0（47→51 T6 →52 T6 修复轮 emoji；在仓库根跑）
+cd .. && node --test "tests/**/*.test.ts"                    # master 树上 tests 52 / pass 52 / fail 0（47→51 T6 →52 T6 修复轮 emoji；在仓库根跑）
 npm run build                                                # exit=0，且 grep -c "error TS" 为 0
 sed -n '/generate_handler/,/^\s*\])/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"   # 65（范围实测 66 行）；结束式必须是 `^\s*\]`：旧的 `/^      \]/` 对不上收尾行 `        ])`，范围跑到 EOF，读数全靠后面没有匹配行才碰巧对 —— 本仓 2026-10-19 由 Task 2 评审带回，已按新版在终态树实跑
 grep -c 'tauri::command(async)' src-tauri/src/lib.rs         # 7（M11-b 的新命令同步；也别在注释里写这个字面量，门是原始 grep，注释里的字面量会被数进去）
@@ -126,14 +126,14 @@ grep -c 'hits.append(&mut collect(' src-tauri/src/search.rs  # 9（本批未动�
 grep -rn "allow(dead_code)" src-tauri/src/ | wc -l           # 1（仍只有 db.rs:30，M11-b 没开新豁免）
 grep -c '^\[\[package\]\]' src-tauri/Cargo.lock              # 616
 git diff --stat origin/master..HEAD -- src-tauri/Cargo.toml src-tauri/Cargo.lock package.json   # 必须空输出（本批零新依赖）
-git ls-remote --heads origin | grep -E "master|m11b"         # 现取；origin/feat/m11b-ledger-export 应与本地逐字一致
+git ls-remote --heads origin | grep -E "master|m11b"         # 现取；origin/master 应与本地逐字一致（功能分支仍在远端）
 ```
 
 **执行这一串时的两个本机坑（本轮真踩过）**：① cargo/clippy 前要 `cd src-tauri`，而 **cwd 在多次工具调用之间会残留** —— 本轮第一次批量跑就因 `cd: src-tauri: No such file or directory` 让一条 clippy 根本没执行、`exit=1` 是 `cd` 的退出码（坑 4）；② `cd ..` 之后所有仓库根路径都按仓库根算。**合并本身**要另外核的两条例行是 `git merge-base --is-ancestor master <功能分支>; echo $?` 期望 **0**、`git rev-list --count master..<功能分支>` 看领先几笔，然后 `git checkout master && git merge --ff-only <功能分支>`；合完**在 `master` 的树上**复跑上面整套门，别拿分支读数交差。
 
 **M8.1 这一格没有真机验证**（§2 末），需要人手的那四格一条也没被这次合并兑掉（见 §3 末「只剩需求方能做的四格」）。
 
-**B（M11 整批收口后的候选增强）**：M11-a 已合 `master`；M11-b 代码 + 取证在 `feat/m11b-ledger-export`，待终审/合并。M11 两半都完成后，`思维导图.md:71-74` 的剩余候选是项目模板 / 父子项目关联 / 操作日志 / 多工作区；开工前先回 `docs/思维导图.md` 读原文（坑 34），并沿用本仓的 `brainstorming → spec → writing-plans → SDD → 终审 → 合并` 流程。**下面「已勘察完的事实」那几条是 M9 当轮的历史记录，保留不改。**
+**B（M11 整批收口后的候选增强）**：M11-a / M11-b 都已合入 `master`。`思维导图.md:71-74` 的剩余候选是项目模板 / 父子项目关联 / 操作日志 / 多工作区；开工前先回 `docs/思维导图.md` 读原文（坑 34），并沿用本仓的 `brainstorming → spec → writing-plans → SDD → 终审 → 合并` 流程。**下面「已勘察完的事实」那几条是 M9 当轮的历史记录，保留不改。**
 
 已勘察完的事实（下一个对话不必重读，但建议复核）：
 
