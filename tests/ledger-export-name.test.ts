@@ -2,10 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { defaultFileName } from "../src/lib/ledger-export-name.ts";
 
-test("把 Windows 非法字符替换成下划线", () => {
+test("把 Windows 非法字符与控制字符替换成下划线", () => {
   assert.equal(
-    defaultFileName('甲/乙:丙*丁?戊"己<庚>辛|壬\\癸', "xlsx", "2026-10-21"),
-    "台账-甲_乙_丙_丁_戊_己_庚_辛_壬_癸-2026-10-21.xlsx",
+    defaultFileName('甲/乙:丙*丁?戊"己<庚>辛|壬\\癸\u0001子', "xlsx", "2026-10-21"),
+    "台账-甲_乙_丙_丁_戊_己_庚_辛_壬_癸_子-2026-10-21.xlsx",
   );
 });
 
@@ -17,6 +17,12 @@ test("超长项目名截到 60 个字符，扩展名仍在", () => {
   const name = "长".repeat(80);
   const got = defaultFileName(name, "xlsx", "2026-10-21");
   assert.equal(got, `台账-${"长".repeat(60)}-2026-10-21.xlsx`);
+});
+
+test("截断按码点计，不切开 emoji 的代理对", () => {
+  const got = defaultFileName("长".repeat(59) + "😀", "xlsx", "2026-10-21");
+  assert.equal(got, `台账-${"长".repeat(59)}😀-2026-10-21.xlsx`);
+  assert.equal(got.isWellFormed(), true);
 });
 
 test("空名回落到「项目」", () => {

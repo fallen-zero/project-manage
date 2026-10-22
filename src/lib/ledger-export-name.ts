@@ -3,10 +3,13 @@
 const ILLEGAL = /[\\/:*?"<>|\u0000-\u001F]/g;
 
 export function defaultFileName(projectName: string, format: "xlsx" | "md", today: string): string {
-  const stem = projectName
-    .replace(ILLEGAL, "_")
-    .trim()
-    .replace(/[. ]+$/, "")
-    .slice(0, 60);
+  const stem = Array.from(
+    projectName
+      .replace(ILLEGAL, "_")
+      .trim()
+      .replace(/[. ]+$/, ""),
+  )
+    .slice(0, 60)
+    .join("");
   return `台账-${stem || "项目"}-${today}.${format}`;
 }
