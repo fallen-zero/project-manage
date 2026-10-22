@@ -13,9 +13,19 @@ import {
 } from "@/components/ui/dialog";
 import { ProjectForm } from "@/components/project-form";
 import { TemplateManager } from "@/components/template-manager";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { applyTemplate } from "@/lib/apply-template";
 import { copyText, openFolder } from "@/lib/api";
 import { useProjectsStore } from "@/stores/projects";
+import { useTemplatesStore } from "@/stores/templates";
 import { toInput, type Project, type ProjectInput } from "@/types/project";
 
 export function ProjectsPage() {
@@ -25,10 +35,14 @@ export function ProjectsPage() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [templatesOpen, setTemplatesOpen] = useState(false);
+  const { items: templates, loading: templatesLoading, refresh: refreshTemplates } = useTemplatesStore();
+  const [formKey, setFormKey] = useState(0);
+  const [selectedTemplate, setSelectedTemplate] = useState("none");
 
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+    void refreshTemplates();
+  }, [refresh, refreshTemplates]);
 
   const openRoot = async (p: Project) => {
     const root = p.dirs.find((d) => d.kind === "root");
@@ -61,7 +75,14 @@ export function ProjectsPage() {
           <Button size="sm" variant="outline" onClick={() => setTemplatesOpen(true)}>
             模板
           </Button>
-          <Button size="sm" onClick={() => setEditing({ id: null, input: toInput(emptySeed()) })}>
+          <Button
+            size="sm"
+            onClick={() => {
+              setSelectedTemplate("none");
+              setFormKey((k) => k + 1);
+              setEditing({ id: null, input: toInput(emptySeed()) });
+            }}
+          >
             <Plus /> 新建项目
           </Button>
         </div>
@@ -168,17 +189,55 @@ export function ProjectsPage() {
             <DialogDescription>基础信息会存进本地库，敏感凭据在信息台账里单独加密存储。</DialogDescription>
           </DialogHeader>
           {editing && (
-            <ProjectForm
-              initial={editing.input}
-              statuses={statuses}
-              saving={saving}
-              onCancel={() => setEditing(null)}
-              onSubmit={async (input) => {
-                const ok = await save(editing.id, input);
-                if (ok) setEditing(null);
-                return ok;
-              }}
-            />
+            <div className="grid gap-3">
+              {editing.id === null && (
+                <div className="grid gap-2">
+                  <Label className="text-xs text-muted-foreground">从模板填充</Label>
+                  <Select
+                    value={selectedTemplate}
+                    onValueChange={(v) => {
+                      if (v === "none") {
+                        setSelectedTemplate("none");
+                        return;
+                      }
+                      const t = templates.find((x) => x.id === v);
+                      if (!t) return;
+                      setEditing((prev) => (prev ? { ...prev, input: applyTemplate(prev.input, t) } : prev));
+                      setFormKey((k) => k + 1);
+                      setSelectedTemplate("none");
+                    }}
+                    disabled={templatesLoading || templates.length === 0}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="选择模板" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">不使用模板</SelectItem>
+                      {templates.map((t) => (
+                        <SelectItem key={t.id} value={t.id}>
+                          {t.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {templates.length === 0 && (
+                    <p className="text-xs text-muted-foreground">暂无模板，先在「模板」里新建。</p>
+                  )}
+                </div>
+              )}
+              <ProjectForm
+                key={formKey}
+                initial={editing.input}
+                statuses={statuses}
+                saving={saving}
+                onCancel={() => setEditing(null)}
+                onSubmit={async (input) => {
+                  const ok = await save(editing.id, input);
+                  if (ok) setEditing(null);
+                  return ok;
+                }}
+              />
+            </div>
           )}
         </DialogContent>
       </Dialog>
