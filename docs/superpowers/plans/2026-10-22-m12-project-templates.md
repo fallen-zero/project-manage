@@ -1211,7 +1211,7 @@ export function TemplateManager({
           ) : (
             <div className="space-y-2">
               <div className="flex justify-end">
-                <Button size="sm" onClick={() => setEditing({ id: null, input: { ...EMPTY_TEMPLATE_INPUT } })}>
+                <Button size="sm" onClick={() => setEditing({ id: null, input: { ...EMPTY_TEMPLATE_INPUT, tags: [] } })}>
                   <Plus /> 新建模板
                 </Button>
               </div>
