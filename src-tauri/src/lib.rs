@@ -1070,7 +1070,7 @@ mod tests {
             .unwrap();
         // 提 pub(crate) 是给 M8 的验包判据用的，这条顺带改成直接引用它 ——
         // 原来写字面 4 的那两句注释（「lib.rs 够不着」）已经不成立。
-        assert_eq!(ver, crate::db::TARGET_VERSION, "= db.rs 的 TARGET_VERSION，链头已随 M12 V8 走到 8");
+        assert_eq!(ver, crate::db::TARGET_VERSION, "= db.rs 的 TARGET_VERSION，链头已随 M13 V9 走到 9");
     }
 
     /// 第 42 条命令必须是**零参数**的（spec §四：这条命令能启动外部安装器，

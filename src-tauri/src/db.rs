@@ -95,7 +95,7 @@ fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
 
 /// 线性版本迁移：一个版本一段 DDL，只追加不改历史，便于备份包跨版本恢复。
 /// 提 `pub(crate)` 是给 M8 的验包判据比：包里的库比本机新就该拒（`backup::read_package`）。
-pub(crate) const TARGET_VERSION: i64 = 8;
+pub(crate) const TARGET_VERSION: i64 = 9;
 
 /// `pub(crate)` 是 M8 加的：`backup_import` 灌完包内库要能重放迁移（包里可能是旧版本）。
 pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
@@ -124,6 +124,7 @@ pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
             6 => V6,
             7 => V7,
             8 => V8,
+            9 => V9,
             _ => "",
         };
         apply_version(conn, target, ddl)?;
@@ -435,6 +436,13 @@ CREATE TABLE project_templates (
 );
 ";
 
+/// v9：父子项目关联（M13 spec §三）。单父树；不建外键、不级联，环与父项有效性
+/// 由 `project::validate_parent` 在命令层判。**零回填**：存量项目保持顶层。
+const V9: &str = "
+ALTER TABLE projects ADD COLUMN parent_id TEXT;
+CREATE INDEX idx_projects_parent_id ON projects(parent_id);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,13 +711,84 @@ mod tests {
     }
 
     #[test]
-    fn v8_schema_meta_reaches_target_version_eight() {
+    fn v9_schema_meta_reaches_target_version_nine() {
         let conn = open_in_memory().unwrap();
         let ver: i64 = conn
             .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, 8, "迁移必须跑到 8");
-        assert_eq!(TARGET_VERSION, 8, "= 上一条，两处别各写各的");
+        assert_eq!(ver, 9, "迁移必须跑到 9");
+        assert_eq!(TARGET_VERSION, 9, "= 上一条，两处别各写各的");
+    }
+
+    /// V9 必须给 projects 加 parent_id 列，并且只建这一条显式索引。
+    /// `sqlite_autoindex_*`（sql 为 NULL）不算：TEXT 主键每张表都有。
+    #[test]
+    fn v9_projects_parent_id_and_index_exist() {
+        let conn = open_in_memory().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('projects')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert!(cols.iter().any(|c| c == "parent_id"), "V9 必须加 parent_id 列：{cols:?}");
+
+        let idx: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                  WHERE type = 'index' AND tbl_name = 'projects' AND sql IS NOT NULL
+                  ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(idx, vec!["idx_projects_parent_id"], "projects 上只该有这一条显式索引：{idx:?}");
+    }
+
+    /// V9 零回填：先手工把库建到 V8、落一条存量项目，再跑 V9；
+    /// 存量行必须保持 `parent_id IS NULL`（迁移里只有 DDL，不猜归属）。
+    #[test]
+    fn v9_parent_id_is_added_null_for_existing_projects() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta (version INTEGER NOT NULL, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for (target, ddl) in [
+            (1, V1),
+            (2, V2),
+            (3, V3),
+            (4, V4),
+            (5, V5),
+            (6, V6),
+            (7, V7),
+            (8, V8),
+        ] {
+            apply_version(&conn, target, ddl).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO projects (id, name) VALUES ('p-old', '存量项目')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_id FROM projects WHERE id = 'p-old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent, None, "V9 零回填：存量项目必须保持顶层");
+        let ver: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, 9);
     }
 
     /// V8 必须把模板表与 name 唯一索引建出来，且迁移不带任何模板行（零回填）。

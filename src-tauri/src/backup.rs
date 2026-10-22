@@ -864,7 +864,7 @@ mod tests {
         let dst = dir.path().join("templates.zip");
         let sum = export(&live, &dst).unwrap();
         assert_eq!(sum.schema_version, crate::db::TARGET_VERSION);
-        assert_eq!(sum.schema_version, 8, "M12 起包内 schema 必须是 8");
+        assert_eq!(sum.schema_version, 9, "M13 起包内 schema 必须是 9");
         assert_eq!(sum.counts.projects, 0);
         let (_unpacked, got) = unpack_db(&dst);
         let n: i64 = got
