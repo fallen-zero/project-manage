@@ -26,7 +26,7 @@
 - **D5 新增 1 条命令**（同日拍定）：`ledger_export` ⇒ `generate_handler!` **64→65**（本仓第 6 次批准破例）；`tauri::command(async)` 仍 **7**（函数体同步：只取 `Mutex<Connection>` 的 guard、不跨 await）。
 - **D6 导出逻辑全在 Rust**：新模块 `src-tauri/src/ledger_export.rs` —— `collect`（取数 + 可选解密）+ `write_xlsx` + `write_markdown`。前端只做「勾选 → 确认 → 保存对话框 → invoke」。理由：本仓页面层没有测试网（spec §十一 不引 jsdom），把渲染放前端等于把整格交给真机。
 - **D7 落点守卫复用 `backup::guard_destination`**：在**任何写盘之前**调用（M8 坑 31：`File::create` 是 CREATE_ALWAYS，把落点指进数据目录会毁掉用户唯一的持久库）。`guard_destination` 已经是吃 `data_dir + dst` 的纯函数，直接复用，**不新写判据**。
-- **D8 文件名**：默认 `台账-<项目名>-<YYYY-MM-DD>.<xlsx|md>`；项目名里的 `\ / : * ? " < > |` 与控制字符替换成 `_`，长度截到 60 字符（避免 Windows 长路径）；扩展名由 `format` 决定，用户手改也无所谓（写盘按 `format` 走）。**实现落点在前端纯函数** `src/lib/ledger-export-name.ts`（只有保存对话框之前需要这个名字；后端只收最终 `path`，不在 Rust 里再抄一份清洗规则）—— 由 `node --test` 守。
+- **D8 文件名**：默认 `台账-<项目名>-<YYYY-MM-DD>.<xlsx|md>`；项目名里的 `\ / : * ? " < > |` 与控制字符替换成 `_`，长度截到 60 个 **Unicode 码点**（避免 Windows 长路径；按 UTF-16 码元截会把 emoji 切出孤立高位代理，该串进 `JSON.stringify` → `serde_json` 直接拒绝，保存对话框的 invoke 失败）；扩展名由 `format` 决定，用户手改也无所谓（写盘按 `format` 走）。**实现落点在前端纯函数** `src/lib/ledger-export-name.ts`（只有保存对话框之前需要这个名字；后端只收最终 `path`，不在 Rust 里再抄一份清洗规则）—— 由 `node --test` 守。
 - **D9 Markdown 形态**：`# 台账 — <项目名>`、`- 导出时间：YYYY-MM-DD HH:MM:SS`、`- 含明文：是/否`（**这一行是 D3 的文件内回显**：拿到文件的人要能一眼看出里面有没有明文，不必回头问导出的人）、五个 `##` 小节（环境 / 凭据 / 服务器 / 链接 / 备注），GFM 表格；**空表写「（无记录）」**；单元格里的 `|` 转义成 `\|`、换行（备注正文）转成 `<br>`。
 - **D10 同步命令**：见 D5。
 - **D11 不新增表、不新增迁移**：`TARGET_VERSION` 仍 **7**；导出是读操作。
@@ -113,7 +113,7 @@ pub struct LedgerExportSummary { pub path: String, pub sheets: usize, pub rows: 
 - 守卫顺序文本门：`include_str!` 断言 `guard_destination` 出现在第一次 `File::create`/`write` 之前。
 - 文件名清洗：**TS 纯函数** `defaultFileName(projectName, format, today)`（`src/lib/ledger-export-name.ts`）的 8 个样本（含 `:`、`/`、超长、空名），`node --test` 守。
 
-**node**：新增 `tests/ledger-export-name.test.ts`（默认文件名与清洗，4 条）；页面层其余部分仍只有 `tsc` + `vite build`。
+**node**：新增 `tests/ledger-export-name.test.ts`（默认文件名与清洗，5 条：含控制字符样本与「59 汉字 + emoji」的代理对边界）；页面层其余部分仍只有 `tsc` + `vite build`。
 **真机（沙盒 `dev.zero.pfm.m11btest`，跑完删净；真实数据目录三文件前后逐字一致）**：见 §九。
 
 ## 九、验收网格（真机 + cargo，逐格）

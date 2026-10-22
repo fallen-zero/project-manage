@@ -35,9 +35,9 @@
 | 3 `write_xlsx` | +2（另 +1 长单元格，修复轮补） | **329** | 0 | 47 |
 | 4 `write_markdown` | +2 | **331** | 0 | 47 |
 | 5 IPC + 守卫 + 格式校验 | +2 | **333** | 0 | 47 |
-| 6 前端（默认名纯函数 + 组件） | 0 | 333 | +4 | **51** |
-| 7 门禁 + 变异 + 真机 | 0 | **333** | 0 | **51** |
-| 8 活文档回写 | 0 | 333 | 0 | 51 |
+| 6 前端（默认名纯函数 + 组件） | 0 | 333 | +5（含修复轮 1 支 emoji 边界） | **52** |
+| 7 门禁 + 变异 + 真机 | 0 | **333** | 0 | **52** |
+| 8 活文档回写 | 0 | 333 | 0 | 52 |
 
 ---
 
@@ -938,13 +938,13 @@ fn ledger_export(
 - [ ] **Step 5: 跑全套确认绿**
 
 Run: `cd src-tauri && cargo test -j 1 --lib > /tmp/te5-green.log 2>&1; echo "exit=$?"; grep "test result" /tmp/te5-green.log; cd .. && echo "cmd=$(sed -n '/generate_handler/,/^\s*\])/p' src-tauri/src/lib.rs | grep -cE '^ +[a-z_]+,?$')"`
-Expected：**332 passed / exit=0**；`cmd=65`。
+Expected：**333 passed / exit=0**；`cmd=65`。
 
 - [ ] **Step 6: 提交并推**
 
 ```bash
 git add src-tauri/src/ledger_export.rs src-tauri/src/lib.rs
-git commit -m "feat(m11-b): ledger_export 命令（先守卫再取数最后写盘、格式只收 xlsx/md）—— 命令数 64→65，332 passed"
+git commit -m "feat(m11-b): ledger_export 命令（先守卫再取数最后写盘、格式只收 xlsx/md）—— 命令数 64→65，333 passed"
 git push origin feat/m11b-ledger-export
 ```
 
@@ -963,7 +963,9 @@ git push origin feat/m11b-ledger-export
 - Consumes：`invoke`（api.ts）、`saveDialog`（plugin-dialog）、`toAppError`、`AppErrorShape`、`Button`/`Select`/`Dialog`/`Label`、Task 5 的命令 `ledger_export`。
 - Produces：`defaultFileName(projectName, format, today)`；`<LedgerExport projectId={…} projectName={…} />`。
 
-- [ ] **Step 1: 写失败测试（node，4 条）**
+> **执行期修复轮（2026-10-22）**：评审 I-1 指出初版 `.slice(0, 60)` 按 UTF-16 码元截断，会把「59 汉字 + emoji」切成孤立高位代理（`JSON.stringify` → `serde_json` 报 `LoneLeadingSurrogateInHexEscape`，保存对话框的 invoke 失败、项目无法导出）。下面的 Step 1/3 已改成按码点截（`Array.from(...).slice(0, 60).join("")`）+ emoji 边界断言，并把 `\u0001` 控制字符样本并入第一条；node 累计 51→**52**。原实现提交 `da8aae4` 的 51 条读数只作历史。
+
+- [ ] **Step 1: 写失败测试（node，5 条）**
 
 `tests/ledger-export-name.test.ts`：
 
@@ -972,10 +974,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { defaultFileName } from "../src/lib/ledger-export-name.ts";
 
-test("把 Windows 非法字符替换成下划线", () => {
+test("把 Windows 非法字符与控制字符替换成下划线", () => {
   assert.equal(
-    defaultFileName('甲/乙:丙*丁?戊"己<庚>辛|壬\\癸', "xlsx", "2026-10-21"),
-    "台账-甲_乙_丙_丁_戊_己_庚_辛_壬_癸-2026-10-21.xlsx",
+    defaultFileName('甲/乙:丙*丁?戊"己<庚>辛|壬\\癸\u0001子', "xlsx", "2026-10-21"),
+    "台账-甲_乙_丙_丁_戊_己_庚_辛_壬_癸_子-2026-10-21.xlsx",
   );
 });
 
@@ -987,6 +989,12 @@ test("超长项目名截到 60 个字符，扩展名仍在", () => {
   const name = "长".repeat(80);
   const got = defaultFileName(name, "xlsx", "2026-10-21");
   assert.equal(got, `台账-${"长".repeat(60)}-2026-10-21.xlsx`);
+});
+
+test("截断按码点计，不切开 emoji 的代理对", () => {
+  const got = defaultFileName("长".repeat(59) + "😀", "xlsx", "2026-10-21");
+  assert.equal(got, `台账-${"长".repeat(59)}😀-2026-10-21.xlsx`);
+  assert.equal(got.isWellFormed(), true);
 });
 
 test("空名回落到「项目」", () => {
@@ -1009,11 +1017,14 @@ Expected：`exit=1`，报找不到模块。
 const ILLEGAL = /[\\/:*?"<>|\u0000-\u001F]/g;
 
 export function defaultFileName(projectName: string, format: "xlsx" | "md", today: string): string {
-  const stem = projectName
-    .replace(ILLEGAL, "_")
-    .trim()
-    .replace(/[. ]+$/, "")
-    .slice(0, 60);
+  const stem = Array.from(
+    projectName
+      .replace(ILLEGAL, "_")
+      .trim()
+      .replace(/[. ]+$/, ""),
+  )
+    .slice(0, 60)
+    .join("");
   return `台账-${stem || "项目"}-${today}.${format}`;
 }
 ```
@@ -1021,7 +1032,7 @@ export function defaultFileName(projectName: string, format: "xlsx" | "md", toda
 - [ ] **Step 4: 跑 node 全套确认绿**
 
 Run: `node --test "tests/**/*.test.ts" > /tmp/te6-green.log 2>&1; echo "exit=$?"; grep -E "^ℹ (tests|pass|fail)" /tmp/te6-green.log`
-Expected：**51/51/0**。
+Expected：**52/52/0**。
 
 - [ ] **Step 5: 加 api 封装**
 
@@ -1197,7 +1208,7 @@ export function LedgerExport({ projectId, projectName }: { projectId: string; pr
 - [ ] **Step 7: 跑编译门**
 
 Run: `npm run build > /tmp/te6-build.log 2>&1; echo "build=$?"; grep -c "error TS" /tmp/te6-build.log; node --test "tests/**/*.test.ts" > /tmp/te6-node.log 2>&1; echo "node=$?"; grep -E "^ℹ (tests|pass|fail)" /tmp/te6-node.log; cd src-tauri && cargo test -j 1 --lib > /tmp/te6-cargo.log 2>&1; echo "cargo=$?"; grep "test result" /tmp/te6-cargo.log`
-Expected：`build=0` 且 `error TS` **0**；node **51/51/0**；cargo **332 passed**。
+Expected：`build=0` 且 `error TS` **0**；node **52/52/0**；cargo **333 passed**。
 
 - [ ] **Step 8: 提交并推**
 
@@ -1236,7 +1247,7 @@ git diff --stat master..HEAD -- src-tauri/Cargo.toml src-tauri/Cargo.lock packag
 git rev-list --merges --count --all
 git status --porcelain
 ```
-Expected：`cargo=0` **332 passed**；两条 clippy `=0`；`rust-build=0`；`node=0` **51/51/0**；`web=0` 且 `error TS` **0**；结构门 **65 / 7 / `TARGET_VERSION: i64 = 7` / dead 1 / pkg 616 / collect 9**；依赖 diff **空**；merge **0**；`git status` 只剩 `?? Python/`（以及本任务证据目录，git-ignored）。
+Expected：`cargo=0` **333 passed**；两条 clippy `=0`；`rust-build=0`；`node=0` **52/52/0**；`web=0` 且 `error TS` **0**；结构门 **65 / 7 / `TARGET_VERSION: i64 = 7` / dead 1 / pkg 616 / collect 9**；依赖 diff **空**；merge **0**；`git status` 只剩 `?? Python/`（以及本任务证据目录，git-ignored）。
 - [ ] **Step 2: 七处变异**（§十一 的 M①–M⑦，每处 `cp` 备份 + 具名打红 + `cmp` 还原；**跑绿就照实写「打不红」并补断言**）
 - [ ] **Step 3–6: 真机 §九 的 13 格**（格 1/2/3/4/5/6/7/8/9/10/12 走真机；格 11 结构门、格 13 解密失败面是 cargo）
 - [ ] **Step 7: 写 `spec-plan-mapping.md`**（spec §九 ↔ 计划格，任何未跑的格明写「未验 + 为什么」）
@@ -1264,7 +1275,7 @@ Expected：`cargo=0` **332 passed**；两条 clippy `=0`；`rust-build=0`；`nod
 - [ ] **Step 3: `docs/HANDOFF.md`**
   1. 快照头与 §0 加 M11-b bullet（**合并前不写合并点**，只写取数命令）。
   2. §3「当前卡在哪」与「下一格动作」改成 M11 整批收口后的候选增强（项目模板 / 父子项目 / 操作日志 / 多工作区，`思维导图.md:71-74`），并保留「只剩需求方能做的四格」。
-  3. §4-A 那串命令的期望值换成 M11-b 终态（命令 **65**、cargo **332**、node **51**，其余不变）。
+  3. §4-A 那串命令的期望值换成 M11-b 终态（命令 **65**、cargo **333**、node **52**，其余不变）。
   4. §6 指针表补 M11-b spec / 计划 / 证据目录三行。
 
 - [ ] **Step 4: `docs/superpowers/specs/2026-10-19-m11-expiry-fields-design.md` 顶部加一行指针**（M11-b 已兑，正文不 retro-edit）。
@@ -1281,7 +1292,7 @@ Expected：第一条 ≥1；第二条 **0**（合并前）；`git status` 只剩
 
 ## 自审记录（控制方写完计划后现跑现数）
 
-- **数链**：按各 Task 代码块里 `#[test]` 逐个计数 —— T1 3、T2 5、T3 2、T4 2、T5 2 = **14 支** ⇒ cargo 318+14+1=**333**（多出的 1 支是 Task 3 修复轮的长单元格边界测试）；node `tests/ledger-export-name.test.ts` **4 支** ⇒ 47+4=**51**。T6/T7/T8 不新增测试。
+- **数链**：按各 Task 代码块里 `#[test]` 逐个计数 —— T1 3、T2 5、T3 2、T4 2、T5 2 = **14 支** ⇒ cargo 318+14+1=**333**（多出的 1 支是 Task 3 修复轮的长单元格边界测试）；node `tests/ledger-export-name.test.ts` **4 支** + 修复轮 emoji 边界 **1 支** ⇒ 47+5=**52**。T6 之后的 T7/T8 不新增测试。
 - **spec 覆盖**：D1–D12 逐条落 Task（D1/D2 → T1 模型 + T3/T4 渲染器；D3 → T2；D4 → T1 测试 + T7 真机格 6/7；D5 → T5；D6 → T1–T5 全在后端；D7 → T5 守卫文本门；D8 → T6 纯函数；D9 → T4；D10 → T5 同步命令；D11/D12 → 全批无迁移无依赖）；§九 13 格 → T7。
 - **类型一致性**：`collect` 的三处调用点（T1 测试、T2 测试、T5 命令）用同一签名 `(conn, Option<&MasterKey>, &str)`；`write` 的 `format: &str` 在 T5 命令与 T4 测试里一致；`SHEET_NAMES` 是 `[&str; 5]`，测试用 `.to_vec()` 比较。
 - **已知风险（派发时要带）**：① T1/T2 的 RED 只到编译层，断言有牙靠变异补（本仓口径）；② `rust_xlsxwriter` 的 `set_name` 对工作表名有 31 字符上限 —— 本轮五个名字都在 3 字以内；③ 测试写临时文件用 `std::env::temp_dir()` 而不是 `/tmp`（Windows 原生版 Python/Node 看不见 MSYS 的 `/tmp`，Rust 里同理要走 `temp_dir`）。
