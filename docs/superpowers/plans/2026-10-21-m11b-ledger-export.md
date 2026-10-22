@@ -1275,7 +1275,7 @@ Expected：`cargo=0` **333 passed**；两条 clippy `=0`；`rust-build=0`；`nod
 - [ ] **Step 3: `docs/HANDOFF.md`**
   1. 快照头与 §0 加 M11-b bullet（**合并前不写合并点**，只写取数命令）。
   2. §3「当前卡在哪」与「下一格动作」改成 M11 整批收口后的候选增强（项目模板 / 父子项目 / 操作日志 / 多工作区，`思维导图.md:71-74`），并保留「只剩需求方能做的四格」。
-  3. §4-A 那串命令的期望值换成 M11-b 终态（命令 **65**、cargo **333**、node **52**，其余不变）。
+  3. §4-A 那串命令的期望值换成 M11-b 终态（命令 **65**、cargo **337**、node **52**，其余不变；337 = 333 + 终审修复波 N-1/N-2/N-4/N-5 四支）。
   4. §6 指针表补 M11-b spec / 计划 / 证据目录三行。
 
 - [ ] **Step 4: `docs/superpowers/specs/2026-10-19-m11-expiry-fields-design.md` 顶部加一行指针**（M11-b 已兑，正文不 retro-edit）。
@@ -1292,7 +1292,7 @@ Expected：第一条 ≥1；第二条 **0**（合并前）；`git status` 只剩
 
 ## 自审记录（控制方写完计划后现跑现数）
 
-- **数链**：按各 Task 代码块里 `#[test]` 逐个计数 —— T1 3、T2 5、T3 2、T4 2、T5 2 = **14 支** ⇒ cargo 318+14+1=**333**（多出的 1 支是 Task 3 修复轮的长单元格边界测试）；node `tests/ledger-export-name.test.ts` **4 支** + 修复轮 emoji 边界 **1 支** ⇒ 47+5=**52**。T6 之后的 T7/T8 不新增测试。
+- **数链**：按各 Task 代码块里 `#[test]` 逐个计数 —— T1 3、T2 5、T3 2、T4 2、T5 2 = **14 支** ⇒ cargo 318+14+1=**333**（多出的 1 支是 Task 3 修复轮的长单元格边界测试）；node `tests/ledger-export-name.test.ts` **4 支** + 修复轮 emoji 边界 **1 支** ⇒ 47+5=**52**。T6 之后的 T7/T8 不新增测试。**2026-10-22 终审修复波再补 4 支（N-1/N-2/N-4/N-5）⇒ cargo 终态 337；本计划正文的 333 是修复波之前的读数，以 `docs/开发进度.md`「## M11-b 验收证据」为准。**
 - **spec 覆盖**：D1–D12 逐条落 Task（D1/D2 → T1 模型 + T3/T4 渲染器；D3 → T2；D4 → T1 测试 + T7 真机格 6/7；D5 → T5；D6 → T1–T5 全在后端；D7 → T5 守卫文本门；D8 → T6 纯函数；D9 → T4；D10 → T5 同步命令；D11/D12 → 全批无迁移无依赖）；§九 13 格 → T7。
 - **类型一致性**：`collect` 的三处调用点（T1 测试、T2 测试、T5 命令）用同一签名 `(conn, Option<&MasterKey>, &str)`；`write` 的 `format: &str` 在 T5 命令与 T4 测试里一致；`SHEET_NAMES` 是 `[&str; 5]`，测试用 `.to_vec()` 比较。
 - **已知风险（派发时要带）**：① T1/T2 的 RED 只到编译层，断言有牙靠变异补（本仓口径）；② `rust_xlsxwriter` 的 `set_name` 对工作表名有 31 字符上限 —— 本轮五个名字都在 3 字以内；③ 测试写临时文件用 `std::env::temp_dir()` 而不是 `/tmp`（Windows 原生版 Python/Node 看不见 MSYS 的 `/tmp`，Rust 里同理要走 `temp_dir`）。
