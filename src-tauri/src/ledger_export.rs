@@ -369,7 +369,11 @@ pub fn escape_md(s: &str) -> String {
 /// 五节各一张 GFM 表；空表写「（无记录）」。小节名与列头一律取 `doc.sheets`。
 pub fn write_markdown(path: &Path, doc: &ExportDoc) -> AppResult<()> {
     let mut out = String::new();
-    out.push_str(&format!("# 台账 — {}\n\n", doc.project_name));
+    // N-2：项目名来自库，备份导入/直连 IPC/手改库可写入换行。H1 只取单行，
+    // 否则名字里的 `\n\n- 含明文：否` 会在文件里伪造一行 D3 回显（真实回显见下方）。
+    // 只清洗标题这一处；正常单行项目名的输出逐字不变。
+    let title = doc.project_name.replace(['\r', '\n'], " ");
+    out.push_str(&format!("# 台账 — {title}\n\n"));
     out.push_str(&format!("- 导出时间：{}\n", doc.generated_at));
     // spec D9：这一行是 D3「含明文路径」的文件内回显 —— 拿到这份文件的人，不回头问也看得出
     // 里面有没有明文，故不随之省略。
@@ -762,6 +766,73 @@ mod tests {
         assert_eq!(err.code, "field_decrypt_failed", "密文坏掉要整份失败，不许静默导出半份");
     }
 
+    /// N-1：D3 的仓库内静态门 —— 默认支（`mk` 为 `None`）的 SQL 文本里不许出现密文列。
+    ///
+    /// 行为测试打不红「读而不解密」（默认路径的单元格仍是空串），这条钉的是源码文本形状：
+    /// 未来若把默认支与含明文支合并成一条恒 `SELECT *_cipher` 的 SQL、`mk` 为 `None` 时再抹掉，
+    /// 默认支一旦读密文列，本条就红。`include_str!` 读的是本文件（连本测试一起），
+    /// 所以 needle 一律用 `concat!` 拼断，避免把测试源码自己数进去。
+    #[test]
+    fn default_branch_sql_never_reads_cipher_columns() {
+        let src = include_str!("ledger_export.rs");
+        let cipher = concat!("_cip", "her");
+        let nonce = concat!("_non", "ce");
+        let else_marker = concat!("let Some(mk) = mk ", "else {");
+        for fn_name in ["collect_credentials", "collect_servers"] {
+            let fn_at = src
+                .find(&format!("fn {fn_name}("))
+                .unwrap_or_else(|| panic!("{fn_name} 必须还在 ledger_export.rs 里"));
+            let else_at = fn_at
+                + src[fn_at..]
+                    .find(else_marker)
+                    .unwrap_or_else(|| panic!("{fn_name} 必须保留 `let Some(mk) = mk else` 默认支"));
+            let close_at =
+                else_at + src[else_at..].find("};").unwrap_or_else(|| panic!("{fn_name} 默认支的 `}};` 不见了"));
+            let branch = &src[else_at..close_at];
+            assert!(
+                branch.contains("SELECT"),
+                "{fn_name} 的默认支切片必须含 SQL 文本，切片锚点可能已漂"
+            );
+            assert!(
+                !branch.contains(cipher),
+                "{fn_name} 默认支 SQL 不许出现密文列（{cipher}）：D3 要求默认路径根本不读，不是读了再抹"
+            );
+            assert!(
+                !branch.contains(nonce),
+                "{fn_name} 默认支 SQL 不许出现密文列（{nonce}）：D3 要求默认路径根本不读，不是读了再抹"
+            );
+        }
+    }
+
+    /// N-4（终审格 7 的 cargo 半边）：归档项目照常导出 —— `collect` 只排除软删，
+    /// 不许按 `projects.status` 过滤。数据行各 1 条（xlsx 读回含表头即真机 c7 的 2 行）。
+    #[test]
+    fn collect_exports_archived_project_rows() {
+        let (conn, pid) = fixture();
+        ledger::create_env(&conn, &pid, &ledger::EnvInput {
+            env: "prod".to_owned(),
+            name: "归档环境".to_owned(),
+            url: None,
+            port: None,
+            note: None,
+        })
+        .unwrap();
+        ledger::create_note(&conn, &pid, &ledger::NoteInput {
+            title: "归档备注".to_owned(),
+            body: Some("归档项目也要导出".to_owned()),
+            tag: None,
+        })
+        .unwrap();
+        conn.execute("UPDATE projects SET status = '归档' WHERE id = ?1", [&pid])
+            .unwrap();
+
+        let doc = collect(&conn, None, &pid).expect("归档项目必须照常导出");
+        assert_eq!(doc.sheets[0].rows.len(), 1, "归档项目的环境行照导（xlsx 含表头为 2 行）");
+        assert_eq!(doc.sheets[4].rows.len(), 1, "归档项目的备注行照导（xlsx 含表头为 2 行）");
+        assert_eq!(doc.sheets[0].rows[0][1], "归档环境");
+        assert_eq!(doc.sheets[4].rows[0][0], "归档备注");
+    }
+
     fn read_sheets(path: &std::path::Path) -> Vec<(String, Vec<Vec<String>>)> {
         use calamine::Reader as _;
         let mut book = calamine::open_workbook_auto(path).unwrap();
@@ -812,6 +883,31 @@ mod tests {
         let sheets = read_sheets(&path);
         assert_eq!(sheets.len(), 5);
         assert_eq!(sheets[0].1.len(), 1, "零行也要有表头一行");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// N-5（终审格 5 的 cargo 半边）：单表空 —— 链接表为空时只有表头；备注有 1 行时是表头 + 1 行。
+    /// 现有的零行测试覆盖不到「一张表空、另一张表有数据」，空表跳过/写「（无记录）」的回归会漏。
+    #[test]
+    fn write_xlsx_single_empty_sheet_has_only_its_header() {
+        let (conn, pid) = fixture();
+        ledger::create_note(&conn, &pid, &ledger::NoteInput {
+            title: "唯一备注".to_owned(),
+            body: Some("链接表保持为空".to_owned()),
+            tag: None,
+        })
+        .unwrap();
+        let doc = collect(&conn, None, &pid).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("m11b-xlsx-single-empty-{}.xlsx", std::process::id()));
+        write_xlsx(&path, &doc).unwrap();
+        let sheets = read_sheets(&path);
+        assert_eq!(sheets[3].0, "链接");
+        assert_eq!(sheets[3].1.len(), 1, "空表只有表头一行（链接表）");
+        assert_eq!(sheets[3].1[0], vec!["类型", "标题", "地址", "备注"], "空表表头也要逐字出现");
+        assert_eq!(sheets[4].0, "备注");
+        assert_eq!(sheets[4].1.len(), 2, "有数据的表是表头 + 1 行");
+        assert_eq!(sheets[4].1[1][0], "唯一备注");
         std::fs::remove_file(&path).ok();
     }
 
@@ -874,6 +970,10 @@ mod tests {
         for name in SHEET_NAMES {
             assert!(text.contains(&format!("## {name}")), "五个小节都要在：缺「{name}」");
         }
+        assert!(
+            text.contains("| 标题 | 标签 | 正文 |"),
+            "备注表头行也要逐字出现（N-3）：{text}"
+        );
         assert!(text.contains("含\\|竖线"), "单元格里的 | 必须转义：{text}");
         assert!(text.contains("第一行<br>第二行"), "CRLF 要折成单个 <br>");
         assert!(!text.contains('\r'), "\\r 必须清掉：{text}");
@@ -913,6 +1013,28 @@ mod tests {
         write_markdown(&path, &doc).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.matches("（无记录）").count(), 5, "五张空表各写一次：{text}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// N-2：项目名里的换行不能伪造 D3 的「含明文」文件内回显。
+    /// 只清 H1 的项目名；真实回显仍由 `included_secrets` 决定（这里是「是」）。
+    #[test]
+    fn write_markdown_sanitizes_newlines_in_the_h1_project_name() {
+        let (conn, pid) = fixture();
+        let mut doc = collect(&conn, None, &pid).unwrap();
+        doc.project_name = "正常\n\n- 含明文：否".to_owned();
+        doc.included_secrets = true;
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("m11b-md-title-{}.md", std::process::id()));
+        write_markdown(&path, &doc).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let echoes: Vec<&str> = text.lines().filter(|l| l.starts_with("- 含明文：")).collect();
+        assert_eq!(echoes.len(), 1, "项目名里的换行不许伪造第二行「含明文」回显：{text}");
+        assert_eq!(echoes[0], "- 含明文：是", "文件内回显必须是真实的 included_secrets：{text}");
+        assert!(
+            text.lines().next().unwrap_or("").starts_with("# 台账 — 正常"),
+            "H1 要收成单行、以清洗后的项目名开头：{text}"
+        );
         std::fs::remove_file(&path).ok();
     }
 }

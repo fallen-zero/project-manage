@@ -1164,6 +1164,10 @@ mod tests {
         let write_at = body.find(write).expect("写盘调用不见了");
         assert!(guard_at < write_at, "守卫必须早于写盘：守卫在 {guard_at}、写盘在 {write_at}");
         assert!(guard_at < collect_at, "守卫必须早于取数：守卫在 {guard_at}、取数在 {collect_at}");
+        assert!(
+            collect_at < write_at,
+            "写盘必须晚于取数：取数在 {collect_at}、写盘在 {write_at}（坏密文时不许先落半份文件）"
+        );
     }
 
     /// 五个阶段词在三个地方各存一份（V5 的 CHECK、`milestone.rs` 的 `STAGES`、
