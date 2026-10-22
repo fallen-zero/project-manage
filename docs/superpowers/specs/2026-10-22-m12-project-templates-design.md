@@ -97,7 +97,7 @@ interface TemplateInput {
 ```
 
 - 命令一律同步、函数体零 `await`；`db(&state)` 的 `MutexGuard` 不跨 await（沿用仓内既有形制）。
-- 校验顺序：`name` trim 非空 → 重名（更新时排除自己）→ `project::STATUSES.contains(status)` → tags 归一化 → 写库。错误文案点名具体字段（「模板名称」「状态」）与合法值。
+- 校验顺序（执行期订正，按实现）：`normalize` 先做 `name` trim 非空、status 枚举与 tags 归一化 → 重名（更新时排除自己）→ 写库。重名与非法 status 同时出现时先报 status；该优先级只在直接 IPC/测试里可见，UI 的 status 来自枚举下拉、构造不出组合。错误文案点名具体字段（「模板名称」「状态」）与合法值。
 - `create/update` 的成功返回都重新读库（`get` 形制），不在 Rust 里手拼行，保证默认值/`updated_at` 与库一致。
 - 命令数：**69**；`command(async)` 仍 **7**；全仓 `allow(dead_code)` 仍 **1**（新模块的四个入口都已注册）。
 
@@ -111,7 +111,7 @@ interface TemplateInput {
 
 ### 5.2 复用 `ProjectForm`
 
-- `src/components/project-form.tsx` 增加两个**可选** prop：`nameLabel?: string`（默认「项目名称」）与 `nameRequiredMessage?: string`（默认「项目名称不能为空」）；现有 `projects.tsx` 与 `project-detail.tsx` 两处调用不传，行为逐字不变。
+- `src/components/project-form.tsx` 增加两个**可选**文案 prop：`nameLabel?: string`（默认「项目名称」）与 `nameRequiredMessage?: string`（默认「项目名称不能为空」），以及一个可选 `onChange?: (input: ProjectInput) => void`（把 name/status/FIELDS/tags 的 live 值回传）；`project-detail.tsx` 与模板管理弹窗不传，行为逐字不变；**新建项目对话框传 `onChange` 仅同步 live 值**，用户可见行为不变（Task 6 修复轮，见 §五.4）。
 - 模板管理弹窗用同一个 `ProjectForm` 渲染模板表单：`nameLabel="模板名称"`、`nameRequiredMessage="模板名称不能为空"`；`initial` 用 `templateToFormInput(t)`（把 `ProjectTemplate.name` 放进 `ProjectInput.name` 这一格，其余字段一一映射）。提交时把 `ProjectInput` 直接当 `TemplateInput` 交给 store（结构同形）。
 
 ### 5.3 模板管理弹窗
@@ -132,6 +132,7 @@ interface TemplateInput {
   - `status: template.status`（总覆盖）；
   - `tags: template.tags.length > 0 ? [...template.tags] : [...input.tags]`；
   - 返回新对象，不修改入参。
+- **live 值同步（Task 6 修复轮）**：`ProjectForm` 通过可选 `onChange` 把当前表单的 name/status/FIELDS/tags 回传；新建项目对话框用它更新 `editing.input`，因此先输项目名再选模板时 `applyTemplate(prev.input, t)` 拿到的是最新名字，`formKey` 重挂不会丢。
 - 应用后把下拉重置回「不使用模板」，这样再选同一个模板仍能触发 `onValueChange` 重新套用。
 - 编辑已有项目（`editing.id !== null`）不渲染模板下拉；模板只服务新建。
 
@@ -150,7 +151,7 @@ interface TemplateInput {
 7. **模板不进检索**：`grep -c 'hits.append(&mut collect(' src-tauri/src/search.rs` 仍 **9**；`search_all(模板名)` 真机 0 命中。
 8. **备份口径**：模板随整库快照进包；`backup::Counts` 仍 7 键（无模板计数）；`warn_plaintext_columns` 含「项目模板」；包 `schemaVersion=8`；旧包（7）可导入。
 9. **结构门**：命令 **69** / async **7** / `TARGET_VERSION: i64 = 8` / `allow(dead_code)` **1** / `Cargo.lock` **616** / collect **9**；`Cargo.toml`/`Cargo.lock`/`package.json` 对 `master` diff **空**；merge commit **0**。
-10. **既有表单不变**：`ProjectForm` 两个新 prop 都有默认值，`projects.tsx` 与 `project-detail.tsx` 不传，原有新建/编辑行为与文案逐字不变。
+10. **既有表单不变**：`ProjectForm` 的 `nameLabel`/`nameRequiredMessage`/`onChange` 都是可选；`project-detail.tsx` 与模板管理弹窗不传，原有新建/编辑行为与文案逐字不变；新建项目对话框只传 `onChange` 同步 live 值（Task 6 修复轮），用户可见行为不变。
 
 ## 七、测试与取证档
 
@@ -202,7 +203,7 @@ interface TemplateInput {
 - **备份**：模板随整库快照进包；`Counts` 七键不变（备份页计数行不新增）；`warn_plaintext_columns` 改成点名项目模板的同类字段；`schemaVersion` 8；旧包（7）可导入，导入尾部迁移建 V8 表；新包在旧版本应用上按 `schema_version > TARGET_VERSION` 拒绝。
 - **检索**：模板不进 `search.rs`；`collect` 9 条不变；不做 FTS。
 - **命令/结构门**：69 / 7 / 8 / 1 / 616 / 9；零新依赖；merge commit 0。
-- **既有表单**：`ProjectForm` 两个新 prop 有默认值，现有两处调用不变。
+- **既有表单**：`ProjectForm` 的三个可选 prop 有默认值；`project-detail.tsx` 与模板管理弹窗不变，新建项目对话框只多传 `onChange` 同步 live 值。
 - **真实数据目录**：只读红线不变；真机只用沙盒 identifier。
 
 ## 十一、明确不做
