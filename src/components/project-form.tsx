@@ -35,6 +35,7 @@ export function ProjectForm({
   onCancel,
   nameLabel = "项目名称",
   nameRequiredMessage = "项目名称不能为空",
+  onChange,
 }: {
   initial?: ProjectInput;
   statuses: string[];
@@ -43,13 +44,23 @@ export function ProjectForm({
   onCancel: () => void;
   nameLabel?: string;
   nameRequiredMessage?: string;
+  onChange?: (input: ProjectInput) => void;
 }) {
   const [form, setForm] = useState<ProjectInput>(initial ?? EMPTY_INPUT);
   const [tagsText, setTagsText] = useState((initial ?? EMPTY_INPUT).tags.join("，"));
   const [nameError, setNameError] = useState<string | null>(null);
 
-  const patch = (key: keyof ProjectInput, value: string) =>
-    setForm((prev) => ({ ...prev, [key]: value }));
+  const emit = (next: ProjectInput, tags: string) =>
+    onChange?.({ ...next, tags: parseTags(tags) });
+  const patch = (key: keyof ProjectInput, value: string) => {
+    const next = { ...form, [key]: value };
+    setForm(next);
+    emit(next, tagsText);
+  };
+  const onTagsChange = (value: string) => {
+    setTagsText(value);
+    emit(form, value);
+  };
 
   const submit = async () => {
     if (!form.name.trim()) {
@@ -118,7 +129,7 @@ export function ProjectForm({
           id="p-tags"
           value={tagsText}
           placeholder="政务，维保中"
-          onChange={(e) => setTagsText(e.target.value)}
+          onChange={(e) => onTagsChange(e.target.value)}
         />
       </div>
 

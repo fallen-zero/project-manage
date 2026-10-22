@@ -220,7 +220,7 @@ export function ProjectsPage() {
                       ))}
                     </SelectContent>
                   </Select>
-                  {templates.length === 0 && (
+                  {!templatesLoading && templates.length === 0 && (
                     <p className="text-xs text-muted-foreground">暂无模板，先在「模板」里新建。</p>
                   )}
                 </div>
@@ -230,6 +230,7 @@ export function ProjectsPage() {
                 initial={editing.input}
                 statuses={statuses}
                 saving={saving}
+                onChange={(input) => setEditing((prev) => (prev ? { ...prev, input } : prev))}
                 onCancel={() => setEditing(null)}
                 onSubmit={async (input) => {
                   const ok = await save(editing.id, input);
