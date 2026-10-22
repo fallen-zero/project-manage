@@ -1056,7 +1056,7 @@ export const useTemplatesStore = create<TemplatesState>((set, get) => {
 });
 ```
 
-- [ ] **Step 2: 改 `ProjectForm` 两个 prop**
+- [ ] **Step 2: 改 `ProjectForm`（两个文案 prop + `onChange` 回传）**
 
 在 `src/components/project-form.tsx` 的 props 类型与解构里加（都有默认值；两处既有调用不传）：
 
@@ -1069,6 +1069,7 @@ export function ProjectForm({
   onCancel,
   nameLabel = "项目名称",
   nameRequiredMessage = "项目名称不能为空",
+  onChange,
 }: {
   initial?: ProjectInput;
   statuses: string[];
@@ -1077,10 +1078,29 @@ export function ProjectForm({
   onCancel: () => void;
   nameLabel?: string;
   nameRequiredMessage?: string;
+  onChange?: (input: ProjectInput) => void;
 }) {
 ```
 
-把提交处的空名错误改成 `setNameError(nameRequiredMessage)`，把名称 `Label` 的固定文案改成 `{nameLabel}`。其余（状态、`FIELDS`、tags、按钮）不动。
+并在组件内把 `patch` 与 tags 输入改成「更新本地 state + 回传 live 值」：
+
+```tsx
+  const emit = (next: ProjectInput, tags: string) =>
+    onChange?.({ ...next, tags: parseTags(tags) });
+  const patch = (key: keyof ProjectInput, value: string) => {
+    const next = { ...form, [key]: value };
+    setForm(next);
+    emit(next, tagsText);
+  };
+  const onTagsChange = (value: string) => {
+    setTagsText(value);
+    emit(form, value);
+  };
+```
+
+tags 的 `Input` 改成 `onChange={(e) => onTagsChange(e.target.value)}`。把提交处的空名错误改成 `setNameError(nameRequiredMessage)`，把名称 `Label` 的固定文案改成 `{nameLabel}`。其余（状态、`FIELDS`、按钮）不动；`onChange` 可选，现有两处调用不传、行为不变。
+
+> **执行期修复轮（2026-10-22）**：Task 6 首版只靠 `formKey` 重挂，`applyTemplate` 读 `editing.input`；而 `ProjectForm` 的手改值在它自己的 `useState`，**先输项目名再选模板会丢名字**（违反 spec D3 / §八 格 6）。修复轮给 `ProjectForm` 补可选 `onChange` 回传 live 值，Task 6 的 `ProjectForm` 传 `onChange` 把 `editing.input` 同步成当前表单值。详见账本 Task 6 fix round 1。
 
 - [ ] **Step 3: 跑 build 与全量门**
 
@@ -1330,7 +1350,9 @@ git commit -m "feat(m12): 项目页模板管理弹窗（列表/新建/编辑/删
 
 **Interfaces:**
 - Consumes：`useTemplatesStore`、`applyTemplate`、Task 5 的 `templatesOpen` / `TemplateManager`。
-- Produces：新建项目对话框的模板选择与 `formKey` 重挂。
+- Produces：新建项目对话框的模板选择、`ProjectForm onChange` 的 live 值同步与 `formKey` 重挂。
+
+> **执行期修复轮（2026-10-22，见账本 Task 6 fix round 1）**：只看 `editing.input` 不够——`ProjectForm` 的手改值在它的 `useState`，先输项目名再选模板会丢名字（spec D3 / §八 格 6）。下面的 `ProjectForm` 必须传 `onChange`，把 live 值写回 `editing.input`；无模板提示加 `!templatesLoading`。
 
 - [ ] **Step 1: 加 import 与 state/effect**
 
@@ -1410,7 +1432,7 @@ import {
                       ))}
                     </SelectContent>
                   </Select>
-                  {templates.length === 0 && (
+                  {!templatesLoading && templates.length === 0 && (
                     <p className="text-xs text-muted-foreground">暂无模板，先在「模板」里新建。</p>
                   )}
                 </div>
@@ -1420,6 +1442,7 @@ import {
                 initial={editing.input}
                 statuses={statuses}
                 saving={saving}
+                onChange={(input) => setEditing((prev) => (prev ? { ...prev, input } : prev))}
                 onCancel={() => setEditing(null)}
                 onSubmit={async (input) => {
                   const ok = await save(editing.id, input);
