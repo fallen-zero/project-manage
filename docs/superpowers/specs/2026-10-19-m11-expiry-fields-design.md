@@ -1,5 +1,7 @@
 # M11-a 设计：到期事项（维保 / 域名 / 证书 / 其他）+ 到期预警的后半
 
+> **M11-b 已兑（2026-10-22）**：台账 Excel/Markdown 导出（`思维导图.md` §四.2）的代码与取证已在 `feat/m11b-ledger-export` 上完成，待整分支终审/合并；本文件正文不 retro-edit。
+
 **状态**：需求方 2026-10-19 逐题拍定（D1–D7 各一问 + D8 命令数破例随设计 1/2 确认），设计 1/2 与 2/2 均已逐段过目。本文件是**规格**，不含实施计划；计划另由 `writing-plans` 落 `docs/superpowers/plans/`。
 **基线**：`master` = 收口文档提交，M0–M10 全部合入，**本轮开工前的实测读数**为 `cargo test -j 1 --lib` **301 passed**、`node --test` **41/41/0**、结构门 `generate_handler!` **60** / `tauri::command(async)` **7** / `TARGET_VERSION` **6** / 全仓 `allow(dead_code)` 豁免 **1**（`db.rs:30`）/ `Cargo.lock` `[[package]]` **616**。这些数会漂，动手前用 `docs/HANDOFF.md` §4-A 那串命令现取。
 
