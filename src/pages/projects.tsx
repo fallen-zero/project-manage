@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ProjectForm } from "@/components/project-form";
+import { TemplateManager } from "@/components/template-manager";
 import { Separator } from "@/components/ui/separator";
 import { copyText, openFolder } from "@/lib/api";
 import { useProjectsStore } from "@/stores/projects";
@@ -23,6 +24,7 @@ export function ProjectsPage() {
   const [confirming, setConfirming] = useState<Project | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
 
   useEffect(() => {
     void refresh();
@@ -55,9 +57,14 @@ export function ProjectsPage() {
             仅登记本地路径，软件不会移动、修改或复制磁盘上的原始文件。
           </p>
         </div>
-        <Button size="sm" onClick={() => setEditing({ id: null, input: toInput(emptySeed()) })}>
-          <Plus /> 新建项目
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="outline" onClick={() => setTemplatesOpen(true)}>
+            模板
+          </Button>
+          <Button size="sm" onClick={() => setEditing({ id: null, input: toInput(emptySeed()) })}>
+            <Plus /> 新建项目
+          </Button>
+        </div>
       </div>
 
       {error && (
@@ -202,6 +209,8 @@ export function ProjectsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <TemplateManager open={templatesOpen} onOpenChange={setTemplatesOpen} statuses={statuses} />
     </div>
   );
 }
