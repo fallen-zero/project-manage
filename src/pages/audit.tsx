@@ -129,11 +129,11 @@ export function AuditPage() {
 
       {loading && items.length === 0 ? (
         <p className="text-sm text-muted-foreground">读取日志…</p>
-      ) : items.length === 0 ? (
+      ) : items.length === 0 && !error ? (
         <div className="rounded-xl border bg-background p-10 text-center text-sm text-muted-foreground">
           还没有操作日志。
         </div>
-      ) : (
+      ) : items.length > 0 ? (
         <ul className="grid gap-2">
           {items.map((entry) => (
             <li key={entry.id} className="rounded-xl border bg-background px-4 py-3">
@@ -162,7 +162,7 @@ export function AuditPage() {
             </li>
           ))}
         </ul>
-      )}
+      ) : null}
 
       {hasMore && (
         <div className="mt-4 text-center">
