@@ -686,7 +686,13 @@ Expected（补字段后）: PASS。
         )
         .unwrap();
         assert_eq!(delete(&conn, &ws.id).unwrap_err().code, "invalid_input");
-        project::delete_project(&conn, &p.id).unwrap();
+        // 软删走裸 SQL，不用 `project::delete_project`：Task 3 之后 `get_project` 按活动区过滤，
+        // 这个项目的区是「有项目的区」而活动区还是默认区，走命令路径会先 not_found，守卫③那一支就测不到。
+        conn.execute(
+            "UPDATE projects SET deleted_at = datetime('now') WHERE id = ?1",
+            [p.id],
+        )
+        .unwrap();
         assert_eq!(delete(&conn, &ws.id).unwrap_err().code, "invalid_input", "软删行也算非空");
 
         // ②当前区：切走才让删。
@@ -1246,12 +1252,13 @@ Expected: 读数落进账本。**两条分支只走一条**：
             b.id,
             "换区后活动区跟随（spec §六.4 的返回契约前提）"
         );
-        let ids: Vec<String> = list_projects(&conn).unwrap().into_iter().map(|p| p.id).collect();
-        assert_eq!(
-            ids,
-            vec![grand.id.clone(), child.id.clone(), root.id.clone()],
-            "整棵子树三层都要在乙区、且按 updated_at 序：{ids:?}"
-        );
+        // 不断顺序：根项目本次主 UPDATE 动了 `updated_at`，反而排到最前，子与孙同秒序不可靠。
+        // 本 Task 的判据是「三层齐、且都在乙区」。
+        let mut ids: Vec<String> = list_projects(&conn).unwrap().into_iter().map(|p| p.id).collect();
+        ids.sort();
+        let mut want = vec![root.id.clone(), child.id.clone(), grand.id.clone()];
+        want.sort();
+        assert_eq!(ids, want, "整棵子树三层都要在乙区：{ids:?}");
 
         crate::workspace::switch(&conn, crate::workspace::DEFAULT_ID).unwrap();
         assert!(list_projects(&conn).unwrap().is_empty(), "旧区必须一台不剩");
@@ -1832,7 +1839,7 @@ fn soft_delete(conn: &Connection, table: &'static str, id: &str) -> AppResult<()
 | `daily_report_list_and_mutators_are_scoped`（`daily_report.rs`） | `DailyReportInput { project_id: "p-scope".to_owned(), report_date: Some("2026-10-23".to_owned()), content: "推进一期".to_owned(), hours: 1.0 }`；`DailyReportEdit { project_id: "p-scope".to_owned(), report_date: Some("2026-10-24".to_owned()), content: "推进二期".to_owned(), hours: 2.0 }` | 同上六件，表名 `daily_reports`；`update` 那条要断**行没被改**（`SELECT content FROM daily_reports WHERE id=?1` 仍是「推进一期」），因为 `update` 里有两道门（宿主项目守卫 + 本行守卫），只断错误码不足以证明库里没落 |
 | `ledger_read_and_write_paths_are_scoped`（`ledger.rs`） | `ledger::EnvInput { env: "prod".to_owned(), name: "生产门户".to_owned(), url: None, port: None, note: None }`；`update_env` 复用同一个 `EnvInput` | 用该模块已有的 `seed_project(conn, name) -> String`（`:687`）造项目 + `create_env` 拿行 id；挪区后：`list` 回 `not_found`、`update_env` 回 `not_found`、`delete_env` 回 `not_found`、再 `create_env` 回 `not_found`；并断 `SELECT COUNT(*) FROM ledger_envs` 不增 |
 | `directory_mutators_reject_a_foreign_project`（`project.rs`） | `DirInput { path: "C:/m15-scope/root".to_owned(), label: None, sort: None }` | `create_project` 拿项目 → `workspace::create` + 裸 SQL 挪区 → `set_root_dir`/`add_entry_dir`/`remove_dir` 三个各断 `not_found`；`remove_dir` 的 `dir_id` 传任意串（守卫排在前面，跨区时先回 `not_found`）；末断 `SELECT COUNT(*) FROM project_dirs` 为 0 |
-| `daily_report_import_only_matches_active_projects`（`daily_report.rs`） | 用 `write_xlsx` 现造一份两行表：一行的项目编号落在默认区、另一行落在别区 | `preview` 的 `ok == 1`、`rejected` 里出现别区那行的 `line`；`apply` 回 `invalid_input` 且 `SELECT COUNT(*) FROM daily_reports` 不增。表体沿用该模块既有 `.xlsx` 夹具写法（`export_row`（`:974`）与 `write_xlsx` 都在树里），**不为这条新造导出/导入往返工具** |
+| `daily_report_import_only_matches_active_projects`（`daily_report.rs`） | 用 `write_xlsx` 现造一份两行表：一行的项目编号落在默认区、另一行落在别区（**两个项目要各自 `switch` 到对应区再 `create_project`**，跨区 create 会被守卫拒；断言阶段活动区是默认区） | `preview` 的 `ok == 1`、`rejected` 里出现别区那行的 `line`；`apply` 回 `invalid_input` 且 `SELECT COUNT(*) FROM daily_reports` 不增。表体沿用该模块既有 `.xlsx` 夹具写法（`export_row`（`:974`）与 `write_xlsx` 都在树里），**不为这条新造导出/导入往返工具** |
 
 Run: `cd src-tauri && cargo test -j 1 --lib todo:: milestone:: expiry:: daily_report:: ledger:: project::`
 Expected: 全绿（cargo 单 target 一次只接一个筛选词，所以分六次跑；或跑一次 `cargo test -j 1 --lib` 全量看这七条新名）。
@@ -1876,11 +1883,15 @@ git commit -m "feat(m15): 待办/里程碑/到期/日报/台账/目录读写全�
         let bp = seed_project(&conn, "政务云迁移乙");
         crate::workspace::switch(&conn, crate::workspace::DEFAULT_ID).unwrap();
 
-        for pid in [a.clone(), bp.clone()] {
+        // 关联行必须在**它宿主项目所属的那一区**里创建：Task 5 之后 `todo::create` 一类的 create 守卫
+        // 会拒跨区（`project_exists` 已带区谓词）。所以两段各切一次区，而不是在活动区=默认区的循环里
+        // 给别区的项目建行（那会当场 panic 在 `.unwrap()`）。
+        for (pid, ws) in [(&a, crate::workspace::DEFAULT_ID.to_owned()), (&bp, b.id.clone())] {
+            crate::workspace::switch(&conn, &ws).unwrap();
             todo::create(
                 &conn,
                 &todo::TodoInput {
-                    project_id: pid.clone(),
+                    project_id: pid.to_owned(),
                     title: "串码待办".to_owned(),
                     due_date: None,
                 },
@@ -1889,7 +1900,7 @@ git commit -m "feat(m15): 待办/里程碑/到期/日报/台账/目录读写全�
             daily_report::create(
                 &conn,
                 &daily_report::DailyReportInput {
-                    project_id: pid.clone(),
+                    project_id: pid.to_owned(),
                     report_date: Some("2026-10-23".to_owned()),
                     content: "串码日报".to_owned(),
                     hours: 1.0,
@@ -1899,7 +1910,7 @@ git commit -m "feat(m15): 待办/里程碑/到期/日报/台账/目录读写全�
             expiry::create(
                 &conn,
                 &expiry::ExpiryInput {
-                    project_id: pid.clone(),
+                    project_id: pid.to_owned(),
                     kind: "域名".to_owned(),
                     label: "串码域名".to_owned(),
                     expire_date: Some("2027-01-31".to_owned()),
@@ -1909,7 +1920,7 @@ git commit -m "feat(m15): 待办/里程碑/到期/日报/台账/目录读写全�
             .unwrap();
             ledger::create_env(
                 &conn,
-                &pid,
+                pid,
                 &ledger::EnvInput {
                     env: "prod".to_owned(),
                     name: "串码环境".to_owned(),
@@ -1921,7 +1932,7 @@ git commit -m "feat(m15): 待办/里程碑/到期/日报/台账/目录读写全�
             .unwrap();
             ledger::create_note(
                 &conn,
-                &pid,
+                pid,
                 &ledger::NoteInput {
                     title: "串码备注".to_owned(),
                     body: Some("串码正文".to_owned()),
@@ -1930,6 +1941,7 @@ git commit -m "feat(m15): 待办/里程碑/到期/日报/台账/目录读写全�
             )
             .unwrap();
         }
+        crate::workspace::switch(&conn, crate::workspace::DEFAULT_ID).unwrap();
 
         let hits = field_hits(&conn, "串码").unwrap();
         assert!(
@@ -2381,8 +2393,18 @@ export const useWorkspacesStore = create<WorkspacesState>((set, get) => {
 
 - [ ] **Step 7: 类型门 + 提交**
 
+`Project.workspaceId` 是**必填**，所以 `src/pages/projects.tsx:295` 的 `emptySeed(): Project` 字面量必须在本格一起补上（否则 `tsc` 当场红）：在 `parentId: null,` 之后加
+
+```ts
+    // 新建不参与区归属：create 恒落活动区（M15 spec §六）。这里给空串只为满足类型，
+    // toInput 之后它会被 normalize 成「不改」，后端也忽略。
+    workspaceId: "",
+```
+
+> `tsconfig.json` 的 `include` 只有 `["src"]`（控制方 2026-10-23 现读），所以 `tests/project-tree.test.ts:10` 那个 `: Project` 工厂**不进 tsc**（`node --test` 只擦类型不校验），本格不动它。
+
 Run: `npm run build 2>&1 | grep -c "error TS"`
-Expected: `0`。此时 Task 8 的组件还不存在，`useWorkspacesStore` 只被 `workspace-view` 与本文件引用，不会有未使用变量的 TS 报错（`noUnusedLocals` 若被打开，本 Step 的 store 只有导出、没有本地未用符号）。
+Expected: `0`。**如果 tsc 报出别的 `Project` 字面量缺 `workspaceId`，就地补齐并在报告里点名补了哪几处** —— 那是本格的活，不留给 Task 8。（`noUnusedLocals: true` 是开着的：本 Step 新建文件里未使用的本地变量会直接红。）
 
 ```bash
 git add src/types/workspace.ts src/types/project.ts src/lib/api.ts src/lib/workspace-view.ts src/stores/workspaces.ts tests/workspace-view.test.ts
@@ -2714,13 +2736,7 @@ props 加一项（放在 `parentOptions` 之后）：
 1. import 组加 `import { useWorkspacesStore } from "@/stores/workspaces";`。
 2. 组件里取 `const workspaces = useWorkspacesStore((s) => s.items);` 与 `const refreshWorkspaces = useWorkspacesStore((s) => s.refresh);`，并把后者挂进既有 `useEffect`（`:45-48` 那个，实参数组同步加 `refreshWorkspaces`）：`void refreshWorkspaces();`。
 3. `ProjectForm` 那一处（`:203-215`）加一行：`workspaceOptions={editing.id === null ? undefined : workspaces}`。
-4. `emptySeed()`（`:295`）在 `parentId: null,` 之后加：
-
-```ts
-    // 新建不参与区归属：create 恒落活动区（M15 spec §六）。这里给空串只为满足类型，
-    // toInput 之后它会被 normalize 成「不改」，后端也忽略。
-    workspaceId: "",
-```
+4. （`emptySeed()` 的 `workspaceId: ""` 已在 Task 7 Step 7 补过 —— 那是 tsc 门的要求，本格不重复、也不改它。）
 
 `src/pages/project-detail.tsx`：同一件 —— import `useWorkspacesStore`，取 `const workspaces = useWorkspacesStore((s) => s.items);`（该页已有 `useEffect` 里的 `refresh` 队列，把 `refreshWorkspaces` 一起挂上），在 `ProjectForm`（`:336-347`）加一行 `workspaceOptions={workspaces}`（详情页恒是编辑态，直接传）。
 
