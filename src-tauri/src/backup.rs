@@ -20,7 +20,7 @@ pub const MANIFEST_ENTRY: &str = "manifest.json";
 /// D6 的代价不粉饰：库里只封四列 `*_cipher`，其余全是明文列，一个没加密的包 ≈ 一份内网入口清单。
 /// 界面念的是这一句，manifest 里存的也是这一句 —— 一份文本，两处出（别抄两遍再漂）。
 pub fn warn_plaintext_columns() -> &'static str {
-    "包内非 *_cipher 列为明文：项目名/编号/负责人/客户/联系人/合同号（含项目模板的同类字段）、服务器 ip 与堡垒机、各类 url、各表 note、待办内容、里程碑备注、日报内容、到期事项名称与备注、项目修改日志的字段旧值/新值（含联系人、联系方式）。"
+    "包内非 *_cipher 列为明文：项目名/编号/负责人/客户/联系人/合同号（含项目模板的同类字段）、工作区名称、服务器 ip 与堡垒机、各类 url、各表 note、待办内容、里程碑备注、日报内容、到期事项名称与备注、项目修改日志的字段旧值/新值（含联系人、联系方式）。"
 }
 
 /// manifest 里的一条文件记录 `{name,size,sha256}`：`size`/`sha256` 都打在条目的**原始字节**上。
@@ -666,6 +666,8 @@ mod tests {
         let warn = warn_plaintext_columns();
         assert!(warn.contains("待办内容"), "漏了待办的明文列：{warn}");
         assert!(warn.contains("里程碑备注"), "漏了里程碑的明文列：{warn}");
+        // M15 的第四处明文命名：区名是按客户起的，「客户乙」这种就是业务命名。
+        assert!(warn.contains("工作区名称"), "漏了工作区名称的明文：{warn}");
         // M10 的第三张：`daily_reports.content` 既随整库快照进包，又因 D4 进全局搜索结果页（M10 spec §九.2）。
         assert!(warn.contains("日报内容"), "漏了日报的明文列：{warn}");
         // M11-a 的第四张（spec §九.6）：到期事项的名称与备注都是明文，且**都进全局检索**（D6）。
@@ -865,7 +867,7 @@ mod tests {
         let dst = dir.path().join("templates.zip");
         let sum = export(&live, &dst).unwrap();
         assert_eq!(sum.schema_version, crate::db::TARGET_VERSION);
-        assert_eq!(sum.schema_version, 10, "M14 起包内 schema 必须是 10");
+        assert_eq!(sum.schema_version, 11, "M15 起包内 schema 必须是 11");
         assert_eq!(sum.counts.projects, 0);
         let (_unpacked, got) = unpack_db(&dst);
         let n: i64 = got
@@ -892,7 +894,7 @@ mod tests {
         let dst = dir.path().join("audit.zip");
         let sum = export(&live, &dst).unwrap();
         assert_eq!(sum.schema_version, crate::db::TARGET_VERSION);
-        assert_eq!(sum.schema_version, 10);
+        assert_eq!(sum.schema_version, 11);
         assert_eq!(sum.counts.projects, 0);
         let (_unpacked, got) = unpack_db(&dst);
         let n: i64 = got
@@ -903,6 +905,35 @@ mod tests {
             .query_row("SELECT action FROM project_audit_logs WHERE id = 'log-1'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(action, "update");
+    }
+
+    /// M15 的备份半边：工作区行随整库快照进包，但 Counts 仍是七张表（沿用 M12/M13/M14 的裁定）。
+    #[test]
+    fn backup_package_carries_workspaces_without_counting_them() {
+        let live = crate::db::open_in_memory().unwrap();
+        live.execute("INSERT INTO workspaces (id, name) VALUES ('ws-2', '客户乙')", [])
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("workspaces.zip");
+        let sum = export(&live, &dst).unwrap();
+        assert_eq!(sum.schema_version, crate::db::TARGET_VERSION);
+        assert_eq!(sum.schema_version, 11, "M15 起包内 schema 必须是 11");
+
+        let (_unpacked, got) = unpack_db(&dst);
+        let names: Vec<String> = got
+            .prepare("SELECT name FROM workspaces ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(names, vec!["默认工作区", "客户乙"], "区行必须随整库快照进包：{names:?}");
+        let keys = serde_json::to_value(&sum.counts).unwrap();
+        assert_eq!(
+            keys.as_object().unwrap().len(),
+            7,
+            "workspaces 是新表，不进 Counts：{keys:?}"
+        );
     }
 
     /// 双臂对照：同一份夹具、同样 `conn.backup` 到两个临时文件，一臂剥索引 + VACUUM、一臂原样。

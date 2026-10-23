@@ -95,7 +95,7 @@ fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
 
 /// 线性版本迁移：一个版本一段 DDL，只追加不改历史，便于备份包跨版本恢复。
 /// 提 `pub(crate)` 是给 M8 的验包判据比：包里的库比本机新就该拒（`backup::read_package`）。
-pub(crate) const TARGET_VERSION: i64 = 10;
+pub(crate) const TARGET_VERSION: i64 = 11;
 
 /// `pub(crate)` 是 M8 加的：`backup_import` 灌完包内库要能重放迁移（包里可能是旧版本）。
 pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
@@ -126,6 +126,7 @@ pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
             8 => V8,
             9 => V9,
             10 => V10,
+            11 => V11,
             _ => "",
         };
         apply_version(conn, target, ddl)?;
@@ -460,6 +461,27 @@ CREATE INDEX ix_audit_created ON project_audit_logs(created_at);
 CREATE INDEX ix_audit_project ON project_audit_logs(project_id, created_at);
 ";
 
+/// v11：多工作区（M15 spec §三）。一张 `workspaces` + `projects.workspace_id` + 一个当前区设置行。
+/// 顺序是刻意的：先建表并种默认区，再给 projects 加带 DEFAULT 的列 —— 这样「存量项目回填到默认区」
+/// 由 SQLite 的 `ADD COLUMN` 语义天然完成，迁移里不写一句 UPDATE。
+/// `settings` 用 `INSERT OR IGNORE`：它是 V1 就有的表，键位可能已被备份导入带进来，冲突必须静默跳过。
+/// `workspaces` 用裸 `INSERT`：表刚建出来必然为空，写 `OR IGNORE` 反而会把「默认区被人为删过」吞掉。
+const V11: &str = "
+CREATE TABLE workspaces (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+INSERT INTO workspaces (id, name) VALUES ('default', '默认工作区');
+
+ALTER TABLE projects ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default';
+
+CREATE INDEX ix_project_workspace ON projects(workspace_id);
+
+INSERT OR IGNORE INTO settings (key, value) VALUES ('active_workspace_id', 'default');
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,13 +750,13 @@ mod tests {
     }
 
     #[test]
-    fn v10_schema_meta_reaches_target_version_ten() {
+    fn v11_schema_meta_reaches_target_version_eleven() {
         let conn = open_in_memory().unwrap();
         let ver: i64 = conn
             .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, 10, "迁移必须跑到 10");
-        assert_eq!(TARGET_VERSION, 10, "= 上一条，两处别各写各的");
+        assert_eq!(ver, 11, "迁移必须跑到 11");
+        assert_eq!(TARGET_VERSION, 11, "= 上一条，两处别各写各的");
     }
 
     /// V10 必须建出日志表与两条显式索引。
@@ -777,6 +799,33 @@ mod tests {
         assert_eq!(n, 0, "V10 不许写任何业务行");
     }
 
+    /// V11 必须建出 `workspaces`（三列、顺序固定）并给 `projects` 加 `workspace_id` 列。
+    /// 列顺序变了要同步 `workspace.rs` 的 SELECT；本仓的形制是用这条断言把线格式钉住。
+    #[test]
+    fn v11_workspaces_table_and_projects_column_exist() {
+        let conn = open_in_memory().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('workspaces') ORDER BY cid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(cols.join(","), "id,name,created_at", "V11 的 workspaces 列集合/顺序不对：{cols:?}");
+
+        let pcols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('projects')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert!(
+            pcols.iter().any(|c| c == "workspace_id"),
+            "V11 必须给 projects 加 workspace_id 列：{pcols:?}"
+        );
+    }
+
     /// V9 必须给 projects 加 parent_id 列，并且只建这一条显式索引。
     /// `sqlite_autoindex_*`（sql 为 NULL）不算：TEXT 主键每张表都有。
     #[test]
@@ -802,7 +851,11 @@ mod tests {
             .unwrap()
             .map(|x| x.unwrap())
             .collect();
-        assert_eq!(idx, vec!["idx_projects_parent_id"], "projects 上只该有这一条显式索引：{idx:?}");
+        assert_eq!(
+            idx,
+            vec!["idx_projects_parent_id", "ix_project_workspace"],
+            "projects 上的显式索引只有这两条：{idx:?}"
+        );
     }
 
     /// V9 零回填：先手工把库建到 V8、落一条存量项目，再跑 V9；
@@ -845,7 +898,7 @@ mod tests {
         let ver: i64 = conn
             .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
             .unwrap();
-        // 这里只钉「迁移确实跑到了链头」；链头的具体数字由 v10_schema_meta... 那支负责。
+        // 这里只钉「迁移确实跑到了链头」；链头的具体数字由 v11_schema_meta... 那支负责。
         assert_eq!(ver, TARGET_VERSION);
     }
 
@@ -1133,5 +1186,139 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM project_expiries", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "新建库跑完迁移后本表必须是空的（迁移里不许塞业务行）");
+    }
+
+    /// V11 的回填不是 UPDATE：先把库手工建到 V10、落一个带标签的存量项目，再跑 `migrate`。
+    /// 存量行必须由 `ADD COLUMN … DEFAULT 'default'` 自动落进默认区，其余列一个字节都不许变
+    /// （spec §三 第 1 条 + D2「升级后打开应用看到的必须和升级前一模一样」）。
+    /// 这一条同时是「旧备份包导入」那半段的判据：`backup.rs:556` 导入收尾调的就是这个 `migrate`。
+    #[test]
+    fn v11_backfills_existing_projects_into_default() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta (version INTEGER NOT NULL, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for (target, ddl) in [
+            (1, V1),
+            (2, V2),
+            (3, V3),
+            (4, V4),
+            (5, V5),
+            (6, V6),
+            (7, V7),
+            (8, V8),
+            (9, V9),
+            (10, V10),
+        ] {
+            apply_version(&conn, target, ddl).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO projects (id, name, customer) VALUES ('p-old', '存量项目', '甲客户')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO project_tags (id, project_id, tag) VALUES ('t-old', 'p-old', '政务')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let ws: String = conn
+            .query_row("SELECT workspace_id FROM projects WHERE id = 'p-old'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ws, "default", "存量项目必须回填进默认区");
+        let bits: String = conn
+            .query_row(
+                "SELECT name || '/' || customer FROM projects WHERE id = 'p-old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bits, "存量项目/甲客户", "V11 只许动 workspace_id 一列");
+        let tag: String = conn
+            .query_row("SELECT tag FROM project_tags WHERE id = 't-old'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tag, "政务", "标签行不该被迁移碰");
+        let ver: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, TARGET_VERSION);
+    }
+
+    /// V11 必须种出「有且仅有一行默认区」+「`active_workspace_id = default`」。
+    /// 这两行是 §四 `active_id` 与 §五 三道删除守卫的地基：默认区被种成别的名字，
+    /// 顶栏就会多出一个空区；设置行没种上，首屏就走进 `active_id` 的兜底分支（那是兜底不是主路径）。
+    #[test]
+    fn v11_seeds_default_workspace_and_active_setting() {
+        let conn = open_in_memory().unwrap();
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT id, name FROM workspaces ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![("default".to_owned(), "默认工作区".to_owned())],
+            "V11 只该种默认区：{rows:?}"
+        );
+        let value: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'active_workspace_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, "default", "当前区必须种成默认区");
+    }
+
+    /// V11 一句 DDL 失败时，前面已经建好的 `workspaces` 与加好的列必须一起退回去，
+    /// `schema_meta` 也不许登记 11（否则下次开机跳过 V11，留下半拉库起不来 —— `db.rs:136-144`
+    /// 那段注释写的就是这个坑）。判据形状沿用 `apply_version` 那条 dup-CREATE 探针。
+    #[test]
+    fn v11_is_atomic_when_a_later_statement_fails() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta (version INTEGER NOT NULL, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for (target, ddl) in [
+            (1, V1),
+            (2, V2),
+            (3, V3),
+            (4, V4),
+            (5, V5),
+            (6, V6),
+            (7, V7),
+            (8, V8),
+            (9, V9),
+            (10, V10),
+        ] {
+            apply_version(&conn, target, ddl).unwrap();
+        }
+        let broken = format!("{V11}\nCREATE TABLE v11_probe(x);\nCREATE TABLE v11_probe(x);");
+
+        assert!(apply_version(&conn, 11, &broken).is_err(), "重复建表必须报错");
+
+        let tables: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'workspaces'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tables, 0, "V11 半途失败必须连已经建好的 workspaces 一起回滚");
+        let cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'workspace_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cols, 0, "加到一半的列也必须退回去");
+        let ver: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, 10, "失败的版本一律不许登记 schema_meta");
     }
 }
