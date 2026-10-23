@@ -289,6 +289,7 @@ function emptySeed(): Project {
     contractPeriod: null,
     deliveryDeadline: null,
     status: "立项",
+    parentId: null,
     tags: [],
     dirs: [],
   };

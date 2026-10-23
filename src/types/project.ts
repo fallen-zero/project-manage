@@ -21,6 +21,7 @@ export interface Project {
   contractPeriod: string | null;
   deliveryDeadline: string | null;
   status: string;
+  parentId: string | null;
   tags: string[];
   dirs: ProjectDir[];
 }
@@ -36,6 +37,7 @@ export interface ProjectInput {
   contractPeriod: string | null;
   deliveryDeadline: string | null;
   status: string;
+  parentId: string | null;
   tags: string[];
 }
 
@@ -50,6 +52,7 @@ export const EMPTY_INPUT: ProjectInput = {
   contractPeriod: "",
   deliveryDeadline: "",
   status: "立项",
+  parentId: null,
   tags: [],
 };
 
@@ -65,6 +68,7 @@ export function toInput(p: Project): ProjectInput {
     contractPeriod: p.contractPeriod ?? "",
     deliveryDeadline: p.deliveryDeadline ?? "",
     status: p.status,
+    parentId: p.parentId ?? null,
     tags: p.tags,
   };
 }

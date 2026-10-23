@@ -12,6 +12,7 @@ const pick = (current: string | null, next: string | null): string | null =>
 export function applyTemplate(input: ProjectInput, template: ProjectTemplate): ProjectInput {
   return {
     name: input.name,
+    parentId: input.parentId,
     code: pick(input.code, template.code),
     manager: pick(input.manager, template.manager),
     customer: pick(input.customer, template.customer),

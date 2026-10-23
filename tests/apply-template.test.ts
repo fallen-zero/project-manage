@@ -15,6 +15,7 @@ const base: ProjectInput = {
   contractPeriod: "2026-01 ~ 2026-12",
   deliveryDeadline: "2026-12-31",
   status: "立项",
+  parentId: "parent-1",
   tags: ["原标签"],
 };
 
@@ -67,4 +68,11 @@ test("返回新对象，不修改入参", () => {
   assert.notEqual(got, base);
   assert.equal(JSON.stringify(base), before);
   assert.notEqual(got.tags, base.tags);
+});
+
+test("套用模板保留当前 parentId", () => {
+  const got = applyTemplate(base, tpl({ manager: "模板经理" }));
+  assert.equal(got.parentId, "parent-1");
+  const empty = applyTemplate({ ...base, parentId: null }, tpl());
+  assert.equal(empty.parentId, null);
 });

@@ -28,6 +28,7 @@ function toForm(t: ProjectTemplate): ProjectInput {
     contractPeriod: t.contractPeriod ?? "",
     deliveryDeadline: t.deliveryDeadline ?? "",
     status: t.status,
+    parentId: null,
     tags: t.tags,
   };
 }
@@ -62,7 +63,7 @@ export function TemplateManager({
           <DialogHeader>
             <DialogTitle>{editing ? (editing.id ? "编辑模板" : "新建模板") : "项目模板"}</DialogTitle>
             <DialogDescription>
-              模板只保存项目基础信息，新建项目时可以一键填充；不包含项目名、台账或目录。
+              模板只保存项目基础信息，新建项目时可以一键填充；不包含项目名、所属总包、台账或目录。
             </DialogDescription>
           </DialogHeader>
 
@@ -90,7 +91,7 @@ export function TemplateManager({
           ) : (
             <div className="space-y-2">
               <div className="flex justify-end">
-                <Button size="sm" onClick={() => setEditing({ id: null, input: { ...EMPTY_TEMPLATE_INPUT, tags: [] } })}>
+                <Button size="sm" onClick={() => setEditing({ id: null, input: { ...EMPTY_TEMPLATE_INPUT, parentId: null, tags: [] } })}>
                   <Plus /> 新建模板
                 </Button>
               </div>
