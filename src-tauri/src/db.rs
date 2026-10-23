@@ -95,7 +95,7 @@ fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
 
 /// 线性版本迁移：一个版本一段 DDL，只追加不改历史，便于备份包跨版本恢复。
 /// 提 `pub(crate)` 是给 M8 的验包判据比：包里的库比本机新就该拒（`backup::read_package`）。
-pub(crate) const TARGET_VERSION: i64 = 9;
+pub(crate) const TARGET_VERSION: i64 = 10;
 
 /// `pub(crate)` 是 M8 加的：`backup_import` 灌完包内库要能重放迁移（包里可能是旧版本）。
 pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
@@ -125,6 +125,7 @@ pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
             7 => V7,
             8 => V8,
             9 => V9,
+            10 => V10,
             _ => "",
         };
         apply_version(conn, target, ddl)?;
@@ -443,6 +444,22 @@ ALTER TABLE projects ADD COLUMN parent_id TEXT;
 CREATE INDEX idx_projects_parent_id ON projects(parent_id);
 ";
 
+/// v10：项目信息修改操作日志（M14 spec §三）。只追加、无外键、无软删、永不清理；
+/// 项目软删后日志仍保留，project_id 只是快照关联。
+const V10: &str = "
+CREATE TABLE project_audit_logs (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL,
+    project_name TEXT NOT NULL,
+    action       TEXT NOT NULL CHECK (action IN ('create','update','delete')),
+    changes      TEXT NOT NULL DEFAULT '[]',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX ix_audit_created ON project_audit_logs(created_at);
+CREATE INDEX ix_audit_project ON project_audit_logs(project_id, created_at);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -711,13 +728,53 @@ mod tests {
     }
 
     #[test]
-    fn v9_schema_meta_reaches_target_version_nine() {
+    fn v10_schema_meta_reaches_target_version_ten() {
         let conn = open_in_memory().unwrap();
         let ver: i64 = conn
             .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, 9, "迁移必须跑到 9");
-        assert_eq!(TARGET_VERSION, 9, "= 上一条，两处别各写各的");
+        assert_eq!(ver, 10, "迁移必须跑到 10");
+        assert_eq!(TARGET_VERSION, 10, "= 上一条，两处别各写各的");
+    }
+
+    /// V10 必须建出日志表与两条显式索引。
+    #[test]
+    fn v10_project_audit_logs_table_and_indexes_exist() {
+        let conn = open_in_memory().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('project_audit_logs') ORDER BY cid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(
+            cols.join(","),
+            "id,project_id,project_name,action,changes,created_at",
+            "V10 的列集合/顺序变了要同步 project_audit.rs 的 SELECT"
+        );
+        let idx: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                  WHERE type = 'index' AND tbl_name = 'project_audit_logs' AND sql IS NOT NULL
+                  ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(idx, vec!["ix_audit_created", "ix_audit_project"], "V10 索引不对：{idx:?}");
+    }
+
+    /// V10 零回填：新建库跑完迁移后日志表必须为空。
+    #[test]
+    fn v10_backfills_nothing() {
+        let conn = open_in_memory().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_audit_logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "V10 不许写任何业务行");
     }
 
     /// V9 必须给 projects 加 parent_id 列，并且只建这一条显式索引。
@@ -788,7 +845,8 @@ mod tests {
         let ver: i64 = conn
             .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, 9);
+        // 这里只钉「迁移确实跑到了链头」；链头的具体数字由 v10_schema_meta... 那支负责。
+        assert_eq!(ver, TARGET_VERSION);
     }
 
     /// V8 必须把模板表与 name 唯一索引建出来，且迁移不带任何模板行（零回填）。

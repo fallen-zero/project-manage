@@ -20,7 +20,7 @@ pub const MANIFEST_ENTRY: &str = "manifest.json";
 /// D6 的代价不粉饰：库里只封四列 `*_cipher`，其余全是明文列，一个没加密的包 ≈ 一份内网入口清单。
 /// 界面念的是这一句，manifest 里存的也是这一句 —— 一份文本，两处出（别抄两遍再漂）。
 pub fn warn_plaintext_columns() -> &'static str {
-    "包内非 *_cipher 列为明文：项目名/编号/负责人/客户/联系人/合同号（含项目模板的同类字段）、服务器 ip 与堡垒机、各类 url、各表 note、待办内容、里程碑备注、日报内容、到期事项名称与备注。"
+    "包内非 *_cipher 列为明文：项目名/编号/负责人/客户/联系人/合同号（含项目模板的同类字段）、服务器 ip 与堡垒机、各类 url、各表 note、待办内容、里程碑备注、日报内容、到期事项名称与备注、项目修改日志的字段旧值/新值（含联系人、联系方式）。"
 }
 
 /// manifest 里的一条文件记录 `{name,size,sha256}`：`size`/`sha256` 都打在条目的**原始字节**上。
@@ -673,6 +673,7 @@ mod tests {
         // M10 那次是这句话没被分配到任何一格任务，于是九次任务评审结构性看不见它 —— 本轮它是一格的必改文件。
         assert!(warn.contains("到期事项名称与备注"), "漏了到期事项的明文列：{warn}");
         assert!(warn.contains("项目模板"), "漏了项目模板的明文列：{warn}");
+        assert!(warn.contains("项目修改日志"), "漏了项目修改日志的旧值/新值：{warn}");
     }
 
     /// 计数从库里现数，且必须与 V2/V3 建的表**逐张对上**。
@@ -864,7 +865,7 @@ mod tests {
         let dst = dir.path().join("templates.zip");
         let sum = export(&live, &dst).unwrap();
         assert_eq!(sum.schema_version, crate::db::TARGET_VERSION);
-        assert_eq!(sum.schema_version, 9, "M13 起包内 schema 必须是 9");
+        assert_eq!(sum.schema_version, 10, "M14 起包内 schema 必须是 10");
         assert_eq!(sum.counts.projects, 0);
         let (_unpacked, got) = unpack_db(&dst);
         let n: i64 = got
@@ -875,6 +876,33 @@ mod tests {
             .query_row("SELECT name FROM project_templates", [], |r| r.get(0))
             .unwrap();
         assert_eq!(name, "备份模板");
+    }
+
+    /// M14 的备份半边：日志随整库快照进包，但 counts 仍是七张表。
+    #[test]
+    fn backup_package_carries_project_audit_logs_without_counting_them() {
+        let live = crate::db::open_in_memory().unwrap();
+        live.execute(
+            "INSERT INTO project_audit_logs (id, project_id, project_name, action, changes)
+             VALUES ('log-1', 'p1', '甲项目', 'update', '[]')",
+            [],
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("audit.zip");
+        let sum = export(&live, &dst).unwrap();
+        assert_eq!(sum.schema_version, crate::db::TARGET_VERSION);
+        assert_eq!(sum.schema_version, 10);
+        assert_eq!(sum.counts.projects, 0);
+        let (_unpacked, got) = unpack_db(&dst);
+        let n: i64 = got
+            .query_row("SELECT COUNT(*) FROM project_audit_logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "日志行必须随整库快照进包");
+        let action: String = got
+            .query_row("SELECT action FROM project_audit_logs WHERE id = 'log-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(action, "update");
     }
 
     /// 双臂对照：同一份夹具、同样 `conn.backup` 到两个临时文件，一臂剥索引 + VACUUM、一臂原样。
