@@ -644,7 +644,7 @@ Expected（补字段后）: PASS。
         assert_eq!(create(&conn, "客户乙").unwrap_err().code, "invalid_input", "重名要回人话，不是 UNIQUE 撞出来的 db_failed");
         let long = "区".repeat(NAME_MAX_CHARS + 1);
         assert_eq!(create(&conn, &long).unwrap_err().code, "invalid_input");
-        assert_eq!(create(&conn, &"区".repeat(NAME_MAX_CHARS)).is_ok(), "{NAME_MAX_CHARS} 字是闭区间");
+        assert!(create(&conn, &"区".repeat(NAME_MAX_CHARS)).is_ok(), "{NAME_MAX_CHARS} 字是闭区间");
     }
 
     #[test]
@@ -708,6 +708,14 @@ Expected（补字段后）: PASS。
     #[test]
     fn list_reports_project_count_and_marks_the_active_row() {
         let conn = db::open_in_memory().unwrap();
+        // 把默认区的 `created_at` 钉死在早于本次的时间：`datetime('now')` 只到秒，
+        // 不钉住的话它与新建区同秒 ⇒ 排序落到第二键 `id`，而 uuid v4 恒大于 'default'，
+        // 「default 恒在最前」这条会变成 4/5 概率红（Task 2 实跑抓到，Task 9 会再撞一次）。
+        conn.execute(
+            "UPDATE workspaces SET created_at = '2000-01-01 00:00:00' WHERE id = ?1",
+            [DEFAULT_ID],
+        )
+        .unwrap();
         let b = create(&conn, "客户乙").unwrap();
         let rows = list(&conn).unwrap();
         assert_eq!(rows[0].id, DEFAULT_ID, "default 恒在最前（按 created_at, id 定序）");
@@ -914,7 +922,9 @@ Expected: `7 passed; 0 failed`（Step 2 那条 + 本 Step 六条）。逐条红�
 
 ```rust
 /// 工作区五条命令（M15 spec §五）：一律同步。`db(&state)?` 取回的 `MutexGuard` 不是 `Send`，
-/// 套 `async` 才是多余的门槛 —— `tauri::command(async)` 那道结构门本轮**保持 7 条不动**。
+/// 套上 async 才是多余的门槛 —— 本轮五条都不加 async 标记，所以那条「async 计数」结构门保持 7 条不动。
+/// **这句注释里不许出现 `tauri::command` + `(async)` 的连续字面量**：Step 6 的门就是 `grep -c` 那一串，
+/// 注释里写全它会把门读数从 7 变成 8（Task 2 实跑抓到过）。
 #[tauri::command]
 fn workspace_list(state: State<'_, AppState>) -> AppResult<Vec<workspace::Workspace>> {
     let conn = db(&state)?;
