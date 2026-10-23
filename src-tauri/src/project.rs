@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -156,10 +156,19 @@ fn path_exists(path: &str) -> bool {
     Path::new(path).exists()
 }
 
+fn write_tx(conn: &Connection) -> AppResult<rusqlite::Transaction<'_>> {
+    // 项目写事务里有「先读旧值/父项、再写」的形态；DEFERRED 在索引 worker 另一连接提交后
+    // 升级写锁会立刻撞 SQLITE_BUSY_SNAPSHOT（不走 busy_timeout），与 set_root_dir 的 risk 8 同族。
+    Ok(rusqlite::Transaction::new_unchecked(
+        conn,
+        TransactionBehavior::Immediate,
+    )?)
+}
+
 pub fn create_project(conn: &Connection, input: &ProjectInput) -> AppResult<Project> {
     validate(input)?;
     let parent_id = normalize(input.parent_id.clone());
-    let tx = conn.unchecked_transaction()?;
+    let tx = write_tx(conn)?;
     validate_parent(&tx, None, parent_id.as_deref())?;
     let id = uuid::Uuid::new_v4().to_string();
     tx.execute(
@@ -190,7 +199,7 @@ pub fn create_project(conn: &Connection, input: &ProjectInput) -> AppResult<Proj
 pub fn update_project(conn: &Connection, id: &str, input: &ProjectInput) -> AppResult<Project> {
     validate(input)?;
     let parent_id = normalize(input.parent_id.clone());
-    let tx = conn.unchecked_transaction()?;
+    let tx = write_tx(conn)?;
     let old = get_project(&tx, id)?;
     validate_parent(&tx, Some(id), parent_id.as_deref())?;
     let changed = tx.execute(
@@ -225,7 +234,7 @@ pub fn update_project(conn: &Connection, id: &str, input: &ProjectInput) -> AppR
 /// 软删除：数据模型带 deleted_at 是「先单人、预留多人」的唯一代价，
 /// 保留行才能在未来同步时区分「删除」与「本机从未有过」。
 pub fn delete_project(conn: &Connection, id: &str) -> AppResult<()> {
-    let tx = conn.unchecked_transaction()?;
+    let tx = write_tx(conn)?;
     let old = get_project(&tx, id)?;
     let children: i64 = tx.query_row(
         "SELECT COUNT(*) FROM projects WHERE parent_id = ?1 AND deleted_at IS NULL",

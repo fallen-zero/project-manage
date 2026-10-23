@@ -68,7 +68,7 @@ CREATE INDEX ix_audit_project ON project_audit_logs(project_id, created_at);
 
 ### 4.2 原子性
 
-- `create_project` / `update_project` / `delete_project` 各自用 `unchecked_transaction` 包住业务写入、tags 替换与日志插入；任一步失败整体回滚，**不会留下“项目改了但日志没写”或反之**。
+- `create_project` / `update_project` / `delete_project` 各自用 `write_tx`（`Transaction::new_unchecked` + `TransactionBehavior::Immediate`，即 `BEGIN IMMEDIATE`）包住业务写入、tags 替换与日志插入；任一步失败整体回滚，**不会留下“项目改了但日志没写”或反之**。这三个函数在事务内先读旧值/父项再写，DEFERRED 会在索引 worker 另一连接提交后升级写锁时立刻撞 `SQLITE_BUSY_SNAPSHOT`（不走 `busy_timeout`），故改用 IMMEDIATE。
 - `update_project` 在事务内先读旧 `Project`，再做现有校验/更新；`delete_project` 在事务内读旧 `Project` 并数子项；`get_project` 的返回仍在提交后读取（与现有形制一致）。
 - 日志插入失败（例如 JSON 序列化异常）返回 `db_failed`，事务回滚；项目的既有错误码（`invalid_input` / `not_found`）不变。
 
