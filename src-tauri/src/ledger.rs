@@ -699,6 +699,7 @@ mod tests {
                 delivery_deadline: None,
                 status: "立项".to_owned(),
                 tags: vec![],
+                parent_id: None,
             },
         )
         .unwrap()

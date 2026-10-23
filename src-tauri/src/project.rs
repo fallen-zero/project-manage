@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::error::{AppError, AppResult};
@@ -25,6 +25,7 @@ pub struct Project {
     pub contract_period: Option<String>,
     pub delivery_deadline: Option<String>,
     pub status: String,
+    pub parent_id: Option<String>,
     pub tags: Vec<String>,
     pub dirs: Vec<ProjectDir>,
 }
@@ -55,6 +56,8 @@ pub struct ProjectInput {
     pub contract_period: Option<String>,
     pub delivery_deadline: Option<String>,
     pub status: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
     pub tags: Vec<String>,
 }
 
@@ -86,6 +89,51 @@ fn validate(input: &ProjectInput) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_parent(
+    conn: &Connection,
+    self_id: Option<&str>,
+    parent_id: Option<&str>,
+) -> AppResult<()> {
+    let Some(pid) = parent_id else {
+        return Ok(());
+    };
+    if self_id == Some(pid) {
+        return Err(invalid("项目不能把自己设为所属总包"));
+    }
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM projects WHERE id = ?1 AND deleted_at IS NULL",
+            [pid],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !exists {
+        return Err(invalid("所属总包不存在或已删除"));
+    }
+    if let Some(self_id) = self_id {
+        let mut cursor = Some(pid.to_owned());
+        let mut visited = HashSet::new();
+        while let Some(cur) = cursor {
+            if cur == self_id {
+                return Err(invalid("不能把项目挂到自己的子项目下（会形成循环）"));
+            }
+            if !visited.insert(cur.clone()) {
+                return Err(invalid("父子关系存在循环，请先解除循环后再保存"));
+            }
+            cursor = conn
+                .query_row(
+                    "SELECT parent_id FROM projects WHERE id = ?1 AND deleted_at IS NULL",
+                    [&cur],
+                    |r| r.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten();
+        }
+    }
+    Ok(())
+}
+
 /// 只登记路径，绝不创建、移动或改写目标；因此要求绝对路径，
 /// 否则相对路径会随工作目录变化指向不同位置，索引器与「一键打开」都会指错。
 fn validate_path(path: &str) -> AppResult<String> {
@@ -107,11 +155,13 @@ fn path_exists(path: &str) -> bool {
 
 pub fn create_project(conn: &Connection, input: &ProjectInput) -> AppResult<Project> {
     validate(input)?;
+    let parent_id = normalize(input.parent_id.clone());
+    validate_parent(conn, None, parent_id.as_deref())?;
     let id = uuid::Uuid::new_v4().to_string();
     conn.execute(
         "INSERT INTO projects (id, name, code, manager, customer, contact_name, contact_phone,
-                               contract_no, contract_period, delivery_deadline, status)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                               contract_no, contract_period, delivery_deadline, status, parent_id)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
         params![
             id,
             input.name.trim(),
@@ -124,6 +174,7 @@ pub fn create_project(conn: &Connection, input: &ProjectInput) -> AppResult<Proj
             normalize(input.contract_period.clone()),
             normalize(input.delivery_deadline.clone()),
             input.status,
+            parent_id,
         ],
     )?;
     replace_tags(conn, &id, &input.tags)?;
@@ -132,10 +183,23 @@ pub fn create_project(conn: &Connection, input: &ProjectInput) -> AppResult<Proj
 
 pub fn update_project(conn: &Connection, id: &str, input: &ProjectInput) -> AppResult<Project> {
     validate(input)?;
+    let parent_id = normalize(input.parent_id.clone());
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM projects WHERE id = ?1 AND deleted_at IS NULL",
+            [id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !exists {
+        return Err(not_found(id));
+    }
+    validate_parent(conn, Some(id), parent_id.as_deref())?;
     let changed = conn.execute(
         "UPDATE projects SET name=?2, code=?3, manager=?4, customer=?5, contact_name=?6,
                 contact_phone=?7, contract_no=?8, contract_period=?9, delivery_deadline=?10,
-                status=?11, updated_at=datetime('now')
+                status=?11, parent_id=?12, updated_at=datetime('now')
          WHERE id=?1 AND deleted_at IS NULL",
         params![
             id,
@@ -149,6 +213,7 @@ pub fn update_project(conn: &Connection, id: &str, input: &ProjectInput) -> AppR
             normalize(input.contract_period.clone()),
             normalize(input.delivery_deadline.clone()),
             input.status,
+            parent_id,
         ],
     )?;
     if changed == 0 {
@@ -161,6 +226,26 @@ pub fn update_project(conn: &Connection, id: &str, input: &ProjectInput) -> AppR
 /// 软删除：数据模型带 deleted_at 是「先单人、预留多人」的唯一代价，
 /// 保留行才能在未来同步时区分「删除」与「本机从未有过」。
 pub fn delete_project(conn: &Connection, id: &str) -> AppResult<()> {
+    let name: String = conn
+        .query_row(
+            "SELECT name FROM projects WHERE id = ?1 AND deleted_at IS NULL",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| not_found(id))?;
+    let children: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM projects WHERE parent_id = ?1 AND deleted_at IS NULL",
+        [id],
+        |r| r.get(0),
+    )?;
+    if children > 0 {
+        return Err(AppError::new(
+            "invalid_input",
+            &format!("项目「{name}」下还有 {children} 个未删除的子项目，请先调整归属或删除子项目"),
+            Some("子项目删除或改挂到其他项目后，本项才能删除"),
+        ));
+    }
     let changed = conn.execute(
         "UPDATE projects SET deleted_at = datetime('now'), updated_at = datetime('now')
          WHERE id = ?1 AND deleted_at IS NULL",
@@ -175,7 +260,7 @@ pub fn delete_project(conn: &Connection, id: &str) -> AppResult<()> {
 pub fn list_projects(conn: &Connection) -> AppResult<Vec<Project>> {
     let mut rows = conn.prepare(
         "SELECT id, name, code, manager, customer, contact_name, contact_phone,
-                contract_no, contract_period, delivery_deadline, status
+                contract_no, contract_period, delivery_deadline, status, parent_id
          FROM projects WHERE deleted_at IS NULL ORDER BY updated_at DESC",
     )?;
     let mut projects: Vec<Project> = rows
@@ -192,6 +277,7 @@ pub fn list_projects(conn: &Connection) -> AppResult<Vec<Project>> {
                 contract_period: r.get(8)?,
                 delivery_deadline: r.get(9)?,
                 status: r.get(10)?,
+                parent_id: r.get(11)?,
                 tags: Vec::new(),
                 dirs: Vec::new(),
             })
@@ -246,7 +332,7 @@ pub fn get_project(conn: &Connection, id: &str) -> AppResult<Project> {
     let base = conn
         .query_row(
             "SELECT name, code, manager, customer, contact_name, contact_phone,
-                    contract_no, contract_period, delivery_deadline, status
+                    contract_no, contract_period, delivery_deadline, status, parent_id
              FROM projects WHERE id = ?1 AND deleted_at IS NULL",
             [id],
             |r| {
@@ -261,6 +347,7 @@ pub fn get_project(conn: &Connection, id: &str) -> AppResult<Project> {
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, Option<String>>(8)?,
                     r.get::<_, String>(9)?,
+                    r.get::<_, Option<String>>(10)?,
                 ))
             },
         )
@@ -286,6 +373,7 @@ pub fn get_project(conn: &Connection, id: &str) -> AppResult<Project> {
         contract_period: base.7,
         delivery_deadline: base.8,
         status: base.9,
+        parent_id: base.10,
         tags,
         dirs,
     })
@@ -462,6 +550,7 @@ mod tests {
             contract_period: None,
             delivery_deadline: None,
             status: "开发".into(),
+            parent_id: None,
             tags: vec!["政务".into(), " 政务 ".into(), "".into()],
         }
     }
@@ -719,5 +808,156 @@ mod tests {
             .query_row("SELECT count(*) FROM project_dirs WHERE project_id = ?1", [&p.id], |r| r.get(0))
             .unwrap();
         assert_eq!(dirs, 2, "entry 与旧 root 都该还在：一次失败的改指不许留下半张表");
+    }
+
+    #[test]
+    fn create_with_parent_roundtrips_in_get_and_list() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let parent = create_project(&conn, &input("总包")).unwrap();
+        let mut child_input = input("子项目");
+        child_input.parent_id = Some(parent.id.clone());
+        let child = create_project(&conn, &child_input).unwrap();
+
+        assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(
+            get_project(&conn, &child.id).unwrap().parent_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+        let listed = list_projects(&conn).unwrap();
+        assert_eq!(
+            listed.iter().find(|p| p.id == child.id).unwrap().parent_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+    }
+
+    #[test]
+    fn update_moves_project_and_can_clear_parent() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let a = create_project(&conn, &input("总包甲")).unwrap();
+        let b = create_project(&conn, &input("总包乙")).unwrap();
+        let mut child_input = input("子项目");
+        child_input.parent_id = Some(a.id.clone());
+        let child = create_project(&conn, &child_input).unwrap();
+
+        let mut move_input = input("子项目");
+        move_input.parent_id = Some(b.id.clone());
+        let moved = update_project(&conn, &child.id, &move_input).unwrap();
+        assert_eq!(moved.parent_id.as_deref(), Some(b.id.as_str()));
+
+        let mut clear_input = input("子项目");
+        clear_input.parent_id = None;
+        let cleared = update_project(&conn, &child.id, &clear_input).unwrap();
+        assert_eq!(cleared.parent_id, None);
+    }
+
+    #[test]
+    fn self_parent_is_rejected() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let p = create_project(&conn, &input("自指项目")).unwrap();
+        let mut self_input = input("自指项目");
+        self_input.parent_id = Some(p.id.clone());
+
+        let err = update_project(&conn, &p.id, &self_input).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("自己"), "{}", err.message);
+    }
+
+    #[test]
+    fn descendant_parent_is_rejected_as_a_cycle() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let a = create_project(&conn, &input("总包")).unwrap();
+        let mut b_input = input("子项目");
+        b_input.parent_id = Some(a.id.clone());
+        let b = create_project(&conn, &b_input).unwrap();
+        let mut c_input = input("孙项目");
+        c_input.parent_id = Some(b.id.clone());
+        let c = create_project(&conn, &c_input).unwrap();
+
+        let mut cycle_input = input("总包");
+        cycle_input.parent_id = Some(c.id.clone());
+        let err = update_project(&conn, &a.id, &cycle_input).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("循环"), "{}", err.message);
+
+        let mut direct_input = input("总包");
+        direct_input.parent_id = Some(b.id.clone());
+        assert_eq!(
+            update_project(&conn, &a.id, &direct_input).unwrap_err().code,
+            "invalid_input",
+            "直接挂到自己的子项目也必须拒"
+        );
+    }
+
+    #[test]
+    fn missing_or_deleted_parent_is_rejected() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let mut orphan_input = input("孤儿项目");
+        orphan_input.parent_id = Some("no-such-parent".into());
+        let err = create_project(&conn, &orphan_input).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("不存在"), "{}", err.message);
+
+        let p = create_project(&conn, &input("待删总包")).unwrap();
+        delete_project(&conn, &p.id).unwrap();
+        let mut deleted_input = input("新子项目");
+        deleted_input.parent_id = Some(p.id.clone());
+        let err = create_project(&conn, &deleted_input).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("已删除"), "{}", err.message);
+    }
+
+    #[test]
+    fn archived_project_can_still_be_a_parent() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let mut archived_input = input("已归档总包");
+        archived_input.status = "归档".into();
+        let parent = create_project(&conn, &archived_input).unwrap();
+
+        let mut child_input = input("子项目");
+        child_input.parent_id = Some(parent.id.clone());
+        let child = create_project(&conn, &child_input).unwrap();
+        assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+    }
+
+    #[test]
+    fn delete_is_blocked_while_live_children_exist() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let parent = create_project(&conn, &input("总包")).unwrap();
+        let mut child_input = input("子项目");
+        child_input.parent_id = Some(parent.id.clone());
+        let child = create_project(&conn, &child_input).unwrap();
+
+        let err = delete_project(&conn, &parent.id).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("1"), "文案必须点名子项数量：{}", err.message);
+        assert!(get_project(&conn, &parent.id).is_ok(), "被拒后父项目必须还在");
+
+        delete_project(&conn, &child.id).unwrap();
+        delete_project(&conn, &parent.id).unwrap();
+        assert_eq!(get_project(&conn, &parent.id).unwrap_err().code, "not_found");
+    }
+
+    #[test]
+    fn a_soft_deleted_child_does_not_block_the_parent() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let parent = create_project(&conn, &input("总包")).unwrap();
+        let mut child_input = input("子项目");
+        child_input.parent_id = Some(parent.id.clone());
+        let child = create_project(&conn, &child_input).unwrap();
+
+        delete_project(&conn, &child.id).unwrap();
+        delete_project(&conn, &parent.id).unwrap_or_else(|e| {
+            panic!("已软删的子项目不该阻塞父项目删除：{e}");
+        });
+    }
+
+    #[test]
+    fn update_of_missing_project_reports_not_found_before_parent_errors() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let mut bad_input = input("不存在项目");
+        bad_input.parent_id = Some("no-such-parent".into());
+
+        let err = update_project(&conn, "no-such-id", &bad_input).unwrap_err();
+        assert_eq!(err.code, "not_found", "未知 id 必须先报 not_found，父项校验不能抢先");
     }
 }

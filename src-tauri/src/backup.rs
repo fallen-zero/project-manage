@@ -1426,4 +1426,34 @@ mod tests {
         assert!(after == sentinel, "被拒后哨兵字节必须一字未变（export 从未被调用，绝不截断活库）");
         assert_eq!(ledger.metadata().unwrap().len(), len_before, "被拒后长度必须不变");
     }
+
+    /// M13 格 12 的 cargo 半边：父字段随整库快照进包。
+    #[test]
+    fn parent_id_survives_the_backup_snapshot() {
+        let live = crate::db::open_in_memory().unwrap();
+        live.execute(
+            "INSERT INTO projects (id, name, status) VALUES ('p-parent', '总包', '立项')",
+            [],
+        )
+        .unwrap();
+        live.execute(
+            "INSERT INTO projects (id, name, status, parent_id)
+             VALUES ('p-child', '子项目', '立项', 'p-parent')",
+            [],
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("hierarchy.zip");
+        export(&live, &dst).unwrap();
+
+        let (_unpacked, got) = unpack_db(&dst);
+        let pid: Option<String> = got
+            .query_row(
+                "SELECT parent_id FROM projects WHERE id = 'p-child'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pid.as_deref(), Some("p-parent"));
+    }
 }

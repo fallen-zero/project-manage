@@ -449,6 +449,7 @@ mod tests {
                 delivery_deadline: None,
                 status: "开发".to_owned(),
                 tags: vec![],
+                parent_id: None,
             },
         )
         .unwrap()
