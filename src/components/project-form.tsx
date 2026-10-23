@@ -10,6 +10,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { EMPTY_INPUT, type ProjectInput } from "@/types/project";
+import type { ParentOption } from "@/lib/project-tree";
 
 // 中英文逗号、顿号、空格都当分隔符：台账里的标签是人手打的，分隔符不会统一。
 function parseTags(raw: string): string[] {
@@ -36,6 +37,7 @@ export function ProjectForm({
   nameLabel = "项目名称",
   nameRequiredMessage = "项目名称不能为空",
   onChange,
+  parentOptions,
 }: {
   initial?: ProjectInput;
   statuses: string[];
@@ -45,6 +47,7 @@ export function ProjectForm({
   nameLabel?: string;
   nameRequiredMessage?: string;
   onChange?: (input: ProjectInput) => void;
+  parentOptions?: ParentOption[];
 }) {
   const [form, setForm] = useState<ProjectInput>(initial ?? EMPTY_INPUT);
   const [tagsText, setTagsText] = useState((initial ?? EMPTY_INPUT).tags.join("，"));
@@ -61,13 +64,29 @@ export function ProjectForm({
     setTagsText(value);
     emit(form, value);
   };
+  const setParent = (value: string) => {
+    const parentId = value === "none" ? null : value;
+    const next = { ...form, parentId };
+    setForm(next);
+    emit(next, tagsText);
+  };
+
+  const currentParentId = form.parentId;
+  const parentValue =
+    currentParentId !== null && parentOptions?.some((o) => o.id === currentParentId)
+      ? currentParentId
+      : "none";
 
   const submit = async () => {
     if (!form.name.trim()) {
       setNameError(nameRequiredMessage);
       return;
     }
-    const ok = await onSubmit({ ...form, tags: parseTags(tagsText) });
+    const parentId =
+      parentOptions && form.parentId && !parentOptions.some((o) => o.id === form.parentId)
+        ? null
+        : form.parentId;
+    const ok = await onSubmit({ ...form, parentId, tags: parseTags(tagsText) });
     if (!ok) setNameError("保存失败，详见下方错误提示");
   };
 
@@ -104,6 +123,30 @@ export function ProjectForm({
           </SelectContent>
         </Select>
       </div>
+
+      {parentOptions && (
+        <div className="grid gap-2">
+          <Label>所属总包</Label>
+          <Select
+            value={parentValue}
+            onValueChange={setParent}
+            disabled={parentOptions.length === 0}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">无（顶层项目）</SelectItem>
+              {parentOptions.map((o) => (
+                <SelectItem key={o.id} value={o.id}>
+                  {"— ".repeat(o.depth)}
+                  {o.name}（{o.status}）
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-3">
         {FIELDS.map((f) => (
