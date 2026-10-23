@@ -60,7 +60,7 @@ INSERT OR IGNORE INTO settings (key, value) VALUES ('active_workspace_id', 'defa
 
 `projects.workspace_id` 类型是 `TEXT NOT NULL DEFAULT 'default'`，**不带外键**：本表外键只在 `project_dirs`/`todos` 等子表上用于级联删，工作区删除是硬删且被 §五 的非空守卫挡住，加外键只会把「备份导入旧包」变成外键失败。列的 `DEFAULT` 是最后一道兜底：任何绕过 `create_project` 的裸 SQL 插入都落进默认区，不会落进 `NULL` 而在过滤里变成「哪个区都不显示」。
 
-**旧备份包导入**：`backup.rs:556` 的 `import` 在灌完页后会跑 `crate::db::migrate(conn)`，所以 schema ≤10 的包在本机导入时会自动补 V11——包里的工作区表是空的、项目列是缺的，`migrate` 负责把两者补齐并把包里的项目放进默认区。这条要有测试守着（§十 T-14）。
+**旧备份包导入**：`backup.rs:556` 的 `import` 在灌完页后会跑 `crate::db::migrate(conn)`，所以 schema ≤10 的包在本机导入时会自动补 V11——包里的工作区表是空的、项目列是缺的，`migrate` 负责把两者补齐并把包里的项目放进默认区。这条要有测试守着（§十 T-14 说明覆盖方式：`migrate` 层的「库停在 V10 → 补齐到 V11」由 §十 T-2 直接证，`import` 侧沿用 `backup.rs:556` 既有的那次 `crate::db::migrate` 调用与既有导入测试，不为本格伪造一份 v10 旧包夹具）。
 
 ## 四、活动工作区：后端怎么知道「现在看哪一区」
 
@@ -245,7 +245,7 @@ export function activeWorkspaceId(items: Workspace[]): string | null;  // items 
 | T-12 | 关联表 | `todos_milestones_expiry_daily_scoped` | 待办/里程碑/到期/日报四张表的 `list` 只出活动区；跨区 `create` 与跨区 id 的 `update`/`delete` 全回错误；`ledger` 的 `list`/`reveal`/`soft_delete`/五个 `update_*` 同口径 |
 | T-18 | `daily_report.rs` | `import_matches_only_active_workspace_projects` | 别区项目的行在 `preview` 里进 `rejected`、在 `apply` 里整份拒绝且库里一条不增 |
 | T-13 | 检索 | `search_field_and_doc_hits_scoped` | 两区同名串：`field_hits`、`doc_hits`、`indexed_project_count` 都只回活动区，且首屏空态谓词与 `SELECT_SQL` 同口径：当前区一个项目都没有时 `indexed_projects` 回 0，即使别区有已建好正文的文档 |
-| T-14 | `backup.rs` | `schema_version_is_11_and_counts_stays_seven` | 包内 schema=11、Counts 键数与字段数仍是 7、告警句含「工作区名称」；**旧包（schema≤10）导入后 V11 自动补齐并把包内项目放进默认区** |
+| T-14 | `backup.rs` | `backup_package_carries_workspaces_without_counting_them` + 既有两条断言 | 包内 schema=**11**（改既有两处 `assert_eq!(sum.schema_version, 10)`）、`workspaces` 行随整库快照进包、Counts 仍 7 键、告警句含「工作区名称」。**旧包导入那一半的覆盖方式**：`db.rs` 的 T-2 证「停在 V10 的库跑 migrate 补齐 V11」，`backup.rs:556` 那次 `crate::db::migrate(conn)` 调用与既有导入测试证「导入会跑 migrate」；本仓没有构造 v10 旧包的夹具，不为此提 `apply_version` 可见性（§三 已按此改口径） |
 | T-15 | `project_audit.rs` | `workspace_change_is_logged_once_for_root` | 根换区 → 恰 1 条 update 日志、`changes` 里「工作区」旧名/新名正确；后代不各自出日志；`audit_list` 只出活动区日志 |
 | T-16 | 新增 `src/lib/workspace-view.ts` 纯函数（§8.5） | `deleteGuard` / `nameHint` / `activeWorkspaceId` | `deleteGuard(ws, activeId)` 回三种禁用原因（默认区 / 当前区 / `projectCount>0`）与 `null`（可删）；`nameHint(name)` 对 trim 后空名/超 40 字回文案、合法回 `null`；`activeWorkspaceId` 在无 `isActive` 行时回 `null` |
 
