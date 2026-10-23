@@ -150,6 +150,7 @@ fn update_changes(conn: &Connection, old: &Project, input: &ProjectInput) -> App
     let mut out = Vec::new();
     let old_fields = project_fields(old);
     let new_fields = input_fields(input);
+    debug_assert_eq!(old_fields.len(), new_fields.len());
     for (o, n) in old_fields.into_iter().zip(new_fields) {
         if o.value != n.value {
             out.push(change(o.field, o.label, o.value, n.value));
@@ -502,5 +503,17 @@ mod tests {
             "invalid_input"
         );
         assert_eq!(logs(&conn).len(), 2, "失败编辑不得写日志");
+    }
+
+    #[test]
+    fn audit_insert_failure_rolls_back_project_write() {
+        let conn = db::open_in_memory().unwrap();
+        conn.execute("DROP TABLE project_audit_logs", []).unwrap();
+        let err = crate::project::create_project(&conn, &input("回滚项目")).unwrap_err();
+        assert_eq!(err.code, "db_failed");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "日志写失败必须把项目写一起回滚");
     }
 }
