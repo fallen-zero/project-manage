@@ -25,6 +25,7 @@ import { LedgerExport } from "@/components/ledger-export";
 import { MilestonePanel } from "@/components/milestone-panel";
 import { ExpiryPanel } from "@/components/expiry-panel";
 import { copyText, openFolder, pickFolder, revealFolder } from "@/lib/api";
+import { parentCandidates } from "@/lib/project-tree";
 import { useProjectsStore } from "@/stores/projects";
 import { toInput, type ProjectDir } from "@/types/project";
 
@@ -84,6 +85,11 @@ export function ProjectDetailPage() {
 
   const root = project.dirs.find((d) => d.kind === "root");
   const entries = project.dirs.filter((d) => d.kind === "entry");
+  const parent =
+    project.parentId && project.parentId !== project.id
+      ? items.find((p) => p.id === project.parentId)
+      : undefined;
+  const children = items.filter((p) => p.parentId === project.id && p.id !== project.id);
 
   const guard = async (fn: () => Promise<void>) => {
     try {
@@ -169,6 +175,52 @@ export function ProjectDetailPage() {
           <Info label="合同周期" value={project.contractPeriod} />
           <Info label="交付截止" value={project.deliveryDeadline} />
         </dl>
+      </section>
+
+      <section className="mb-4 rounded-xl border bg-background p-4">
+        <h2 className="mb-3 text-sm font-medium">父子关系</h2>
+        <div className="mb-3 flex items-center gap-2 text-sm">
+          <span className="text-xs text-muted-foreground">所属总包</span>
+          {parent ? (
+            <>
+              <Link
+                to="/projects/$projectId"
+                params={{ projectId: parent.id }}
+                className="truncate font-medium hover:underline"
+              >
+                {parent.name}
+              </Link>
+              <Badge variant="secondary">{parent.status}</Badge>
+            </>
+          ) : project.parentId ? (
+            <span className="text-xs text-muted-foreground">所属总包已删除或不存在</span>
+          ) : (
+            <span className="text-xs text-muted-foreground">无（顶层项目）</span>
+          )}
+        </div>
+        <div className="mb-2 flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">子项目</span>
+          <span className="text-xs text-muted-foreground">共 {children.length} 项</span>
+        </div>
+        {children.length === 0 ? (
+          <p className="text-xs text-muted-foreground">暂无子项目。</p>
+        ) : (
+          <ul className="grid gap-1.5">
+            {children.map((c) => (
+              <li key={c.id} className="flex items-center gap-2 rounded-lg border px-3 py-2">
+                <Link
+                  to="/projects/$projectId"
+                  params={{ projectId: c.id }}
+                  className="min-w-0 truncate text-sm font-medium hover:underline"
+                >
+                  {c.name}
+                </Link>
+                <Badge variant="secondary">{c.status}</Badge>
+                <span className="truncate text-xs text-muted-foreground">{c.code || "—"}</span>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section className="rounded-xl border bg-background p-4">
@@ -285,6 +337,7 @@ export function ProjectDetailPage() {
             initial={toInput(project)}
             statuses={statuses}
             saving={saving}
+            parentOptions={parentCandidates(items, project.id)}
             onCancel={() => setEditing(false)}
             onSubmit={async (input) => {
               const ok = await save(project.id, input);
