@@ -4,6 +4,7 @@ import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { Project, ProjectInput } from "@/types/project";
+import type { AuditAction, AuditPage } from "@/types/project-audit";
 import type { ProjectTemplate, TemplateInput } from "@/types/project-template";
 import type { DocPreview, SearchBundle } from "@/types/search";
 import type {
@@ -48,6 +49,14 @@ export const addEntryDir = (id: string, path: string, label?: string) =>
 export const removeDir = (id: string, dirId: string) =>
   invoke<void>("project_remove_dir", { id, dirId });
 export const statusOptions = () => invoke<string[]>("project_status_options");
+
+// —— M14 项目操作日志 ——
+export const listAudit = (input: {
+  projectId?: string;
+  action?: AuditAction;
+  limit?: number;
+  offset?: number;
+} = {}) => invoke<AuditPage>("audit_list", input);
 
 // —— M12 项目模板 ——
 export const listTemplates = () => invoke<ProjectTemplate[]>("template_list");
