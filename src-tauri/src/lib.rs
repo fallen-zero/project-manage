@@ -14,6 +14,7 @@ mod legacy_office;
 mod milestone;
 mod ocr;
 mod project;
+mod project_audit;
 mod project_template;
 mod scratch;
 mod search;
@@ -155,6 +156,18 @@ fn project_update(
 fn project_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
     let conn = db(&state)?;
     project::delete_project(&conn, &id)
+}
+
+#[tauri::command]
+fn audit_list(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+    action: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> AppResult<project_audit::AuditPage> {
+    let conn = db(&state)?;
+    project_audit::list(&conn, project_id.as_deref(), action.as_deref(), limit, offset)
 }
 
 #[tauri::command]
@@ -1047,7 +1060,8 @@ pub fn run() {
             template_list,
             template_create,
             template_update,
-            template_delete
+            template_delete,
+            audit_list
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");

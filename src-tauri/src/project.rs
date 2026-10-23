@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::error::{AppError, AppResult};
 use crate::index_store::clear_project;
+use crate::project_audit;
 
 /// 全局统一的项目状态枚举（需求方确认：状态全局统一，不按项目自定义阶段模板）。
 pub const STATUSES: [&str; 8] = [
@@ -158,9 +159,10 @@ fn path_exists(path: &str) -> bool {
 pub fn create_project(conn: &Connection, input: &ProjectInput) -> AppResult<Project> {
     validate(input)?;
     let parent_id = normalize(input.parent_id.clone());
-    validate_parent(conn, None, parent_id.as_deref())?;
+    let tx = conn.unchecked_transaction()?;
+    validate_parent(&tx, None, parent_id.as_deref())?;
     let id = uuid::Uuid::new_v4().to_string();
-    conn.execute(
+    tx.execute(
         "INSERT INTO projects (id, name, code, manager, customer, contact_name, contact_phone,
                                contract_no, contract_period, delivery_deadline, status, parent_id)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
@@ -179,26 +181,19 @@ pub fn create_project(conn: &Connection, input: &ProjectInput) -> AppResult<Proj
             parent_id,
         ],
     )?;
-    replace_tags(conn, &id, &input.tags)?;
+    replace_tags(&tx, &id, &input.tags)?;
+    project_audit::record_create(&tx, &id, input)?;
+    tx.commit()?;
     get_project(conn, &id)
 }
 
 pub fn update_project(conn: &Connection, id: &str, input: &ProjectInput) -> AppResult<Project> {
     validate(input)?;
     let parent_id = normalize(input.parent_id.clone());
-    let exists = conn
-        .query_row(
-            "SELECT 1 FROM projects WHERE id = ?1 AND deleted_at IS NULL",
-            [id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    if !exists {
-        return Err(not_found(id));
-    }
-    validate_parent(conn, Some(id), parent_id.as_deref())?;
-    let changed = conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let old = get_project(&tx, id)?;
+    validate_parent(&tx, Some(id), parent_id.as_deref())?;
+    let changed = tx.execute(
         "UPDATE projects SET name=?2, code=?3, manager=?4, customer=?5, contact_name=?6,
                 contact_phone=?7, contract_no=?8, contract_period=?9, delivery_deadline=?10,
                 status=?11, parent_id=?12, updated_at=datetime('now')
@@ -221,22 +216,18 @@ pub fn update_project(conn: &Connection, id: &str, input: &ProjectInput) -> AppR
     if changed == 0 {
         return Err(not_found(id));
     }
-    replace_tags(conn, id, &input.tags)?;
+    replace_tags(&tx, id, &input.tags)?;
+    project_audit::record_update(&tx, &old, input)?;
+    tx.commit()?;
     get_project(conn, id)
 }
 
 /// 软删除：数据模型带 deleted_at 是「先单人、预留多人」的唯一代价，
 /// 保留行才能在未来同步时区分「删除」与「本机从未有过」。
 pub fn delete_project(conn: &Connection, id: &str) -> AppResult<()> {
-    let name: String = conn
-        .query_row(
-            "SELECT name FROM projects WHERE id = ?1 AND deleted_at IS NULL",
-            [id],
-            |r| r.get(0),
-        )
-        .optional()?
-        .ok_or_else(|| not_found(id))?;
-    let children: i64 = conn.query_row(
+    let tx = conn.unchecked_transaction()?;
+    let old = get_project(&tx, id)?;
+    let children: i64 = tx.query_row(
         "SELECT COUNT(*) FROM projects WHERE parent_id = ?1 AND deleted_at IS NULL",
         [id],
         |r| r.get(0),
@@ -244,11 +235,11 @@ pub fn delete_project(conn: &Connection, id: &str) -> AppResult<()> {
     if children > 0 {
         return Err(AppError::new(
             "invalid_input",
-            &format!("项目「{name}」下还有 {children} 个未删除的子项目，请先调整归属或删除子项目"),
+            &format!("项目「{}」下还有 {children} 个未删除的子项目，请先调整归属或删除子项目", old.name),
             Some("子项目删除或改挂到其他项目后，本项才能删除"),
         ));
     }
-    let changed = conn.execute(
+    let changed = tx.execute(
         "UPDATE projects SET deleted_at = datetime('now'), updated_at = datetime('now')
          WHERE id = ?1 AND deleted_at IS NULL",
         [id],
@@ -256,6 +247,8 @@ pub fn delete_project(conn: &Connection, id: &str) -> AppResult<()> {
     if changed == 0 {
         return Err(not_found(id));
     }
+    project_audit::record_delete(&tx, &old)?;
+    tx.commit()?;
     Ok(())
 }
 
