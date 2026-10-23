@@ -1,7 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link } from "@tanstack/react-router";
-import { Copy, FolderOpen, Pencil, Plus, Trash2 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,6 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ProjectForm } from "@/components/project-form";
+import { ProjectRow } from "@/components/project-row";
 import { TemplateManager } from "@/components/template-manager";
 import { Label } from "@/components/ui/label";
 import {
@@ -23,6 +22,12 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { applyTemplate } from "@/lib/apply-template";
+import {
+  buildProjectForest,
+  flattenProjectTree,
+  parentCandidates,
+  type ProjectTreeNode,
+} from "@/lib/project-tree";
 import { copyText, openFolder } from "@/lib/api";
 import { useProjectsStore } from "@/stores/projects";
 import { useTemplatesStore } from "@/stores/templates";
@@ -38,6 +43,7 @@ export function ProjectsPage() {
   const { items: templates, loading: templatesLoading, refresh: refreshTemplates } = useTemplatesStore();
   const [formKey, setFormKey] = useState(0);
   const [selectedTemplate, setSelectedTemplate] = useState("none");
+  const [view, setView] = useState<"all" | "tree">("all");
 
   useEffect(() => {
     void refresh();
@@ -72,6 +78,22 @@ export function ProjectsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 rounded-lg border bg-background p-0.5">
+            <Button
+              size="sm"
+              variant={view === "all" ? "secondary" : "ghost"}
+              onClick={() => setView("all")}
+            >
+              全部
+            </Button>
+            <Button
+              size="sm"
+              variant={view === "tree" ? "secondary" : "ghost"}
+              onClick={() => setView("tree")}
+            >
+              按总包
+            </Button>
+          </div>
           <Button size="sm" variant="outline" onClick={() => setTemplatesOpen(true)}>
             模板
           </Button>
@@ -103,83 +125,36 @@ export function ProjectsPage() {
           还没有项目档案，点右上角「新建项目」开始登记。
         </div>
       ) : (
-        <ul className="grid gap-2">
-          {items.map((p) => {
-            const root = p.dirs.find((d) => d.kind === "root");
-            return (
-              <li
+        view === "all" ? (
+          <ul className="grid gap-2">
+            {items.map((p) => (
+              <ProjectRow
                 key={p.id}
-                className="grid grid-cols-[minmax(0,1.4fr)_auto] items-center gap-3 rounded-xl border bg-background px-4 py-3"
-              >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <Link
-                      to="/projects/$projectId"
-                      params={{ projectId: p.id }}
-                      className="truncate text-sm font-medium hover:underline"
-                    >
-                      {p.name}
-                    </Link>
-                    <Badge variant="secondary">{p.status}</Badge>
-                    {p.tags.map((t) => (
-                      <Badge key={t} variant="outline">
-                        {t}
-                      </Badge>
-                    ))}
-                  </div>
-                  <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
-                    <span>{[p.code, p.customer, p.manager].filter(Boolean).join(" · ") || "—"}</span>
-                    {root && (
-                      <span
-                        className={`max-w-[46ch] truncate font-mono ${root.exists ? "" : "text-destructive"}`}
-                        title={root.exists ? root.path : `${root.path}（当前不可达）`}
-                      >
-                        {root.path}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-1">
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    disabled={!root}
-                    title="打开主根目录"
-                    onClick={() => void openRoot(p)}
-                  >
-                    <FolderOpen />
-                  </Button>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    disabled={!root}
-                    title={copiedId === p.id ? "已复制" : "复制路径"}
-                    onClick={() => void copyRoot(p)}
-                  >
-                    <Copy />
-                  </Button>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    title="编辑"
-                    onClick={() => setEditing({ id: p.id, input: toInput(p) })}
-                  >
-                    <Pencil />
-                  </Button>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    title="删除"
-                    onClick={() => setConfirming(p)}
-                  >
-                    <Trash2 />
-                  </Button>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+                project={p}
+                depth={0}
+                copiedId={copiedId}
+                onOpenRoot={(x) => void openRoot(x)}
+                onCopyRoot={(x) => void copyRoot(x)}
+                onEdit={(x) => setEditing({ id: x.id, input: toInput(x) })}
+                onDelete={(x) => setConfirming(x)}
+              />
+            ))}
+          </ul>
+        ) : (
+          <div className="grid gap-3">
+            {buildProjectForest(items).map((node) => (
+              <TreeGroup
+                key={node.project.id}
+                node={node}
+                copiedId={copiedId}
+                onOpenRoot={(x) => void openRoot(x)}
+                onCopyRoot={(x) => void copyRoot(x)}
+                onEdit={(x) => setEditing({ id: x.id, input: toInput(x) })}
+                onDelete={(x) => setConfirming(x)}
+              />
+            ))}
+          </div>
+        )
       )}
 
       <Dialog open={editing !== null} onOpenChange={(o) => !o && setEditing(null)}>
@@ -230,6 +205,7 @@ export function ProjectsPage() {
                 initial={editing.input}
                 statuses={statuses}
                 saving={saving}
+                parentOptions={parentCandidates(items, editing.id)}
                 onChange={(input) => setEditing((prev) => (prev ? { ...prev, input } : prev))}
                 onCancel={() => setEditing(null)}
                 onSubmit={async (input) => {
@@ -272,6 +248,46 @@ export function ProjectsPage() {
 
       <TemplateManager open={templatesOpen} onOpenChange={setTemplatesOpen} statuses={statuses} />
     </div>
+  );
+}
+
+function TreeGroup({
+  node,
+  copiedId,
+  onOpenRoot,
+  onCopyRoot,
+  onEdit,
+  onDelete,
+}: {
+  node: ProjectTreeNode;
+  copiedId: string | null;
+  onOpenRoot: (p: Project) => void;
+  onCopyRoot: (p: Project) => void;
+  onEdit: (p: Project) => void;
+  onDelete: (p: Project) => void;
+}) {
+  const nodes = flattenProjectTree([node]);
+  return (
+    <section className="rounded-xl border bg-background p-3">
+      <div className="mb-2 flex items-center gap-2 px-1 text-xs text-muted-foreground">
+        <span>总包</span>
+        <span>共 {nodes.length} 项</span>
+      </div>
+      <ul className="grid gap-2">
+        {nodes.map((n) => (
+          <ProjectRow
+            key={n.project.id}
+            project={n.project}
+            depth={n.depth}
+            copiedId={copiedId}
+            onOpenRoot={onOpenRoot}
+            onCopyRoot={onCopyRoot}
+            onEdit={onEdit}
+            onDelete={onDelete}
+          />
+        ))}
+      </ul>
+    </section>
   );
 }
 
