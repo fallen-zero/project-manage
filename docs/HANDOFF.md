@@ -1,6 +1,6 @@
 # 交接文档 —— 项目资料管理（写给一个完全没有上下文的新对话）
 
-**快照时间**：2026-10-23（**M13 父子项目关联代码 + 取证全完，待整分支终审 → 合并**：Task 1–8 complete，cargo **358** / node **66** / 命令 **69** / async **7** / `TARGET_VERSION` **9** / 豁免 **1** / `Cargo.lock` **616** / collect **9**；真机 12 格 ALL-PASS、十处变异全红；M12 已合入 `master`（合并点 `d548e32`），M11-b 已合入 `master`（合并点 `3efbc18`），M11-a 已合入 `master`（合并点 `b99f154`）。**所有 sha 与读数一律现取**（`git rev-parse --short master` / `git ls-remote --heads origin` / §4-A 那串命令），本文不写死「同指」。详见 §3。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。
+**快照时间**：2026-10-23（**M13 父子项目关联代码 + 取证全完；终审 With fixes（0C/2I/7M）→ 两处 Important 修复已落地，待合并**：Task 1–8 complete，cargo **359**（终审修复 +1）/ node **66** / 命令 **69** / async **7** / `TARGET_VERSION` **9** / 豁免 **1** / `Cargo.lock` **616** / collect **9**；真机 12 格 ALL-PASS、十处变异全红；M12 已合入 `master`（合并点 `d548e32`），M11-b 已合入 `master`（合并点 `3efbc18`），M11-a 已合入 `master`（合并点 `b99f154`）。**所有 sha 与读数一律现取**（`git rev-parse --short master` / `git ls-remote --heads origin` / §4-A 那串命令），本文不写死「同指」。详见 §3。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。
 
 ## 0. 先读这一段
 
@@ -18,7 +18,7 @@
 
 - **M12（项目模板，新建项目一键填充）已合入 `master`（2026-10-22，合并点 `d548e32`，fast-forward）**：V8 `project_templates`（**硬删、name UNIQUE、tags JSON**、`TARGET_VERSION 8` 零回填）+ `template_list/create/update/delete` 四条同步命令（命令数 **65→69**，第 7 次批准破例；async 仍 7）+ 项目页模板管理弹窗 + 新建项目「从模板填充」下拉（项目名保留、空字段不清空、可切模板）。**合并后在 `master` 树上复跑整套门全绿**：cargo **346 passed / exit=0（11.71 s）**、node **57/57/0**、`npm run build` **0 错**、命令 **69**、`TARGET_VERSION 8`、结构门 69·7·8·1·616·9、依赖 diff 空、merge 0；真机 12 格全过、十处变异全红并还原。**Task 6 首版 live 值不同步（先输项目名再选模板会丢名字）被控制方从 Minor 升为 Important**，已用 `ProjectForm onChange` 同步 live 值 + 限定范围复审 ADDRESSED。整分支终审 **0C/0I/10M Ready to merge**；F1（校验顺序）与 §5.2/§六.10/§十文案已订正 spec，F2/F6/F10 三条 UI 收口留合并后。**M12 已收口；下一格候选见 §4-B。**
 
-- **M13 父子项目关联（单父树）代码 + 取证全完，待整分支终审 → 合并（2026-10-23，分支 `feat/m13-project-hierarchy`）**：V9 `projects.parent_id` + `idx_projects_parent_id`（**零回填、无外键/不级联**，`TARGET_VERSION` 8→9）+ 后端 `validate_parent`（父项存在/未删、归档可选、自指与祖先链成环拒绝）与有子禁删（`invalid_input` 点名数量）+ 前端 `project-tree.ts` 三纯函数、`ProjectForm` 可选「所属总包」、列表「全部 / 按总包」递归缩进、详情父子区；模板不存归属且 `applyTemplate` 保留 `parentId`。**命令仍 69（无新 IPC）、collect 仍 9、`Counts` 仍 7 键、包 schema 9**。**真实数据目录事故**：前两次 dev 的 `-c identifier` / 环境变量隔离无效、写进真实库；已按需求方批准清理测试行并回退 V9（既有项目行哈希前后一致），最终用临时编译期 identifier 隔离跑真机，真实目录跑前/跑后 `sha256=200456e1f9ca` 一致。详见 §3、§5 坑 51 与 `docs/开发进度.md`「## M13 验收证据」。
+- **M13 父子项目关联（单父树）代码 + 取证全完；终审 With fixes（0C/2I/7M）→ 两处 Important 修复已落地，待合并（2026-10-23，分支 `feat/m13-project-hierarchy`）**：V9 `projects.parent_id` + `idx_projects_parent_id`（**零回填、无外键/不级联**，`TARGET_VERSION` 8→9）+ 后端 `validate_parent`（父项存在/未删、归档可选、自指与祖先链成环拒绝；create 与 update 都上溯）与有子禁删（`invalid_input` 点名数量）+ 前端 `project-tree.ts` 三纯函数、`ProjectForm` 可选「所属总包」、列表「全部 / 按总包」递归缩进、详情父子区；模板不存归属且 `applyTemplate` 保留 `parentId`。**命令仍 69（无新 IPC）、collect 仍 9、`Counts` 仍 7 键、包 schema 9**。**真实数据目录事故**：前两次 dev 写进真实库（那两次 Tauri 子进程日志没有 `-c`、也未触发重编译 ⇒ `-c` 是否到达 Tauri 未证实；M12 日志显示 `-c` 可到达，不能断言 Tauri 忽略 `-c`；`APPDATA`/`LOCALAPPDATA` 没有重定向 Known Folder）；已按需求方批准清理测试行并回退 V9（既有项目行哈希前后一致），最终用**已验证的临时编译期 identifier** 隔离跑真机，真实目录跑前/跑后 `sha256=200456e1f9ca` 一致、配置按原字节还原（`git diff --exit-code` = 0、sha256 `c210b177…`）。详见 §3、§5 坑 51 与 `docs/开发进度.md`「## M13 验收证据」。
 
 **给下一个对话的一句提醒**：这一轮里「已验证」这三个字被伪造过两次，两次都是控制方自己（一次是凭空写 `Task 9: complete`，一次是从一份 **0 字节**的子代理输出里"读出"整份终审裁决并提交了）。教训与三条可敲的防线在坑 29。**本文任何结论都别直接当读数用 —— 照它附的命令自己跑一遍。**
 
@@ -92,33 +92,33 @@
 
 ## 3. 当前卡在哪
 
-**M13 集成点（2026-10-23，本文当前最该先读的一段）**：**M13 父子项目关联代码 + 取证全完，待整分支终审 → 合并**（分支 `feat/m13-project-hierarchy`，HEAD 现取）。Task 1–8 complete；门禁 cargo **358** / node **66** / 命令 **69** / async 7 / `TARGET_VERSION 9` / 豁免 1 / `Cargo.lock` 616 / collect 9；十处变异全红并还原；真机 12 格 ALL-PASS。**真实数据目录事故**：前两次 dev 的 `-c identifier` / `APPDATA` 环境变量没有改掉 Tauri Known Folder，真实库被写入测试行；已按需求方当次批准硬删已知 6 个测试项目 + 测试模板并回退 V9，既有 1 个项目行/标签/目录映射哈希前后一致；最终用临时编译期 identifier 隔离重跑，真实目录跑前/跑后 `sha256=200456e1f9ca` 一致。**原始三文件逐字哈希不可恢复是具名代价**（内容已恢复）。下一格候选是 **操作日志 / 多工作区**（见 §4-B）。证据在 `.superpowers/sdd/2026-10-22-m13-project-hierarchy/{progress.md,real-machine-readings.md,mutation-evidence.txt,spec-plan-mapping.md,m13-cdp.mjs,contaminated-real-dir/,pre-cleanup-real-dir/}`（git-ignored，收口前别清）。未验：树视图极深层观感、几十项目渲染性能、异常库真机。
+**M13 集成点（2026-10-23，本文当前最该先读的一段）**：**M13 父子项目关联代码 + 取证全完；终审 With fixes（0C/2I/7M）→ 两处 Important 修复已落地，待合并**（分支 `feat/m13-project-hierarchy`，HEAD 现取）。Task 1–8 complete；门禁 cargo **359**（终审修复 +1）/ node **66** / 命令 **69** / async 7 / `TARGET_VERSION 9` / 豁免 1 / `Cargo.lock` 616 / collect 9；十处变异全红并还原；真机 12 格 ALL-PASS。**真实数据目录事故**：前两次 dev 写进真实库测试行（日志里 Tauri 子进程没有 `-c`、也未重编译 ⇒ `-c` 是否到达未证实；M12 日志是 `-c` 可到达的反证；`APPDATA` 环境变量没有改掉 Known Folder）；已按需求方当次批准硬删已知 6 个测试项目 + 测试模板并回退 V9，既有 1 个项目行/标签/目录映射哈希前后一致；最终用**已验证的临时编译期 identifier** 隔离重跑，真实目录跑前/跑后 `sha256=200456e1f9ca` 一致、配置按原字节还原（`git diff --exit-code` 0、sha256 `c210b177…`）。**原始三文件逐字哈希不可恢复是具名代价**（内容已恢复）。下一格候选是 **操作日志 / 多工作区**（见 §4-B）。证据在 `.superpowers/sdd/2026-10-22-m13-project-hierarchy/{progress.md,real-machine-readings.md,mutation-evidence.txt,spec-plan-mapping.md,m13-cdp.mjs,contaminated-real-dir/,pre-cleanup-real-dir/,final-review.md,final-fix-report.md}`（git-ignored，收口前别清）。未验：树视图极深层观感、几十项目渲染性能、异常库真机。
 
-**终态（这一节是本文最重要的三行）**：**M0–M12 已全部合入 `master`**（现取 `git rev-parse --short master`）；**M13 在功能分支，待终审/合并**。`master` 已推 `origin`（远端与本地 sha 现取 `git ls-remote --heads origin master`）。M13 分支实跑读数：cargo **358 passed**、node **66/66/0**、`npm run build` **0 错**、结构门 **69 / async 7 / `TARGET_VERSION: i64 = 9` / 豁免 1 / `Cargo.lock` 616 / collect 9**、依赖 diff **空**、merge commit **0**。工作树只有未跟踪的 `Python/` 与 git-ignored 证据目录（**都不 stage、不删**）。**这些数一定漂，用 §4-A 那串命令现跑一遍再信。**
+**终态（这一节是本文最重要的三行）**：**M0–M12 已全部合入 `master`**（现取 `git rev-parse --short master`）；**M13 在功能分支，终审修复已落地，待合并**。`master` 已推 `origin`（远端与本地 sha 现取 `git ls-remote --heads origin master`）。M13 分支实跑读数：cargo **359 passed**、node **66/66/0**、`npm run build` **0 错**、结构门 **69 / async 7 / `TARGET_VERSION: i64 = 9` / 豁免 1 / `Cargo.lock` 616 / collect 9**、依赖 diff **空**、merge commit **0**。工作树只有未跟踪的 `Python/` 与 git-ignored 证据目录（**都不 stage、不删**）。**这些数一定漂，用 §4-A 那串命令现跑一遍再信。**
 
-**M11-a / M11-b / M12 / M13 的 findings 与修复裁定**：前三格全文在各自账本；M13 的 Task 1–6 评审、Task 7 真机/变异、Task 8 活文档在 `.superpowers/sdd/2026-10-22-m13-project-hierarchy/progress.md`；整分支终审尚未跑。**M13 的 Task 7 暴露了真实数据目录污染事故**（详见 §5 坑 51）。
+**M11-a / M11-b / M12 / M13 的 findings 与修复裁定**：前三格全文在各自账本；M13 的 Task 1–6 评审、Task 7 真机/变异、Task 8 活文档在 `.superpowers/sdd/2026-10-22-m13-project-hierarchy/progress.md`；整分支终审 **With fixes（0C/2I/7M）**，两处 Important 修复与文档订正已落地，见同目录 `final-review.md` / `final-fix-report.md`。**M13 的 Task 7 暴露了真实数据目录污染事故**（详见 §5 坑 51）。
 
-**下一步动作**：M13 先跑整分支终审 → 修复（如有）→ 需求方当次批准后 `git merge --ff-only` 合入 `master` → 在 `master` 树上复跑整套门 → 活文档回写合并点。若继续开发，下一格候选是 **操作日志 / 多工作区**（`docs/思维导图.md:71-74`）；开工前先读原文（坑 34），按 `brainstorming → spec → writing-plans → SDD → 整分支终审 → 合并批准` 走。**别重派 M13 Task 1–8 的实现者**（Task 7/8 由控制方跑）—— 提交在 `git log` 里、结论在账本里。
+**下一步动作**：M13 已终审（With fixes）、两处 Important 修复已落地 → 需求方当次批准后 `git merge --ff-only` 合入 `master` → 在 `master` 树上复跑整套门 → 活文档回写合并点。若继续开发，下一格候选是 **操作日志 / 多工作区**（`docs/思维导图.md:71-74`）；开工前先读原文（坑 34），按 `brainstorming → spec → writing-plans → SDD → 整分支终审 → 合并批准` 走。**别重派 M13 Task 1–8 的实现者**（Task 7/8 由控制方跑）—— 提交在 `git log` 里、结论在账本里。
 
 **卡住的两件事，没有一件是代码问题**：
 
-1. **代码面没有「卡住」**：M13 代码 + 取证全完，待整分支终审 → 合并；Task 1–8 complete，门禁 358 / 66 / 69·7·9·1·616·9，真机 12 格 ALL-PASS。**另一件别以为做完了**：页面与路由层始终没有自动化测试网（深链渲染、`unparsed` 文案、`daily-reports.tsx` / `expiry-panel.tsx` / `ledger-export.tsx` / `template-manager.tsx`、项目列表两视图与详情父子区只能靠真机与人眼 —— M10/M11-a/M13 已把聚合、预警与项目树判据搬到前端纯函数，`cargo test` 不再守页面接线；M13 真机虽用真 DOM 点了创建/编辑/父项下拉/两视图/删除确认，但**树视图极深层观感、几十项目渲染性能与异常库未量**）。M13 的未验清单见 `docs/开发进度.md`「## M13 验收证据」。
+1. **代码面没有「卡住」**：M13 代码 + 取证全完、终审修复已落地，待合并；Task 1–8 complete，门禁 359 / 66 / 69·7·9·1·616·9，真机 12 格 ALL-PASS。**另一件别以为做完了**：页面与路由层始终没有自动化测试网（深链渲染、`unparsed` 文案、`daily-reports.tsx` / `expiry-panel.tsx` / `ledger-export.tsx` / `template-manager.tsx`、项目列表两视图与详情父子区只能靠真机与人眼 —— M10/M11-a/M13 已把聚合、预警与项目树判据搬到前端纯函数，`cargo test` 不再守页面接线；M13 真机虽用真 DOM 点了创建/编辑/父项下拉/两视图/删除确认，但**树视图极深层观感、几十项目渲染性能与异常库未量**）。M13 的未验清单见 `docs/开发进度.md`「## M13 验收证据」。
 2. **这台机的提交内存是常态瓶颈**：16 G 机，`FreeVirtual` 掉到 ~1 G 时 cargo 会报 `os error 1455`，且症状包括「报编译失败却一行 `error[Exxxx]` 都没有」（坑 32）。要跑门禁前先看 `Get-CimInstance Win32_OperatingSystem` 的 `FreeVirtualMemory`，低于 ~2 G 就叫需求方腾内存，别去改代码。
 
 **只剩需求方能做的四格（一直挂着，不阻塞代码）**：① `/backup` 上「另存为」/「打开」两个原生对话框各真点一次 —— 三个结果块与覆盖确认框的**块内渲染**至今没有真机证据；② 故意把导出目标选进 `%APPDATA%\dev.zero.pfm\`，亲眼看 `backup_destination_unsafe` 报错（守卫的调用点只有文本门守着，M8.1 之后这条更要看一眼）；③ M7 欠的那一下：真按一次 `/index` 的「安装 LibreOffice」（`libreoffice_install` 全程没真调用过）；④ 远端 GitHub 默认分支 symref 仍指 `feat/m4-unified-search`（本机无 `gh`）⇒ 只能在 Settings → Branches 手改。
 
 ## 4. 下一步计划
 
-**M13 的门禁清单（在 `feat/m13-project-hierarchy` 的 HEAD 上跑过；收口时在合并后的 `master` 树上重跑）**：cargo **358**、node **66**、命令 **69**、async 7、`TARGET_VERSION: i64 = 9`、豁免 1、`Cargo.lock` 616、collect 9、依赖 diff 空、merge commit 0；数命令数的 `sed` 范围式用 `/^\s*\])/` 版。**这些数会漂，下面这串现跑为准。**
+**M13 的门禁清单（在 `feat/m13-project-hierarchy` 的 HEAD 上跑过；收口时在合并后的 `master` 树上重跑）**：cargo **359**（终审修复 +1）、node **66**、命令 **69**、async 7、`TARGET_VERSION: i64 = 9`、豁免 1、`Cargo.lock` 616、collect 9、依赖 diff 空、merge commit 0；数命令数的 `sed` 范围式用 `/^\s*\])/` 版。**这些数会漂，下面这串现跑为准。**
 
-**A（收口 / 合并用的门禁清单 —— M13 已在功能分支 HEAD `9f883ad` 上跑过）**。M13 的**终态期望串**是 `命令 69 / async 7 / TARGET_VERSION 9 / 豁免 1 / Cargo.lock 616 / collect 9 / cargo 358 / node 66`（另有 `cargo build -j 1 --lib` exit=0、依赖 diff 空、merge commit 0）。**任何一格收口都用这串现跑，别信写死的数**：
+**A（收口 / 合并用的门禁清单 —— M13 已在功能分支 HEAD `9f883ad` 上跑过，终审修复后在新修复提交上复跑）**。M13 的**终态期望串**是 `命令 69 / async 7 / TARGET_VERSION 9 / 豁免 1 / Cargo.lock 616 / collect 9 / cargo 359 / node 66`（另有 `cargo build -j 1 --lib` exit=0、依赖 diff 空、merge commit 0）。**任何一格收口都用这串现跑，别信写死的数**：
 
 ```
 git rev-parse --abbrev-ref HEAD                              # 合并前在 feat/m13-project-hierarchy；收口时在 master
 git status --porcelain                                       # 期望只有 ?? Python/
 git log --oneline master..HEAD                               # 分支上已有什么（与账本逐条对上，别重派已完成的格）
 git rev-list --merges --count --all                          # 期望 0
-cd src-tauri && cargo test -j 1 --lib                        # 358 passed / exit=0（基线 346 → T1 348 → T2 358；T3 起 node 增、cargo 零增）
+cd src-tauri && cargo test -j 1 --lib                        # 359 passed / exit=0（基线 346 → T1 348 → T2 358 → 终审修复 +1 = 359；T3 起 node 增、cargo 零增）
 cargo clippy --lib -- -D warnings; cargo clippy --all-targets --all-features -- -D warnings   # 两个都期望 exit=0、0 warning
 cargo build -j 1 --lib                                       # exit=0
 cd .. && node --test "tests/**/*.test.ts"                    # tests 66 / pass 66 / fail 0（57→66 = project-tree 8 + apply-template 1；在仓库根跑）
@@ -171,7 +171,7 @@ git ls-remote --heads origin | grep -E "master|m13"          # 现取；origin/m
 
 8. **rusqlite `pragma_update(journal_mode, WAL)` 的 Ok/Err 都不可信**：必须**读回 `PRAGMA journal_mode` 断言等于 `wal`**。WAL 落地失败会静默降级；本仓 `db.rs` 的 `after_open` 里有这条硬门。另：**同一 WAL 库活着时**第二个连接可能打不开（os error 1455 的另一副面孔），别在测试里并发开两条同一路径连接。
 
-9. **真实数据目录 `%APPDATA%\dev.zero.pfm\`（`ledger.db`）是只读红线**：真机验证一律用一次性 identifier（`npm run tauri -- dev -c '{"identifier":"dev.zero.pfm.mXXtest"}'`），跑完删净，**绝不为验证改 `tauri.conf.json`**。验证前后各一次快照该目录三文件的 `size + mtime + sha256`（`ledger.db/-wal/-shm`），逐字一致才算红线守住。
+9. **真实数据目录 `%APPDATA%\dev.zero.pfm\`（`ledger.db`）是只读红线**：真机验证优先在日志里**确认** `-c` 已到达 Tauri（`npm run tauri -- dev -c '{"identifier":"dev.zero.pfm.mXXtest"}'`，只有 npm notice 行出现 `run tauri dev -c {...}` 才算到达）；M13 两次日志里没有 `-c`（坑 51），这种时候改用**临时编译期 identifier**：临时改 `src-tauri/tauri.conf.json` 的 `identifier` → 重新编译跑完 → **按原字节还原**（`cp` 备份 + `git diff --exit-code` = 0 + sha256 对照；M13 还原后 sha256=`c210b177…`）。跑完删净 `%APPDATA%\<sandbox-id>` 与 `%LOCALAPPDATA%\<sandbox-id>`。验证前后各一次快照该目录三文件的 `size + mtime + sha256`（`ledger.db/-wal/-shm`），逐字一致才算红线守住。
 
 10. **测试断言必须可证伪**（「变异取证」）：删掉被守护的那段代码，测试要**当场红**；否则就是恒绿断言、零守护。反值心算先跑，别写只有 `assert!(true)` 语义的断言。**同一个 worktree 只允许一个会提交的实现者**（并发提交会互相踩脏工作树）；只读评审可并行。
 
@@ -269,7 +269,7 @@ git ls-remote --heads origin | grep -E "master|m13"          # 现取；origin/m
 
 **M13（父子项目，2026-10-23）新增的坑**：
 
-51. **真机沙盒不能靠 `-c identifier`，也不能靠 `APPDATA`/`LOCALAPPDATA` 环境变量隔离**：Tauri 的 `app.path().app_data_dir()` 走 Windows Known Folder（编译期 identifier），`-c` 只改应用标识、环境变量也不改 Known Folder ⇒ M13 Task 7 前两次 dev 直接打开了真实库 `%APPDATA%\dev.zero.pfm\ledger.db`，WAL/SHM 被写入测试行。**正确做法**：临时把 `src-tauri/tauri.conf.json` 的 `identifier` 改成一次性值（编译期，需重新编译）→ 跑 dev → 停进程 → **按原字节还原配置**（`cp` 备份 + `git diff --exit-code` + sha256 对照）→ 删 `%APPDATA%\<sandbox-id>` 与 `%LOCALAPPDATA%\<sandbox-id>`。**每次真机前/后都要拍真实目录 `size+mtime+sha256`**；一旦发现污染：立即停 dev、把受污染三文件整份拷贝留证、只按已知测试 id 清理、先在副本演练 `integrity_check`/`foreign_key_check`、核对既有行业务行哈希前后一致；**绝不按名字/通配删真实库行**。事故证据：`.superpowers/sdd/2026-10-22-m13-project-hierarchy/{contaminated-real-dir/,pre-cleanup-real-dir/,real-machine-readings.md}`。**代价**：本轮原始三文件逐字哈希不可恢复（WAL 已 checkpoint），内容已恢复并回退 schema 8；最终隔离跑前后真实库 `sha256=200456e1f9ca` 一致。
+51. **真机沙盒优先用编译期 identifier；别把 `-c` 或 `APPDATA`/`LOCALAPPDATA` 环境变量的隔离能力当已验证**：M13 Task 7 前两次 dev 直接打开了真实库 `%APPDATA%\dev.zero.pfm\ledger.db`，WAL/SHM 被写入测试行。**观察事实**：那两次的 Tauri 子进程日志（`.superpowers/sdd/2026-10-22-m13-project-hierarchy/dev.log:2`）是 `run tauri dev`、**没有 `-c`**，启动 1.23s/0.61s 且未触发重编译 ⇒ **首次两次的 `-c` 是否到达 Tauri 未证实**；M12 的 `.superpowers/sdd/2026-10-22-m12-project-templates/dev.log:2` 记录过 `run tauri dev -c {"identifier":"dev.zero.pfm.m12test"}` 且它的沙盒存在，是 `-c` 可以到达的反证，**不能断言「Tauri 忽略 `-c`」**。`APPDATA`/`LOCALAPPDATA` 环境变量两次也没有改写 Known Folder 数据目录。无论根因，**编译期 identifier 是已验证的安全隔离法**：临时把 `src-tauri/tauri.conf.json` 的 `identifier` 改成一次性值（编译期，需重新编译）→ 跑 dev → 停进程 → **按原字节还原配置**（`cp` 备份 + `git diff --exit-code` + sha256 对照；M13 还原后 `git diff --exit-code` = 0、sha256=`c210b177…`）→ 删 `%APPDATA%\<sandbox-id>` 与 `%LOCALAPPDATA%\<sandbox-id>`。**每次真机前/后都要拍真实目录 `size+mtime+sha256`**；一旦发现污染：立即停 dev、把受污染三文件整份拷贝留证、只按已知测试 id 清理、先在副本演练 `integrity_check`/`foreign_key_check`、核对既有行业务行哈希前后一致；**绝不按名字/通配删真实库行**。事故证据：`.superpowers/sdd/2026-10-22-m13-project-hierarchy/{contaminated-real-dir/,pre-cleanup-real-dir/,real-machine-readings.md}`。**代价**：本轮原始三文件逐字哈希不可恢复（WAL 已 checkpoint），内容已恢复并回退 schema 8；最终隔离跑前后真实库 `sha256=200456e1f9ca` 一致。
 
 ## 6. 关键指针
 
@@ -287,7 +287,7 @@ git ls-remote --heads origin | grep -E "master|m13"          # 现取；origin/m
 | **M12 实施计划（8 格；cargo 337→346、node 52→57、命令 65→69、TARGET_VERSION 7→8；含 Task 6 live 值修复轮的计划订正）** | `docs/superpowers/plans/2026-10-22-m12-project-templates.md` |
 | **M12 SDD 账本 + 真机读数 + 十处变异 + 映射（T1–T8；沙盒 `dev.zero.pfm.m12test` + CDP 9333；真机 1–11 ALL-PASS；备份包 schema 8 / Counts 7 / 模板 3 行；真实目录三文件逐字一致）** | `.superpowers/sdd/2026-10-22-m12-project-templates/{progress.md,real-machine-readings.md,mutation-evidence.txt,spec-plan-mapping.md,m12-cdp.mjs,probe/,realdir-{before,after}.txt}`（git-ignored，收口前别清） |
 | **M13 规格（父子项目单父树：D1–D10、V9 parent_id/索引零回填、归档父项可选、有子禁删、列表两视图与详情父子区、12 格验收/10 处变异；明确不做多父/级联/拖拽/汇总/新命令）** | `docs/superpowers/specs/2026-10-22-m13-project-hierarchy-design.md` |
-| **M13 实施计划（8 格；cargo 346→358、node 57→66、命令仍 69、TARGET_VERSION 8→9；含父项校验/环检测/删除守卫与两视图的逐步代码）** | `docs/superpowers/plans/2026-10-22-m13-project-hierarchy.md` |
+| **M13 实施计划（8 格；cargo 346→359（含终审修复 +1）、node 57→66、命令仍 69、TARGET_VERSION 8→9；含父项校验/环检测/删除守卫与两视图的逐步代码）** | `docs/superpowers/plans/2026-10-22-m13-project-hierarchy.md` |
 | **M13 SDD 账本 + 真机读数 + 十处变异 + 映射 + 数据目录事故证据（T1–T8；临时编译期 identifier `dev.zero.pfm.m13test` + CDP 9333；真机 12 格 ALL-PASS；备份包 schema 9 / Counts 7 / 3 项目 2 条父链接；`contaminated-real-dir/` 与 `pre-cleanup-real-dir/` 是事故留证，**不许删**）** | `.superpowers/sdd/2026-10-22-m13-project-hierarchy/{progress.md,real-machine-readings.md,mutation-evidence.txt,spec-plan-mapping.md,m13-cdp.mjs,m13-cdp.stdout.txt,m13-backup.zip,contaminated-real-dir/,pre-cleanup-real-dir/,realdir-*.txt}`（git-ignored，收口前别清） |
 | **M11-a SDD 账本（每格 Ruling、Task 3/5/6 三轮修复的裁定起因、Task 5 的两条控制方自纠、Task 6 的「同一 diff 两个评审座位取覆盖更全的一方」（坑 46）、Task 4 派发前预检两处计划缺陷）** | `.superpowers/sdd/2026-10-19-m11-expiry-fields/progress.md`（同目录另有 `task-N-brief.md` / `task-N-report.md` / `recheck-*.md` / `review-*.diff`；**该目录 git-ignored，`git clean -fdx` 会连它一起清掉** —— 见坑 26 同族处置：本轮四份证据件被 `docs/` 按路径引用，收口时**不许**清） |
 | **M11-a 变异取证（八处靶、十次下靶逐个具名打红：`expiry.rs:330` / `search.rs:1041` / `expiry.rs:349` / `expiry.rs:222` / node 5 条 / `expiry.rs:301` / node 1 条 / `expiry.rs:236` / `search.rs:516` / `backup.rs:673`，含 `perl -i` 因 CRLF 失锚与 M⑥「第一条断言先停」两条探针自纠；行号是取证当时的，只当线索）** | `.superpowers/sdd/2026-10-19-m11-expiry-fields/mutation-evidence.txt` |

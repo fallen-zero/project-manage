@@ -28,6 +28,8 @@
 - 文档与源码保持 CRLF（`git ls-files --eol` 应见 `i/lf w/crlf`）；提交前 `git diff --check`。
 - 不 stage / 不删除未跟踪的 `Python/`；证据目录 `.superpowers/sdd/2026-10-22-m13-project-hierarchy/` 被文档按路径引用，收口前不 `git clean -fdx`。
 
+> **执行期订正（终审 I2）**：既有祖先环测试补 1 支，cargo 358→359；真实目录事故的根因/隔离见 HANDOFF 坑 51；历史数链保留不动。
+
 ## 任务总览与数链
 
 | Task | 交付 | 新增 cargo 测试 | cargo 累计 | 新增 node 测试 | node 累计 | 结构门 |

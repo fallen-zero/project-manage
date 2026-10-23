@@ -109,27 +109,29 @@ fn validate_parent(
         .optional()?
         .is_some();
     if !exists {
-        return Err(invalid("所属总包不存在或已删除"));
+        return Err(AppError::new(
+            "invalid_input",
+            "所属总包不存在或已删除",
+            Some("刷新项目列表后重新选择"),
+        ));
     }
-    if let Some(self_id) = self_id {
-        let mut cursor = Some(pid.to_owned());
-        let mut visited = HashSet::new();
-        while let Some(cur) = cursor {
-            if cur == self_id {
-                return Err(invalid("不能把项目挂到自己的子项目下（会形成循环）"));
-            }
-            if !visited.insert(cur.clone()) {
-                return Err(invalid("父子关系存在循环，请先解除循环后再保存"));
-            }
-            cursor = conn
-                .query_row(
-                    "SELECT parent_id FROM projects WHERE id = ?1 AND deleted_at IS NULL",
-                    [&cur],
-                    |r| r.get::<_, Option<String>>(0),
-                )
-                .optional()?
-                .flatten();
+    let mut cursor = Some(pid.to_owned());
+    let mut visited = HashSet::new();
+    while let Some(cur) = cursor {
+        if self_id == Some(cur.as_str()) {
+            return Err(invalid("不能把项目挂到自己的子项目下（会形成循环）"));
         }
+        if !visited.insert(cur.clone()) {
+            return Err(invalid("父子关系存在循环，请先解除循环后再保存"));
+        }
+        cursor = conn
+            .query_row(
+                "SELECT parent_id FROM projects WHERE id = ?1 AND deleted_at IS NULL",
+                [&cur],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
     }
     Ok(())
 }
@@ -889,6 +891,37 @@ mod tests {
     }
 
     #[test]
+    fn existing_ancestor_cycle_is_rejected_on_create_and_update() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let a = create_project(&conn, &input("环甲")).unwrap();
+        let b = create_project(&conn, &input("环乙")).unwrap();
+        // 绕过命令层造既有环：A→B→A
+        conn.execute(
+            "UPDATE projects SET parent_id = ?1 WHERE id = ?2",
+            rusqlite::params![b.id, a.id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE projects SET parent_id = ?1 WHERE id = ?2",
+            rusqlite::params![a.id, b.id],
+        )
+        .unwrap();
+
+        let mut create_input = input("环外新子项");
+        create_input.parent_id = Some(a.id.clone());
+        let err = create_project(&conn, &create_input).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("循环"), "{}", err.message);
+
+        let c = create_project(&conn, &input("环外项目")).unwrap();
+        let mut update_input = input("环外项目");
+        update_input.parent_id = Some(b.id.clone());
+        let err = update_project(&conn, &c.id, &update_input).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("循环"), "{}", err.message);
+    }
+
+    #[test]
     fn missing_or_deleted_parent_is_rejected() {
         let conn = crate::db::open_in_memory().unwrap();
         let mut orphan_input = input("孤儿项目");
@@ -896,6 +929,7 @@ mod tests {
         let err = create_project(&conn, &orphan_input).unwrap_err();
         assert_eq!(err.code, "invalid_input");
         assert!(err.message.contains("不存在"), "{}", err.message);
+        assert_eq!(err.hint.as_deref(), Some("刷新项目列表后重新选择"));
 
         let p = create_project(&conn, &input("待删总包")).unwrap();
         delete_project(&conn, &p.id).unwrap();
@@ -929,7 +963,7 @@ mod tests {
 
         let err = delete_project(&conn, &parent.id).unwrap_err();
         assert_eq!(err.code, "invalid_input");
-        assert!(err.message.contains("1"), "文案必须点名子项数量：{}", err.message);
+        assert!(err.message.contains("还有 1 个未删除的子项目"), "文案必须点名子项数量：{}", err.message);
         assert!(get_project(&conn, &parent.id).is_ok(), "被拒后父项目必须还在");
 
         delete_project(&conn, &child.id).unwrap();

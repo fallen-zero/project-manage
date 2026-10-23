@@ -1,6 +1,9 @@
 # M13 设计：父子项目关联（单父树）
 
 **状态**：需求方 2026-10-22 逐题拍定（D1–D10），设计稿已确认，本文件是规格；实施计划另落 `docs/superpowers/plans/`。
+
+> **执行期事故（2026-10-23）**：Task 7 前两次真实目录被写入，已清理并回退 V9；原始三文件哈希不可恢复。根因与隔离方法见 HANDOFF 坑 51。
+
 **基线**：`master` = M12 收口点 `0ff5df6`。M12 收口读数：cargo **346 passed**、node **57/57/0**、命令 **69**、async **7**、`TARGET_VERSION: i64 = 8`、`allow(dead_code)` **1**、`Cargo.lock` **616**、collect **9**、依赖 diff **空**、merge commit **0**。本批 V9 后 `TARGET_VERSION` 变 **9**，其余结构门不变（命令仍 69）。
 
 ## 一、需求出处与本轮兑现范围
