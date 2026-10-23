@@ -417,7 +417,14 @@ mod tests {
         )
         .unwrap();
         project::create_project(&conn, &project_input("区内项目乙")).unwrap();
-        project::delete_project(&conn, &p.id).unwrap();
+        // 软删走裸 SQL，和上面 `delete_refuses_…` 那处同一理由（Task 3 起 `get_project` 按活动区
+        // 过滤）：p 已被挪去乙区而活动区还是默认区，走 `project::delete_project` 会先 not_found，
+        // `project_count 只数未软删` 这一支就测不到。
+        conn.execute(
+            "UPDATE projects SET deleted_at = datetime('now') WHERE id = ?1",
+            [p.id],
+        )
+        .unwrap();
         let rows = list(&conn).unwrap();
         assert_eq!(rows.iter().find(|w| w.id == b.id).unwrap().project_count, 0, "project_count 只数未软删");
         assert_eq!(rows.iter().find(|w| w.id == DEFAULT_ID).unwrap().project_count, 1);

@@ -27,10 +27,8 @@ pub struct Project {
     pub delivery_deadline: Option<String>,
     pub status: String,
     pub parent_id: Option<String>,
-    /// 所属工作区 id。**字段声明是 Task 2 的跨任务前置**（本 Task 的测试要靠它编译）；
-    /// 读/写语义（SELECT 取这一列、create 按活动区归属、父项同区校验）归 Task 3。
-    /// 与 `db.rs:30` 的 `open_in_memory` 同款：先落声明、后落调用点，中间这一程靠 allow 过结构门。
-    #[allow(dead_code)]
+    /// 所属工作区 id。列是 NOT NULL，读出来恒有值：`list_projects`/`get_project` 都按活动区
+    /// 过滤并取回这一列，create 恒落活动区（spec §六 第 1 条）。改归属只有 update 一条合法路径。
     pub workspace_id: String,
     pub tags: Vec<String>,
     pub dirs: Vec<ProjectDir>,
@@ -64,9 +62,10 @@ pub struct ProjectInput {
     pub status: String,
     #[serde(default)]
     pub parent_id: Option<String>,
-    /// 新建时挂到哪个区；`None` = 用活动区。**声明同样在 Task 2 前置**，
-    /// 「create 归属 + 跨区 input.workspaceId 一律拒（不静默改写）」的语义在 Task 3 落地。
-    /// 前端带着旧字段来也要能反序列化，所以 `serde(default)`；allow 的理由见上面 `Project` 那处。
+    /// 编辑时改归属用（Task 4 的换区流程读它）。create **完全不看这一格**（spec §六 第 1 条：
+    /// 恒落活动区，否则一条 IPC 就能把项目造进当前视野外的区）。**字段声明是 Task 2 的跨任务前置**，
+    /// 前端带着旧字段来也要能反序列化，所以 `serde(default)`；本格还没有非测试调用点，
+    /// 中间这一程靠豁免过 `cargo clippy --lib -- -D warnings`（先例：`db.rs:30` 的 `open_in_memory`）。
     #[serde(default)]
     #[allow(dead_code)]
     pub workspace_id: Option<String>,
@@ -101,10 +100,14 @@ fn validate(input: &ProjectInput) -> AppResult<()> {
     Ok(())
 }
 
+/// 父项校验。`workspace` 是这一行**写入后**所属的区（spec §六 第 3 条：跨区父子边造不出来）：
+/// create 传活动区，update 传 effective 区（Task 4 的换区流程按目标区传）。
+/// 环检测只在同一个区内部才成立，所以那段 SQL 不带区谓词。
 fn validate_parent(
     conn: &Connection,
     self_id: Option<&str>,
     parent_id: Option<&str>,
+    workspace: &str,
 ) -> AppResult<()> {
     let Some(pid) = parent_id else {
         return Ok(());
@@ -114,8 +117,8 @@ fn validate_parent(
     }
     let exists = conn
         .query_row(
-            "SELECT 1 FROM projects WHERE id = ?1 AND deleted_at IS NULL",
-            [pid],
+            "SELECT 1 FROM projects WHERE id = ?1 AND deleted_at IS NULL AND workspace_id = ?2",
+            params![pid, workspace],
             |_| Ok(()),
         )
         .optional()?
@@ -178,14 +181,18 @@ fn write_tx(conn: &Connection) -> AppResult<rusqlite::Transaction<'_>> {
 
 pub fn create_project(conn: &Connection, input: &ProjectInput) -> AppResult<Project> {
     validate(input)?;
+    // create 恒落活动区，**不看 `input.workspace_id`**（spec §六 第 1 条）：接受客户端给的区
+    // 就等于开一条「把项目造进当前视野外」的通路。改归属只有一条合法路径 —— update。
+    let workspace = crate::workspace::active_id(conn)?;
     let parent_id = normalize(input.parent_id.clone());
     let tx = write_tx(conn)?;
-    validate_parent(&tx, None, parent_id.as_deref())?;
+    validate_parent(&tx, None, parent_id.as_deref(), &workspace)?;
     let id = uuid::Uuid::new_v4().to_string();
     tx.execute(
         "INSERT INTO projects (id, name, code, manager, customer, contact_name, contact_phone,
-                               contract_no, contract_period, delivery_deadline, status, parent_id)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+                               contract_no, contract_period, delivery_deadline, status, parent_id,
+                               workspace_id)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         params![
             id,
             input.name.trim(),
@@ -199,6 +206,7 @@ pub fn create_project(conn: &Connection, input: &ProjectInput) -> AppResult<Proj
             normalize(input.delivery_deadline.clone()),
             input.status,
             parent_id,
+            workspace,
         ],
     )?;
     replace_tags(&tx, &id, &input.tags)?;
@@ -212,7 +220,8 @@ pub fn update_project(conn: &Connection, id: &str, input: &ProjectInput) -> AppR
     let parent_id = normalize(input.parent_id.clone());
     let tx = write_tx(conn)?;
     let old = get_project(&tx, id)?;
-    validate_parent(&tx, Some(id), parent_id.as_deref())?;
+    // 本轮先按「旧行所属区」判父项；Task 4 的换区流程把它换成 effective 值（目标区）。
+    validate_parent(&tx, Some(id), parent_id.as_deref(), old.workspace_id.as_str())?;
     let changed = tx.execute(
         "UPDATE projects SET name=?2, code=?3, manager=?4, customer=?5, contact_name=?6,
                 contact_phone=?7, contract_no=?8, contract_period=?9, delivery_deadline=?10,
@@ -273,13 +282,14 @@ pub fn delete_project(conn: &Connection, id: &str) -> AppResult<()> {
 }
 
 pub fn list_projects(conn: &Connection) -> AppResult<Vec<Project>> {
+    let workspace = crate::workspace::active_id(conn)?;
     let mut rows = conn.prepare(
         "SELECT id, name, code, manager, customer, contact_name, contact_phone,
-                contract_no, contract_period, delivery_deadline, status, parent_id
-         FROM projects WHERE deleted_at IS NULL ORDER BY updated_at DESC",
+                contract_no, contract_period, delivery_deadline, status, parent_id, workspace_id
+         FROM projects WHERE deleted_at IS NULL AND workspace_id = ?1 ORDER BY updated_at DESC",
     )?;
     let mut projects: Vec<Project> = rows
-        .query_map([], |r| {
+        .query_map(params![workspace], |r| {
             Ok(Project {
                 id: r.get(0)?,
                 name: r.get(1)?,
@@ -293,8 +303,7 @@ pub fn list_projects(conn: &Connection) -> AppResult<Vec<Project>> {
                 delivery_deadline: r.get(9)?,
                 status: r.get(10)?,
                 parent_id: r.get(11)?,
-                // Task 2 前置的字段：值先取默认区常量，Task 3 把它换成 SELECT 里的这一列。
-                workspace_id: "default".to_owned(),
+                workspace_id: r.get(12)?,
                 tags: Vec::new(),
                 dirs: Vec::new(),
             })
@@ -349,9 +358,9 @@ pub fn get_project(conn: &Connection, id: &str) -> AppResult<Project> {
     let base = conn
         .query_row(
             "SELECT name, code, manager, customer, contact_name, contact_phone,
-                    contract_no, contract_period, delivery_deadline, status, parent_id
-             FROM projects WHERE id = ?1 AND deleted_at IS NULL",
-            [id],
+                    contract_no, contract_period, delivery_deadline, status, parent_id, workspace_id
+             FROM projects WHERE id = ?1 AND deleted_at IS NULL AND workspace_id = ?2",
+            params![id, crate::workspace::active_id(conn)?],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -365,6 +374,7 @@ pub fn get_project(conn: &Connection, id: &str) -> AppResult<Project> {
                     r.get::<_, Option<String>>(8)?,
                     r.get::<_, String>(9)?,
                     r.get::<_, Option<String>>(10)?,
+                    r.get::<_, String>(11)?,
                 ))
             },
         )
@@ -391,8 +401,7 @@ pub fn get_project(conn: &Connection, id: &str) -> AppResult<Project> {
         delivery_deadline: base.8,
         status: base.9,
         parent_id: base.10,
-        // Task 2 前置的字段：同上，Task 3 起从 projects 表按列读回。
-        workspace_id: "default".to_owned(),
+        workspace_id: base.11,
         tags,
         dirs,
     })
@@ -1011,5 +1020,70 @@ mod tests {
 
         let err = update_project(&conn, "no-such-id", &bad_input).unwrap_err();
         assert_eq!(err.code, "not_found", "未知 id 必须先报 not_found，父项校验不能抢先");
+    }
+
+    /// create 必须写活动区，**忽略客户端塞进来的区 id**（spec §六 第 1 条）：
+    /// 接受它就能用一条 IPC 把项目造进当前视野看不见的区，变成哪一区都找不到的孤儿。
+    #[test]
+    fn create_project_lands_in_the_active_workspace_not_the_input_one() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        let mut input = input("孤儿防御");
+        input.workspace_id = Some(b.id.clone());
+        input.parent_id = None;
+
+        let p = create_project(&conn, &input).unwrap();
+        assert_eq!(p.workspace_id, crate::workspace::DEFAULT_ID, "create 恒落活动区，不吃 input");
+
+        // 它只能从活动区的视野里被读到：切去乙区之后列表必须是空的。
+        crate::workspace::switch(&conn, &b.id).unwrap();
+        assert!(list_projects(&conn).unwrap().is_empty(), "被塞进别区的项目不能出现在乙区列表里");
+        assert_eq!(get_project(&conn, &p.id).unwrap_err().code, "not_found");
+    }
+
+    /// 读路径的两个入口都要收窄：列表按区过滤，详情跨区读不到（`/project/$id` 深链因此天然翻不过去）。
+    #[test]
+    fn list_and_get_are_scoped_to_active_workspace() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let a = create_project(&conn, &input("默认区项目")).unwrap();
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        crate::workspace::switch(&conn, &b.id).unwrap();
+        let mut b_input = input("乙区项目");
+        b_input.parent_id = None;
+        let b_project = create_project(&conn, &b_input).unwrap();
+
+        let in_b: Vec<String> = list_projects(&conn).unwrap().into_iter().map(|p| p.id).collect();
+        assert_eq!(in_b, vec![b_project.id.clone()], "列表只出活动区：{in_b:?}");
+        assert_eq!(get_project(&conn, &b_project.id).unwrap().workspace_id, b.id);
+        assert_eq!(get_project(&conn, &a.id).unwrap_err().code, "not_found", "跨区 id 与不存在的 id 同码");
+
+        crate::workspace::switch(&conn, crate::workspace::DEFAULT_ID).unwrap();
+        let in_default: Vec<String> = list_projects(&conn).unwrap().into_iter().map(|p| p.id).collect();
+        assert_eq!(in_default, vec![a.id.clone()], "切回来又是另一份列表：{in_default:?}");
+    }
+
+    /// 跨区父子边必须造不出来：父项存在性那条 SQL 加区谓词（spec §六）。
+    /// 用裸 SQL 把一个项目挪到别区，模拟「父在乙、子在丙」这个不该存在的形状。
+    #[test]
+    fn parent_must_live_in_the_active_workspace() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        let parent = create_project(&conn, &input("总包甲")).unwrap();
+        conn.execute(
+            "UPDATE projects SET workspace_id = ?1 WHERE id = ?2",
+            rusqlite::params![b.id, parent.id],
+        )
+        .unwrap();
+
+        let mut child = input("子项目乙");
+        child.parent_id = Some(parent.id.clone());
+        let err = create_project(&conn, &child).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(
+            err.message.contains("所属总包不存在或已删除"),
+            "文案要指名归属问题：{}",
+            err.message
+        );
+        assert_eq!(list_projects(&conn).unwrap().len(), 0, "默认区里此刻没有项目：父项已被挪走");
     }
 }
