@@ -96,7 +96,12 @@ pub fn ensure_active_row(conn: &Connection, table: &'static str, id: &str) -> Ap
 | 各自的 `get` | `todo.rs:157`、`milestone.rs:110`、`expiry.rs:116`、`daily_report.rs:129` | 走 `ensure_active_row` |
 | 台账 | `ledger.rs:235 list` | 入口 `ensure_active_project(project_id)` |
 | 操作日志 | `project_audit.rs:228 list`、`:283 project_options` | JOIN projects 加区谓词（日志表只有 `project_id` 快照列、无区列） |
-| 日报 Excel 导出 | `daily_report.rs:530`/`:544` 两条取数 SQL | 同区谓词：导出的就是当前视野里的日报 |
+| 日报导入 | `daily_report.rs:529 load_projects`、`:542 existing_keys` | `load_projects` 的 SQL 加 `AND workspace_id = ?1`、`existing_keys` 改成 `JOIN projects p` 后加区谓词：预检与落库只认当前区的项目，表里指向别区项目的行走既有「找不到项目」那条拒绝理由 |
+| 台账导出 | `lib.rs:818 ledger_export` 命令体 | `ledger_export::collect` 之前一句 `workspace::ensure_active_project(&conn, &input.project_id)?`，形状同它上面那道 `backup::guard_destination`（写盘前先挡） |
+| 正文预览 | `doc_preview.rs:72 row_for_preview` | 已有 `JOIN projects p`，加 `AND p.workspace_id = ?2`；跨区 `doc_id` 走它现有的「记录可能来自已注销的目录」那条 `unavailable` 文案，不新增错误码 |
+| 索引总览 | `lib.rs:501 index_overview` | `index_job::targets(&conn, None)` 的结果先用一次 `SELECT id FROM projects WHERE workspace_id = ?1` 取到的 `HashSet<String>` 过滤，**再进 `status_counts` 循环**（少排一段无用的 per-项目查询）；worker 自己那条 `targets` 调用一字不动 |
+
+**日报 Excel 导出不需要 SQL 改动**：`lib.rs:909 daily_report_export` 收的是前端已经按区取好的 `rows: Vec<ExportRow>`，列表窄了导出就窄。
 
 不改的一侧：**索引 worker**。`index_job.rs:98 targets()` 照旧全库扫所有未删项目的根目录。索引是重活、按文件 mtime 增量，跟着 UI 反复重扫会把 worker 变成后台灾难；隔离做的是「按当前区呈现与可写」，正文抓取保持全局。这条取舍写进 `docs/技术方案.md` 并在 §十二 里再点名一次。
 
@@ -152,9 +157,10 @@ workspace_switch(id: String) -> AppResult<String>   // 回切换后的活动区 
 - **create（`project.rs:168`）**：写死活动区。`input.workspace_id` 在 create 里**被忽略**，值取 `active_id(conn)`。这是刻意的：如果接受客户端传来的区 id，就能用一条 IPC 把项目塞进当前视野看不见的区，造出「数据存在但哪一区都找不到」的孤儿。要有测试专门钉这条（§十 T-8）。
 - **update（`project.rs:199`）**：`input.workspace_id` 为 `None` 或与旧值相同 → 不迁；不同 → 走换区流程：
   1. 目标区必须真实存在（`invalid_input`）；
-  2. **被改的项目自己不能有父**：`old.parent_id.is_some()` → `invalid_input`「子项目不能单独换区，请编辑它的父项目（整棵子树一起随迁）」；
+  2. **有父就拒绝单独换区**：`old.parent_id.is_some() || input.parent_id.is_some()` → `invalid_input`「子项目不能单独换区，请编辑它的父项目（整棵子树一起随迁）」。「本次提交里刚指定了父项」也算有父，否则「同一次保存里既摘父又换区」会绕过 §六.3 的子树前提；前端在 `form.parentId !== null` 时就把该行禁用，正常情况下走不到这条错误；
   3. 目标区收整棵子树：递归收集 `id` 及全部后代，一条 `UPDATE projects SET workspace_id = ?2 WHERE id IN (...)` 落地。收集优先用 `WITH RECURSIVE`；若 bundled SQLite 不接受 `WITH` 前缀的 UPDATE（本项目未实测过这一形态），退化成 Rust 侧按 `parent_id` 逐层 `SELECT` 收集到 `Vec<String>`，**两者都必须在 `write_tx`（`project.rs:159`，BEGIN IMMEDIATE）这一个事务里完成**——半途失败不能出现「父在本区、子在别区」。计划阶段先跑一次 `WITH ... UPDATE` 的可行性探针，按结果二选一，不两条都留。
-  4. **同区不变量的闭合**：一条父子边要么整条在、要么不存在（`validate_parent` 的同区断言，见下条），所以「把父项迁到它某个子节点所在的区」这种形状在数据里不可能出现，随迁流程**不需要**为它加额外检查。这句写在这里是为了防止实现者多加一层校验或为它写测试。
+  4. **换区成功后活动区跟随到目标区**：同一个事务里把 `settings.active_workspace_id` 写成目标区。这不是顺手多做的事，是返回契约的前提——`update_project` 提交后要 `get_project(conn, id)` 回给命令层（`project.rs:231`），而 `get_project` 已按活动区过滤；不跟随的话「把项目挪到别区」这一次保存会**成功但回一个 `not_found`**，界面报失败、数据却已经改了。跟随之后的效果是顶栏下拉停在目标区、用户当场看见整棵移过去的子树；要回原区点一下下拉即可。
+  5. **同区不变量的闭合**：一条父子边要么整条在、要么不存在（`validate_parent` 的同区断言，见下条），所以「把父项迁到它某个子节点所在的区」这种形状在数据里不可能出现，随迁流程**不需要**为它加额外检查。这句写在这里是为了防止实现者多加一层校验或为它写测试。
 - **`validate_parent`（`project.rs:93`）加同区断言**：父项存在性那条 SQL 补 `AND workspace_id = ?活动区`，跨区父直接回「所属总包不存在或已删除」。加上 §4.1 的列表过滤，前后端都不可能出现跨区父子边。
 - **树视图与候选**：`parentCandidates`（`src/lib/project-tree.ts`）拿到的列表已是活动区，无需改逻辑；跨区项目的父行在列表里不可见时，`ProjectForm` 现有的「候选里找不到就把父归到无」的归一化会把它当顶层项目渲染，而提交会被后端拒——界面对此的口径见 §八（顶栏下拉是当前区的唯一入口，不存在「父在别区、子在特区」的合法状态，真出现即数据损坏，走备份回滚）。
 - **删除守卫不变**：有子仍禁删（M13），区不改变这条。
@@ -196,6 +202,20 @@ workspace_switch(id: String) -> AppResult<String>   // 回切换后的活动区 
 
 `src/pages/project-detail.tsx` 与 `src/pages/projects.tsx` 的父子区/树视图逻辑零改动——跨区数据在它们的取数里根本不出现。
 
+### 8.5 纯函数与跟随语义
+
+新增 `src/lib/workspace-view.ts`（前端可测的部分只有这三条，其余是接线）：
+
+```ts
+export function deleteGuard(ws: Workspace, activeId: string | null): string | null;
+export function nameHint(name: string): string | null;   // 与后端同一判据：trim 非空、≤40 字符
+export function activeWorkspaceId(items: Workspace[]): string | null;  // items 里 isActive 那格的 id
+```
+
+`deleteGuard` 返回禁用原因的中文文案（`"默认工作区不可删除"` / `"当前工作区不可删除，请先切换到其他工作区"` / `"该工作区下还有项目（含已删除项目），不能删除"`），可删时返回 `null`。三条原因与 §五 后端三条守卫逐字对应，前端只是提前把按钮置灰，**不是**第二道校验（判据仍只在后端一次）。
+
+**换区跟随不需要前端特判**（§六.4）：后端把活动区跟着子树走了，`update_project` 返回的项目就在当前视野里，`useProjectsStore` 现有的 `upsert` 覆盖本地行仍然正确；紧接着 `<div key={activeId}>` 因 `switchTo`/`refresh` 后的活动区变化重挂载一次，列表按新区重取。**不要**在这里加「返回项目区号不等于当前区就从列表里摘掉」这类分支——那个状态在新契约下不会出现。
+
 ## 九、备份、检索与既有不变量
 
 - **`Counts` 七键不变**（`backup.rs:127-133`）：`workspaces` 是新表，沿用 M12/M13/M14 的裁定——新表不进 Counts。`settings` 那一键会 +1（V11 种了 `active_workspace_id`），只影响数字不影响结构。
@@ -206,7 +226,7 @@ workspace_switch(id: String) -> AppResult<String>   // 回切换后的活动区 
 - **索引 worker 不受活动区约束**（§4.1），所以 `index_overview` 里「本机总共扫了多少文件」这类总量口径不变；变的只是「按项目翻清单」的可见范围。
 - **备份/恢复后活动区**：`settings` 行随包进出，导旧包时由 V11 补种 `default`；导入后重启前不主动切区（`backup_import` 之后界面走一次 `refresh`，活动区以后端 `settings` 为准）。
 
-## 十、验收网格（后端 cargo 单测 + 前端 vitest，逐条具名）
+## 十、验收网格（后端 cargo 单测 + 前端 `node --test`，逐条具名）
 
 | # | 归属 | 用例名 | 断什么 |
 |---|------|--------|--------|
@@ -219,15 +239,17 @@ workspace_switch(id: String) -> AppResult<String>   // 回切换后的活动区 
 | T-7 | `workspace.rs` | `create_rename_delete_guards` | 重名/空名/超 40 字/未知 id 四类错误码；删空区成功、删非空区被拒、删 `default` 被拒、删当前区被拒 |
 | T-8 | `project.rs` | `create_project_ignores_input_workspace` | 输入里塞别区 id 仍落活动区（§六 第 1 条的孤儿防御） |
 | T-9 | `project.rs` | `list_and_get_are_scoped_to_active_workspace` | 两区各一项目：当前区列表只 1 条，跨区 `get_project` 回 `not_found` |
-| T-10 | `project.rs` | `move_subtree_follows_root_atomically` | 三层树随根换区；换区后旧区列表空、新区三层齐；父项 SQL 层断「跨区父被 `validate_parent` 拒」 |
+| T-10 | `project.rs` | `move_subtree_follows_root_and_keeps_return_visible` | 三层树随根换区；**换区后活动区已是目标区，`update_project` 的返回值仍读得到**（§六.4 那条契约）；`switch` 回旧区后列表空、新区三层齐；父项 SQL 层断「跨区父被 `validate_parent` 拒」 |
+| T-17 | 命令层守卫 | `command_level_guards_are_scoped` | `ledger_export::collect` 前的 `ensure_active_project` 对跨区 project_id 回 `not_found` 且不写盘；`doc_preview::row_for_preview` 对跨区 doc_id 回 `preview_unavailable`；`index_overview` 的候选只含活动区项目 |
 | T-11 | `project.rs` | `child_project_cannot_move_alone` | 有 `parent_id` 的项目改 `workspace_id` → `invalid_input`，且数据未变 |
-| T-12 | 关联表 | `todos_milestones_expiry_daily_scoped` | 待办/里程碑/到期/日报四张表的 `list` 只出活动区；跨区 `create` 与跨区 id 的 `update`/`delete` 全回错误 |
+| T-12 | 关联表 | `todos_milestones_expiry_daily_scoped` | 待办/里程碑/到期/日报四张表的 `list` 只出活动区；跨区 `create` 与跨区 id 的 `update`/`delete` 全回错误；`ledger` 的 `list`/`reveal`/`soft_delete`/五个 `update_*` 同口径 |
+| T-18 | `daily_report.rs` | `import_matches_only_active_workspace_projects` | 别区项目的行在 `preview` 里进 `rejected`、在 `apply` 里整份拒绝且库里一条不增 |
 | T-13 | 检索 | `search_field_and_doc_hits_scoped` | 两区同名串：`field_hits`、`doc_hits`、`indexed_project_count` 都只回活动区，且首屏空态谓词与 `SELECT_SQL` 同口径：当前区一个项目都没有时 `indexed_projects` 回 0，即使别区有已建好正文的文档 |
 | T-14 | `backup.rs` | `schema_version_is_11_and_counts_stays_seven` | 包内 schema=11、Counts 键数与字段数仍是 7、告警句含「工作区名称」；**旧包（schema≤10）导入后 V11 自动补齐并把包内项目放进默认区** |
 | T-15 | `project_audit.rs` | `workspace_change_is_logged_once_for_root` | 根换区 → 恰 1 条 update 日志、`changes` 里「工作区」旧名/新名正确；后代不各自出日志；`audit_list` 只出活动区日志 |
-| T-16 | 新增 `src/lib/workspace-view.ts` 纯函数 | `deleteGuard` / `nameHint` | `deleteGuard(ws, activeId)` 回三种禁用原因（默认区 / 当前区 / `projectCount>0`）与 `null`（可删）；`nameHint(name)` 对 trim 后空名/超 40 字回文案、合法回 `null` |
+| T-16 | 新增 `src/lib/workspace-view.ts` 纯函数（§8.5） | `deleteGuard` / `nameHint` / `activeWorkspaceId` | `deleteGuard(ws, activeId)` 回三种禁用原因（默认区 / 当前区 / `projectCount>0`）与 `null`（可删）；`nameHint(name)` 对 trim 后空名/超 40 字回文案、合法回 `null`；`activeWorkspaceId` 在无 `isActive` 行时回 `null` |
 
-前端另需 vitest 覆盖 `stores/workspaces.ts` 的 create/rename/delete/switch 成功与失败收口（照 `stores/templates.ts` 那套 `run()` 形态）。基线 cargo **372** / node **71**，本轮新增条数在计划里逐 target 数实数后再写聚合数（不在 spec 里凭印象写总数）。
+前端另需在 `tests/workspace-view.test.ts` 里用 `node --test` + `node:assert/strict` 覆盖 §8.5 那三个纯函数（store 本身在本仓没有测试先例，不为此单开一套 mock 框架）。基线 **实测**：cargo 372 passed / node 71 tests 71 pass 0 fail（2026-10-23，`feat/m15-workspaces` 切出自 `master f714735`）；本轮新增条数在计划里逐 target 数实数后再写聚合数（不在 spec 里凭印象写总数）。
 
 ## 十一、真机验收格（CDP，一次性 identifier 沙盒）
 
