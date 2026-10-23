@@ -111,7 +111,7 @@
 
 **M13 的门禁清单（在 `feat/m13-project-hierarchy` 的 HEAD 上跑过；收口时在合并后的 `master` 树上重跑）**：cargo **359**（终审修复 +1）、node **66**、命令 **69**、async 7、`TARGET_VERSION: i64 = 9`、豁免 1、`Cargo.lock` 616、collect 9、依赖 diff 空、merge commit 0；数命令数的 `sed` 范围式用 `/^\s*\])/` 版。**这些数会漂，下面这串现跑为准。**
 
-**A（收口 / 合并用的门禁清单 —— M13 已在功能分支 HEAD `9f883ad` 上跑过，终审修复后在新修复提交上复跑）**。M13 的**终态期望串**是 `命令 69 / async 7 / TARGET_VERSION 9 / 豁免 1 / Cargo.lock 616 / collect 9 / cargo 359 / node 66`（另有 `cargo build -j 1 --lib` exit=0、依赖 diff 空、merge commit 0）。**任何一格收口都用这串现跑，别信写死的数**：
+**A（收口 / 合并用的门禁清单 —— M13 已在终审修复提交 `66c9a90` 上跑过）**。M13 的**终态期望串**是 `命令 69 / async 7 / TARGET_VERSION 9 / 豁免 1 / Cargo.lock 616 / collect 9 / cargo 359 / node 66`（另有 `cargo build -j 1 --lib` exit=0、依赖 diff 空、merge commit 0）。**任何一格收口都用这串现跑，别信写死的数**：
 
 ```
 git rev-parse --abbrev-ref HEAD                              # 合并前在 feat/m13-project-hierarchy；收口时在 master
