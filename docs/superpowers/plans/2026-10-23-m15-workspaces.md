@@ -17,6 +17,12 @@
 - 错误码只用既有的 `invalid_input` / `not_found` / `db_failed`：**不新增码名**。跨区与「不存在」一律回 `not_found`（spec §四）。
 - SQL 一律参数绑定。唯一允许的字符串拼接是 `&'static str` 常量表名（与 `ledger.rs:212 soft_delete` 同形）和 `IN (?,?,…)` 占位符。
 - 注释、用户文案、commit message 一律中文；错误码字面量与 SQL 除外。
+- **`allow(dead_code)` 门 = 1（`db.rs`）的临时破例与回收路径**（Task 2 评审抓到，控制方裁定）：Task 2 要把 `workspace.rs` 四个读侧函数与 `project.rs` 两个新字段先落地（后五格都靠它们），而它们在 Task 3–6 之前没有**非测试**调用点，clippy `-D warnings` 就过不去 ⇒ 本分支的豁免数临时从 1 升到 7。裁定为「保留临时豁免 + 逐格回收」，不做「把每个函数挪到它的消费格」的重构：重构要改五格计划文本、新缺陷概率高于收益，而这个数由 Task 9 Step 1 的门自动兜住。硬要求：
+  1. **Task 3 Step 4** 落地 `ensure_active_project` 的调用点后删掉它的豁免；**Task 3 Step 2** 之后 `Project.workspace_id` 被 SELECT 真读，删掉它的豁免；
+  2. **Task 4 Step 4** 落地 `name_of` 时**不带**豁免（同格就被 `workspace_name` 消费）、并在本格删掉 `ProjectInput.workspace_id` 的豁免（本格起读它）；
+  3. **Task 5 Step 1** 起 `ensure_active_row` 有调用点，删它的豁免；**Task 6 Step 4** 起 `active_project_ids` 有调用点，删它的豁免；
+  4. 到 Task 9 Step 1 现跑 `grep -rn "allow(dead_code)" src-tauri/src/ | wc -l` 必须回到 **1**；没回收干净就是那一格的红，不要去改门的期望值。
+  另：注释与文案里**不许出现** `allow(dead_code)` 这个方括号字面量（`grep -rn` 会把注释也数进去，与 async 门那条同款坑）—— 要指它时写「dead_code 豁免」。
 - 基线（2026-10-23 在本分支实测，非引用）：`cargo test -j 1 --lib` **372 passed / exit=0**、仓库根 `node --test "tests/**/*.test.ts"` **tests 71 / pass 71 / fail 0**、命令 **70** / async **7** / `TARGET_VERSION 10` / 豁免 **1** / `Cargo.lock` **616** / collect **9**。
 - 每个 Task 结尾先跑本 Task 覆盖的 target，再跑全量 `cargo test -j 1 --lib`（前端 Task 跑 `npm run build`），**拿到真实退出码后**才提交。`cargo test` 只接一个筛选词。
 - 子代理**一律不跑** `npm run tauri dev` / `npm run dev`；真机格与变异取证由控制方跑。真实数据目录 `%APPDATA%\dev.zero.pfm\` 的 `ledger.db`/`-wal`/`-shm` 是只读红线，真机走一次性 compile-time identifier 沙盒。
@@ -668,6 +674,16 @@ Expected（补字段后）: PASS。
         assert_eq!(switch(&conn, &ws.id).unwrap(), ws.id, "重复切同一个区幂等成功");
         assert_eq!(switch(&conn, DEFAULT_ID).unwrap(), DEFAULT_ID);
         assert_eq!(active_id(&conn).unwrap(), DEFAULT_ID);
+
+        // `create`/`rename` 的返回值走 `row()`，那一支的 is_active 与 `list()` 是两处 SQL，各钉一次
+        // （Task 2 评审点名 `row()` 的 is_active 无测试）。
+        assert!(!create(&conn, "新建未激活区").unwrap().is_active, "新建区不该是活动区（row() 那一支）");
+        let cur = create(&conn, "当前改名区").unwrap();
+        switch(&conn, &cur.id).unwrap();
+        assert!(
+            rename(&conn, &cur.id, "改名后仍活动").unwrap().is_active,
+            "改名要读回当前区标记（row() 那一支）"
+        );
     }
 
     #[test]
@@ -979,7 +995,9 @@ fn workspace_switch(state: State<'_, AppState>, id: String) -> AppResult<String>
 Run: `cd src-tauri && awk '/generate_handler!\[/,/\]\)/' src/lib.rs | grep -cE '^            [a-z_]+,?$'`
 Expected: **75**。控制方 2026-10-23 在改前的树上现跑过这条，读数是 **70**（末条注册项没有逗号，正则里的 `,?` 已覆盖，所以不用 `+1` 补救）。
 Run: `cd src-tauri && grep -c "tauri::command(async)" src/lib.rs`
-Expected: **7**。
+Expected: **7**。这条门是 `grep -c` 数 `src/lib.rs` 里的行数 —— 命令与注释里都不许出现那个方括号字面量，注释写进去一次读数就变 8（Task 2 实跑抓到过，Step 5 的注释文本已按此改写；计划文本自己写没事，它不在 grep 的目录里）。
+Run: `cd src-tauri && grep -rn "allow(dead_code)" src-tauri/src/ | wc -l`
+Expected: **7** = 基线 `db.rs` 的 1 处 + 本格 6 处临时豁免（回收路径见 Global Constraints）。注释里再出现那个字面量会把读数抬到 8 —— 那是要修的，不是要接受的。
 
 - [ ] **Step 7: 全量 cargo + clippy**
 
