@@ -219,7 +219,8 @@ pub fn switch(conn: &Connection, id: &str) -> AppResult<String> {
 
 // ---- 下面三件是 M15 的读侧门，本 Task 只有测试在调；生产调用点分别是 Task 3/5 的 create
 // 路径、Task 5 的关联表守卫、Task 6 的 `index_overview` 按区收窄。
-// `#[allow(dead_code)]` 是这一程的过门写法（先例：`db.rs:30`），Task 3–6 落地后各自删掉。
+// dead_code 豁免是这一程的过门写法（先例：`db.rs:30`），Task 3–6 落地后各自删掉（回收路径见计划 Global Constraints）。
+// 注释里不许出现那个方括号字面量：豁免门是 grep -rn 数行数，注释写进去一次读数就假涨（与 async 门同款坑，Task 2 评审抓到）。
 /// 断言项目属于活动区且未软删。所有「按 project_id 挂新数据」的 create 路径靠它（spec §4.2）。
 #[allow(dead_code)]
 pub fn ensure_active_project(conn: &Connection, project_id: &str) -> AppResult<()> {
@@ -343,6 +344,16 @@ mod tests {
         assert_eq!(switch(&conn, &ws.id).unwrap(), ws.id, "重复切同一个区幂等成功");
         assert_eq!(switch(&conn, DEFAULT_ID).unwrap(), DEFAULT_ID);
         assert_eq!(active_id(&conn).unwrap(), DEFAULT_ID);
+
+        // `create`/`rename` 的返回值走 `row()`，那一支的 is_active 与 `list()` 是两处 SQL，各钉一次
+        // （Task 2 评审点名 `row()` 的 is_active 无测试）。
+        assert!(!create(&conn, "新建未激活区").unwrap().is_active, "新建区不该是活动区（row() 那一支）");
+        let cur = create(&conn, "当前改名区").unwrap();
+        switch(&conn, &cur.id).unwrap();
+        assert!(
+            rename(&conn, &cur.id, "改名后仍活动").unwrap().is_active,
+            "改名要读回当前区标记（row() 那一支）"
+        );
     }
 
     #[test]
