@@ -450,6 +450,7 @@ mod tests {
                 status: "开发".to_owned(),
                 tags: vec![],
                 parent_id: None,
+                workspace_id: None,
             },
         )
         .unwrap()

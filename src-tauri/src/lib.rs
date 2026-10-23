@@ -22,6 +22,7 @@ mod tokenize;
 mod todo;
 mod vault;
 mod watch;
+mod workspace;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -168,6 +169,47 @@ fn audit_list(
 ) -> AppResult<project_audit::AuditPage> {
     let conn = db(&state)?;
     project_audit::list(&conn, project_id.as_deref(), action.as_deref(), limit, offset)
+}
+
+/// 工作区五条命令（M15 spec §五）：一律同步。`db(&state)?` 取回的 `MutexGuard` 不是 `Send`，
+/// 只有让它在 `async fn` 里横跨 await 点才编不过（M8 D11），本批五条不碰文件，所以
+/// **async 标记那扇门保持 7 条不动**（spec §六）。
+/// 这条注释本身是个坑位提醒：结构门按字面 `grep -c` 读数，注释里写出那个属性串会把读数抬成 8。
+#[tauri::command]
+fn workspace_list(state: State<'_, AppState>) -> AppResult<Vec<workspace::Workspace>> {
+    let conn = db(&state)?;
+    workspace::list(&conn)
+}
+
+#[tauri::command]
+fn workspace_create(
+    state: State<'_, AppState>,
+    name: String,
+) -> AppResult<workspace::Workspace> {
+    let conn = db(&state)?;
+    workspace::create(&conn, &name)
+}
+
+#[tauri::command]
+fn workspace_rename(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> AppResult<workspace::Workspace> {
+    let conn = db(&state)?;
+    workspace::rename(&conn, &id, &name)
+}
+
+#[tauri::command]
+fn workspace_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    let conn = db(&state)?;
+    workspace::delete(&conn, &id)
+}
+
+#[tauri::command]
+fn workspace_switch(state: State<'_, AppState>, id: String) -> AppResult<String> {
+    let conn = db(&state)?;
+    workspace::switch(&conn, &id)
 }
 
 #[tauri::command]
@@ -1061,7 +1103,12 @@ pub fn run() {
             template_create,
             template_update,
             template_delete,
-            audit_list
+            audit_list,
+            workspace_list,
+            workspace_create,
+            workspace_rename,
+            workspace_delete,
+            workspace_switch
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");

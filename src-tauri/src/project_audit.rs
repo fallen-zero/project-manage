@@ -314,6 +314,7 @@ mod tests {
             delivery_deadline: None,
             status: "开发".into(),
             parent_id: None,
+            workspace_id: None,
             tags: vec!["运维".into(), " 政务 ".into(), "政务".into(), "".into()],
         }
     }

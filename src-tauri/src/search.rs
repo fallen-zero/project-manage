@@ -416,6 +416,7 @@ mod tests {
                 status: "开发".to_owned(),
                 tags: vec!["政务".to_owned(), "维保中".to_owned()],
                 parent_id: None,
+                workspace_id: None,
             },
         )
         .unwrap()

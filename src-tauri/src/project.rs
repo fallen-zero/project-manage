@@ -27,6 +27,11 @@ pub struct Project {
     pub delivery_deadline: Option<String>,
     pub status: String,
     pub parent_id: Option<String>,
+    /// 所属工作区 id。**字段声明是 Task 2 的跨任务前置**（本 Task 的测试要靠它编译）；
+    /// 读/写语义（SELECT 取这一列、create 按活动区归属、父项同区校验）归 Task 3。
+    /// 与 `db.rs:30` 的 `open_in_memory` 同款：先落声明、后落调用点，中间这一程靠 allow 过结构门。
+    #[allow(dead_code)]
+    pub workspace_id: String,
     pub tags: Vec<String>,
     pub dirs: Vec<ProjectDir>,
 }
@@ -59,6 +64,12 @@ pub struct ProjectInput {
     pub status: String,
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// 新建时挂到哪个区；`None` = 用活动区。**声明同样在 Task 2 前置**，
+    /// 「create 归属 + 跨区 input.workspaceId 一律拒（不静默改写）」的语义在 Task 3 落地。
+    /// 前端带着旧字段来也要能反序列化，所以 `serde(default)`；allow 的理由见上面 `Project` 那处。
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub workspace_id: Option<String>,
     pub tags: Vec<String>,
 }
 
@@ -282,6 +293,8 @@ pub fn list_projects(conn: &Connection) -> AppResult<Vec<Project>> {
                 delivery_deadline: r.get(9)?,
                 status: r.get(10)?,
                 parent_id: r.get(11)?,
+                // Task 2 前置的字段：值先取默认区常量，Task 3 把它换成 SELECT 里的这一列。
+                workspace_id: "default".to_owned(),
                 tags: Vec::new(),
                 dirs: Vec::new(),
             })
@@ -378,6 +391,8 @@ pub fn get_project(conn: &Connection, id: &str) -> AppResult<Project> {
         delivery_deadline: base.8,
         status: base.9,
         parent_id: base.10,
+        // Task 2 前置的字段：同上，Task 3 起从 projects 表按列读回。
+        workspace_id: "default".to_owned(),
         tags,
         dirs,
     })
@@ -555,6 +570,7 @@ mod tests {
             delivery_deadline: None,
             status: "开发".into(),
             parent_id: None,
+            workspace_id: None,
             tags: vec!["政务".into(), " 政务 ".into(), "".into()],
         }
     }
