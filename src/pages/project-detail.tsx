@@ -346,7 +346,11 @@ export function ProjectDetailPage() {
             onCancel={() => setEditing(false)}
             onSubmit={async (input) => {
               const ok = await save(project.id, input);
-              if (ok) setEditing(false);
+              if (ok) {
+                setEditing(false);
+                // 换区由后端跟随，本地 activeId 不会自己变；不刷新就停旧区、整页不重挂载。
+                void refreshWorkspaces();
+              }
               return ok;
             }}
           />

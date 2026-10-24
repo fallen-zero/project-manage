@@ -215,7 +215,11 @@ export function ProjectsPage() {
                 onCancel={() => setEditing(null)}
                 onSubmit={async (input) => {
                   const ok = await save(editing.id, input);
-                  if (ok) setEditing(null);
+                  if (ok) {
+                    setEditing(null);
+                    // 换区由后端跟随，本地 activeId 不会自己变；不刷新就停旧区、整页不重挂载。
+                    void refreshWorkspaces();
+                  }
                   return ok;
                 }}
               />
@@ -242,7 +246,10 @@ export function ProjectsPage() {
               disabled={saving}
               onClick={async () => {
                 if (!confirming) return;
-                if (await remove(confirming.id)) setConfirming(null);
+                if (await remove(confirming.id)) {
+                  setConfirming(null);
+                  void refreshWorkspaces();
+                }
               }}
             >
               确认删除

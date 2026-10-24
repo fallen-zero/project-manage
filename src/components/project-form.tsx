@@ -82,8 +82,11 @@ export function ProjectForm({
 
   // 换区只对「根项目」开放：有父（库里的或本次提交的）就随父走（spec §六.2）。
   const hasParent = form.parentId !== null;
+  // 有父时下拉禁用、提交 null；显示值要回到原区，否则会「看着 B、实际留 A」。
   const workspaceValue =
-    form.workspaceId ?? workspaceOptions?.find((w) => w.isActive)?.id ?? "";
+    (hasParent ? initial?.workspaceId : form.workspaceId) ??
+    workspaceOptions?.find((w) => w.isActive)?.id ??
+    "";
   const workspaceHint = hasParent ? "子项目随父项目一起换区，请编辑它的父项目" : null;
 
   const submit = async () => {
@@ -158,7 +161,7 @@ export function ProjectForm({
         </div>
       )}
 
-      {workspaceOptions && (
+      {workspaceOptions && workspaceOptions.length > 0 && (
         <div className="grid gap-2">
           <Label>工作区</Label>
           <Select

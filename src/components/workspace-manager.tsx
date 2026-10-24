@@ -93,18 +93,23 @@ export function WorkspaceManager({
                   <li key={w.id} className="flex items-center gap-2 rounded-xl border bg-background px-3 py-2">
                     <div className="min-w-0 flex-1">
                       {editing?.id === w.id ? (
-                        <Input
-                          value={editing.name}
-                          autoFocus
-                          onChange={(e) => setEditing({ id: w.id, name: e.target.value })}
-                          onKeyDown={async (e) => {
-                            if (e.key === "Enter" && !nameHint(editing.name)) {
-                              if (await rename(w.id, editing.name)) setEditing(null);
-                            } else if (e.key === "Escape") {
-                              setEditing(null);
-                            }
-                          }}
-                        />
+                        <>
+                          <Input
+                            value={editing.name}
+                            autoFocus
+                            onChange={(e) => setEditing({ id: w.id, name: e.target.value })}
+                            onKeyDown={async (e) => {
+                              if (e.key === "Enter" && !nameHint(editing.name)) {
+                                if (await rename(w.id, editing.name)) setEditing(null);
+                              } else if (e.key === "Escape") {
+                                setEditing(null);
+                              }
+                            }}
+                          />
+                          {nameHint(editing.name) && (
+                            <p className="mt-1 text-xs text-destructive">{nameHint(editing.name)}</p>
+                          )}
+                        </>
                       ) : (
                         <div className="flex items-center gap-2">
                           <span className="truncate text-sm font-medium">{w.name}</span>

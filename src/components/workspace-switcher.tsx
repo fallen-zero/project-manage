@@ -13,7 +13,7 @@ import { useWorkspacesStore } from "@/stores/workspaces";
 /// 顶栏的全局工作区切换器 + 「管理工作区」入口（spec §8.3）。
 /// 值取 store 的 activeId（也就是 `items` 里 isActive 那一格），本地不另存一份。
 export function WorkspaceSwitcher() {
-  const { items, activeId, loading, saving, switchTo } = useWorkspacesStore();
+  const { items, activeId, loading, saving, error, switchTo } = useWorkspacesStore();
   const [managerOpen, setManagerOpen] = useState(false);
 
   return (
@@ -34,6 +34,11 @@ export function WorkspaceSwitcher() {
           ))}
         </SelectContent>
       </Select>
+      {error && (
+        <span className="max-w-48 truncate text-xs text-destructive" title={error.hint ?? error.message}>
+          {error.message}
+        </span>
+      )}
       <Button size="sm" variant="ghost" onClick={() => setManagerOpen(true)}>
         管理
       </Button>
