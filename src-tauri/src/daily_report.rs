@@ -95,8 +95,9 @@ fn map_report(row: &rusqlite::Row<'_>) -> rusqlite::Result<DailyReport> {
 /// 不趁本轮顺手合并：合并要动那两格的既有测试，跟本轮目标无关，记进 Task 9 的欠账。
 fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
     let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM projects WHERE id = ?1 AND deleted_at IS NULL",
-        [project_id],
+        "SELECT COUNT(*) FROM projects
+          WHERE id = ?1 AND deleted_at IS NULL AND workspace_id = ?2",
+        params![project_id, crate::workspace::active_id(conn)?],
         |r| r.get(0),
     )?;
     if n == 0 {
@@ -109,16 +110,18 @@ fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
 /// 与 M9 判据⑤（预警跳过归档）形状相反，是有意为之。变异 M① 打的就是这一格。
 /// `?1 IS NULL OR d.project_id = ?1` 一形照抄 `todo::list`：**只一条 SQL**，不拆两条拼接。
 pub fn list(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<DailyReport>> {
+    let workspace = crate::workspace::active_id(conn)?;
     let mut stmt = conn.prepare(
         &format!(
             "SELECT {SELECT_COLUMNS}
                FROM daily_reports d
                JOIN projects p ON p.id = d.project_id AND p.deleted_at IS NULL
+                                  AND p.workspace_id = ?2
               WHERE d.deleted_at IS NULL AND (?1 IS NULL OR d.project_id = ?1)
               ORDER BY d.report_date, d.created_at, d.id"
         ),
     )?;
-    let rows = stmt.query_map(params![project_id], map_report)?;
+    let rows = stmt.query_map(params![project_id, workspace], map_report)?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
@@ -127,6 +130,7 @@ pub fn list(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<DailyR
 }
 
 pub fn get(conn: &Connection, id: &str) -> AppResult<DailyReport> {
+    crate::workspace::ensure_active_row(conn, "daily_reports", id)?;
     let sql = format!(
         "SELECT {SELECT_COLUMNS} FROM daily_reports d WHERE d.id = ?1 AND d.deleted_at IS NULL"
     );
@@ -152,6 +156,8 @@ pub fn create(conn: &Connection, input: &DailyReportInput) -> AppResult<DailyRep
 }
 
 pub fn update(conn: &Connection, id: &str, edit: &DailyReportEdit) -> AppResult<()> {
+    // 先管这行属不属于本区，再管新宿主：反过来时宿主合法，跨区那一行会被真改。
+    crate::workspace::ensure_active_row(conn, "daily_reports", id)?;
     project_exists(conn, &edit.project_id)?;
     let report_date = req_date("日报日期", edit.report_date.clone())?;
     let content = edit.content.trim().to_owned();
@@ -171,6 +177,7 @@ pub fn update(conn: &Connection, id: &str, edit: &DailyReportEdit) -> AppResult<
 }
 
 pub fn delete(conn: &Connection, id: &str) -> AppResult<()> {
+    crate::workspace::ensure_active_row(conn, "daily_reports", id)?;
     let changed = conn.execute(
         "UPDATE daily_reports SET deleted_at = datetime('now'), updated_at = datetime('now')
           WHERE id = ?1 AND deleted_at IS NULL",
@@ -526,9 +533,14 @@ fn locate_columns(header: &[calamine::Data]) -> AppResult<Columns> {
 }
 
 /// 匹配用的项目清单：软删项目**不在**清单里（挂不上新行，与 `create` 同一判据）。
+/// **也只认活动区**（M15 spec §4.1）：换区即换视野，表里指向别区项目的行走既有那条
+/// 「找不到项目」的拒绝理由，而不是悄悄写到看不见的地方去。
 fn load_projects(conn: &Connection) -> AppResult<Vec<ProjectRow>> {
-    let mut stmt = conn.prepare("SELECT id, code, name FROM projects WHERE deleted_at IS NULL")?;
-    let rows = stmt.query_map([], |r| {
+    let workspace = crate::workspace::active_id(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, code, name FROM projects WHERE deleted_at IS NULL AND workspace_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![workspace], |r| {
         Ok(ProjectRow { id: r.get(0)?, code: r.get(1)?, name: r.get(2)? })
     })?;
     let mut out = Vec::new();
@@ -539,11 +551,16 @@ fn load_projects(conn: &Connection) -> AppResult<Vec<ProjectRow>> {
 }
 
 /// 查重用的键集合。**f64 不进 hash**：换成放大 100 倍的整数（`check_hours` 已保证两位小数）。
+/// 与 `load_projects` 同口径只认活动区（`JOIN` 而不是子查询：区谓词与它的读路径写成同一个形状）。
 fn existing_keys(conn: &Connection) -> AppResult<HashSet<(String, String, String, i64)>> {
+    let workspace = crate::workspace::active_id(conn)?;
     let mut stmt = conn.prepare(
-        "SELECT report_date, project_id, content, hours FROM daily_reports WHERE deleted_at IS NULL",
+        "SELECT d.report_date, d.project_id, d.content, d.hours
+           FROM daily_reports d
+           JOIN projects p ON p.id = d.project_id
+          WHERE d.deleted_at IS NULL AND p.workspace_id = ?1",
     )?;
-    let rows = stmt.query_map([], |r| {
+    let rows = stmt.query_map(params![workspace], |r| {
         let h: f64 = r.get(3)?;
         Ok((
             r.get::<_, String>(0)?,
@@ -1340,5 +1357,117 @@ mod tests {
     fn import_outcome_line_format_has_exactly_one_key() {
         let obj = serde_json::to_value(ImportOutcome { inserted: 3 }).unwrap();
         assert_eq!(obj.as_object().unwrap().keys().collect::<Vec<_>>(), vec!["inserted"]);
+    }
+
+    /// 日报的读与写都只认活动区（M15 spec §4.1 / §4.2）。
+    #[test]
+    fn daily_report_list_and_mutators_are_scoped() {
+        let conn = db::open_in_memory().unwrap();
+        seed(&conn, "p-scope");
+        let r = create(&conn, &input("p-scope", Some("2026-10-23"), "推进一期", 1.0)).unwrap();
+        assert_eq!(list(&conn, None).unwrap().len(), 1, "活动区里的日报先要读得到");
+
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        conn.execute(
+            "UPDATE projects SET workspace_id = ?1 WHERE id = ?2",
+            params![b.id, "p-scope"],
+        )
+        .unwrap();
+
+        assert!(list(&conn, None).unwrap().is_empty(), "别区日报不许漏进当前区");
+        assert!(list(&conn, Some("p-scope")).unwrap().is_empty());
+        assert_eq!(get(&conn, &r.id).unwrap_err().code, "not_found");
+        let edit = DailyReportEdit {
+            project_id: "p-scope".to_owned(),
+            report_date: Some("2026-10-24".to_owned()),
+            content: "推进二期".to_owned(),
+            hours: 2.0,
+        };
+        assert_eq!(update(&conn, &r.id, &edit).unwrap_err().code, "not_found");
+        // update 里有两道门（本行守卫 + 宿主项目守卫），只断错误码不足证库里没落 ⇒ 裸 SQL 断内容。
+        let content: String = conn
+            .query_row("SELECT content FROM daily_reports WHERE id = ?1", [&r.id], |x| x.get(0))
+            .unwrap();
+        assert_eq!(content, "推进一期", "被拒的更新一个字都不许改");
+        assert_eq!(delete(&conn, &r.id).unwrap_err().code, "not_found");
+        assert_eq!(
+            create(&conn, &input("p-scope", Some("2026-10-25"), "别区挂日报", 1.0)).unwrap_err().code,
+            "not_found"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM daily_reports", [], |x| x.get::<_, i64>(0)).unwrap(),
+            1,
+            "被拒的登记一条都不许多，跨区的行也没被删"
+        );
+    }
+
+    /// 导入只认活动区项目：预检拒掉别区行，落库整批回 invalid_input。
+    #[test]
+    fn daily_report_import_only_matches_active_projects() {
+        let conn = db::open_in_memory().unwrap();
+        let mk_project = |conn: &Connection, name: &str, code: &str| {
+            crate::project::create_project(
+                conn,
+                &crate::project::ProjectInput {
+                    name: name.to_owned(),
+                    code: Some(code.to_owned()),
+                    manager: None,
+                    customer: None,
+                    contact_name: None,
+                    contact_phone: None,
+                    contract_no: None,
+                    contract_period: None,
+                    delivery_deadline: None,
+                    status: "立项".to_owned(),
+                    tags: vec![],
+                    parent_id: None,
+                    workspace_id: None,
+                },
+            )
+            .unwrap()
+            .id
+        };
+        let _a = mk_project(&conn, "甲项目", "P-A");
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        crate::workspace::switch(&conn, &b.id).unwrap();
+        let _bp = mk_project(&conn, "乙项目", "P-B");
+        crate::workspace::switch(&conn, crate::workspace::DEFAULT_ID).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("import.xlsx");
+        write_xlsx(
+            &path,
+            &[
+                ExportRow {
+                    report_date: "2026-10-23".to_owned(),
+                    project_code: Some("P-A".to_owned()),
+                    project_name: "甲项目".to_owned(),
+                    content: "默认区行".to_owned(),
+                    hours: 1.0,
+                },
+                ExportRow {
+                    report_date: "2026-10-23".to_owned(),
+                    project_code: Some("P-B".to_owned()),
+                    project_name: "乙项目".to_owned(),
+                    content: "别区行".to_owned(),
+                    hours: 2.0,
+                },
+            ],
+        )
+        .unwrap();
+
+        let pv = preview(&conn, &path).unwrap();
+        assert_eq!(pv.ok, 1, "活动区只认甲项目那一行");
+        assert!(pv.rejected.iter().any(|r| r.line == 3), "别区行要被拒：{:?}", pv.rejected);
+
+        let before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM daily_reports", [], |r| r.get(0))
+            .unwrap();
+        let mut conn = conn;
+        assert_eq!(apply(&mut conn, &path).unwrap_err().code, "invalid_input");
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM daily_reports", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, before, "整批拒绝，一条都不许多");
     }
 }

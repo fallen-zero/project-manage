@@ -121,8 +121,9 @@ fn map_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Todo> {
 
 fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
     let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM projects WHERE id = ?1 AND deleted_at IS NULL",
-        [project_id],
+        "SELECT COUNT(*) FROM projects
+          WHERE id = ?1 AND deleted_at IS NULL AND workspace_id = ?2",
+        params![project_id, crate::workspace::active_id(conn)?],
         |r| r.get(0),
     )?;
     if n == 0 {
@@ -137,16 +138,18 @@ fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
 /// `ORDER BY t.created_at, t.id` 里那个 `, t.id`（终审 N3，T2 就以 deferred minor 挂着的那一条）：
 /// `datetime('now')` 只到秒，同秒建的两行光按 created_at 排等于全凭 rowid 的心情 ⇒ 补一个确定的 tiebreaker。
 pub fn list(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<Todo>> {
+    let workspace = crate::workspace::active_id(conn)?;
     let mut stmt = conn.prepare(
         &format!(
             "SELECT {SELECT_COLUMNS}
                FROM todos t
                JOIN projects p ON p.id = t.project_id AND p.deleted_at IS NULL
+                                  AND p.workspace_id = ?2
               WHERE t.deleted_at IS NULL AND (?1 IS NULL OR t.project_id = ?1)
               ORDER BY t.created_at, t.id"
         ),
     )?;
-    let rows = stmt.query_map(params![project_id], map_todo)?;
+    let rows = stmt.query_map(params![project_id, workspace], map_todo)?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
@@ -155,6 +158,7 @@ pub fn list(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<Todo>>
 }
 
 pub fn get(conn: &Connection, id: &str) -> AppResult<Todo> {
+    crate::workspace::ensure_active_row(conn, "todos", id)?;
     let sql = format!(
         "SELECT {SELECT_COLUMNS} FROM todos t WHERE t.id = ?1 AND t.deleted_at IS NULL"
     );
@@ -181,6 +185,7 @@ pub fn create(conn: &Connection, input: &TodoInput) -> AppResult<Todo> {
 }
 
 pub fn update(conn: &Connection, id: &str, edit: &TodoEdit) -> AppResult<()> {
+    crate::workspace::ensure_active_row(conn, "todos", id)?;
     let title = edit.title.trim().to_owned();
     if title.is_empty() {
         return Err(invalid("待办内容不能为空"));
@@ -198,6 +203,7 @@ pub fn update(conn: &Connection, id: &str, edit: &TodoEdit) -> AppResult<()> {
 }
 
 pub fn delete(conn: &Connection, id: &str) -> AppResult<()> {
+    crate::workspace::ensure_active_row(conn, "todos", id)?;
     let changed = conn.execute(
         "UPDATE todos SET deleted_at = datetime('now'), updated_at = datetime('now')
           WHERE id = ?1 AND deleted_at IS NULL",
@@ -481,6 +487,69 @@ mod tests {
             keys,
             vec!["createdAt", "done", "dueDate", "id", "projectId", "title", "updatedAt"],
             "Todo 的键集合变了就要同步 src/types/todo.ts"
+        );
+    }
+
+    /// 待办的读与写都只认活动区（M15 spec §4.1 / §4.2）。
+    #[test]
+    fn todo_list_and_mutators_are_scoped() {
+        let conn = db::open_in_memory().unwrap();
+        seed(&conn, "p-scope");
+        let t = create(
+            &conn,
+            &TodoInput {
+                project_id: "p-scope".to_owned(),
+                title: "写点东西".to_owned(),
+                due_date: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(list(&conn, None).unwrap().len(), 1, "活动区里的待办先要读得到");
+
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        conn.execute(
+            "UPDATE projects SET workspace_id = ?1 WHERE id = ?2",
+            rusqlite::params![b.id, "p-scope"],
+        )
+        .unwrap();
+
+        assert!(list(&conn, None).unwrap().is_empty(), "别区待办不许漏进当前区");
+        assert!(list(&conn, Some("p-scope")).unwrap().is_empty());
+        assert_eq!(get(&conn, &t.id).unwrap_err().code, "not_found");
+        assert_eq!(
+            update(
+                &conn,
+                &t.id,
+                &TodoEdit { title: "改一下".to_owned(), due_date: None, done: false }
+            )
+            .unwrap_err()
+            .code,
+            "not_found"
+        );
+        assert_eq!(delete(&conn, &t.id).unwrap_err().code, "not_found");
+        // create 的守卫：跨区 project_id 挂不上新行。
+        assert_eq!(
+            create(
+                &conn,
+                &TodoInput {
+                    project_id: "p-scope".to_owned(),
+                    title: "别区挂待办".to_owned(),
+                    due_date: None,
+                }
+            )
+            .unwrap_err()
+            .code,
+            "not_found"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM todos WHERE title = '别区挂待办'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0,
+            "被拒的那条一条都不许多"
         );
     }
 }

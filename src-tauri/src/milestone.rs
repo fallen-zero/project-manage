@@ -74,8 +74,9 @@ fn map_milestone(row: &rusqlite::Row<'_>) -> rusqlite::Result<Milestone> {
 
 fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
     let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM projects WHERE id = ?1 AND deleted_at IS NULL",
-        [project_id],
+        "SELECT COUNT(*) FROM projects
+          WHERE id = ?1 AND deleted_at IS NULL AND workspace_id = ?2",
+        params![project_id, crate::workspace::active_id(conn)?],
         |r| r.get(0),
     )?;
     if n == 0 {
@@ -90,16 +91,18 @@ fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
 /// **与 spec §四 那句「同 `todo_list`」有偏差**（多排了 plan_date）：更合理但没授权，
 /// 已按裁定在 spec §四 记一句，代码不改（N10）。
 pub fn list(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<Milestone>> {
+    let workspace = crate::workspace::active_id(conn)?;
     let mut stmt = conn.prepare(
         &format!(
             "SELECT {SELECT_COLUMNS}
                FROM milestones m
                JOIN projects p ON p.id = m.project_id AND p.deleted_at IS NULL
+                                  AND p.workspace_id = ?2
               WHERE m.deleted_at IS NULL AND (?1 IS NULL OR m.project_id = ?1)
               ORDER BY m.plan_date IS NULL, m.plan_date, m.created_at, m.id"
         ),
     )?;
-    let rows = stmt.query_map(params![project_id], map_milestone)?;
+    let rows = stmt.query_map(params![project_id, workspace], map_milestone)?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
@@ -108,6 +111,7 @@ pub fn list(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<Milest
 }
 
 pub fn get(conn: &Connection, id: &str) -> AppResult<Milestone> {
+    crate::workspace::ensure_active_row(conn, "milestones", id)?;
     let sql = format!(
         "SELECT {SELECT_COLUMNS} FROM milestones m WHERE m.id = ?1 AND m.deleted_at IS NULL"
     );
@@ -143,6 +147,7 @@ pub fn create(conn: &Connection, input: &MilestoneInput) -> AppResult<Milestone>
 }
 
 pub fn update(conn: &Connection, id: &str, edit: &MilestoneEdit) -> AppResult<()> {
+    crate::workspace::ensure_active_row(conn, "milestones", id)?;
     check_stage(&edit.stage)?;
     let plan_date = norm_date("计划日期", edit.plan_date.clone())?;
     let note = norm(edit.note.clone()).unwrap_or_default();
@@ -158,6 +163,7 @@ pub fn update(conn: &Connection, id: &str, edit: &MilestoneEdit) -> AppResult<()
 }
 
 pub fn delete(conn: &Connection, id: &str) -> AppResult<()> {
+    crate::workspace::ensure_active_row(conn, "milestones", id)?;
     let changed = conn.execute(
         "UPDATE milestones SET deleted_at = datetime('now'), updated_at = datetime('now')
           WHERE id = ?1 AND deleted_at IS NULL",
@@ -380,6 +386,46 @@ mod tests {
                 "updatedAt"
             ],
             "Milestone 的键集合变了就要同步 src/types/milestone.ts"
+        );
+    }
+
+    /// 里程碑的读与写都只认活动区（M15 spec §4.1 / §4.2）。
+    #[test]
+    fn milestone_list_and_mutators_are_scoped() {
+        let conn = db::open_in_memory().unwrap();
+        seed(&conn, "p-scope");
+        let m = create(&conn, &input("p-scope", "立项", Some("2026-11-30"), None)).unwrap();
+        assert_eq!(list(&conn, None).unwrap().len(), 1, "活动区里的里程碑先要读得到");
+
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        conn.execute(
+            "UPDATE projects SET workspace_id = ?1 WHERE id = ?2",
+            params![b.id, "p-scope"],
+        )
+        .unwrap();
+
+        assert!(list(&conn, None).unwrap().is_empty(), "别区里程碑不许漏进当前区");
+        assert!(list(&conn, Some("p-scope")).unwrap().is_empty());
+        assert_eq!(get(&conn, &m.id).unwrap_err().code, "not_found");
+        assert_eq!(
+            update(&conn, &m.id, &edit("上线", Some("2026-11-30"), None, false)).unwrap_err().code,
+            "not_found"
+        );
+        assert_eq!(delete(&conn, &m.id).unwrap_err().code, "not_found");
+        // create 的守卫：跨区 project_id 挂不上新行（阶段用白名单里的词，不让 invalid_input 抢答）。
+        assert_eq!(
+            create(&conn, &input("p-scope", "评审", Some("2026-12-31"), None)).unwrap_err().code,
+            "not_found"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM milestones WHERE stage = '评审'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0,
+            "被拒的那条一条都不许多"
         );
     }
 }

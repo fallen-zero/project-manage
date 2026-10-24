@@ -82,8 +82,9 @@ fn map_expiry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Expiry> {
 
 fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
     let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM projects WHERE id = ?1 AND deleted_at IS NULL",
-        [project_id],
+        "SELECT COUNT(*) FROM projects
+          WHERE id = ?1 AND deleted_at IS NULL AND workspace_id = ?2",
+        params![project_id, crate::workspace::active_id(conn)?],
         |r| r.get(0),
     )?;
     if n == 0 {
@@ -96,16 +97,18 @@ fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
 /// `milestones` 那句 `plan_date IS NULL` 前置）；第三键 `, e.id` 是 M9 终审 N3 同一条理由 ——
 /// `datetime('now')` 只到秒，同一天同类别的两行必须有确定次序，**摘掉它下面那条 `list_breaks_ties_by_id_when_date_and_kind_are_equal` 当场红**。
 pub fn list(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<Expiry>> {
+    let workspace = crate::workspace::active_id(conn)?;
     let mut stmt = conn.prepare(
         &format!(
             "SELECT {SELECT_COLUMNS}
                FROM project_expiries e
                JOIN projects p ON p.id = e.project_id AND p.deleted_at IS NULL
+                                  AND p.workspace_id = ?2
               WHERE e.deleted_at IS NULL AND (?1 IS NULL OR e.project_id = ?1)
               ORDER BY e.expire_date, e.kind, e.id"
         ),
     )?;
-    let rows = stmt.query_map(params![project_id], map_expiry)?;
+    let rows = stmt.query_map(params![project_id, workspace], map_expiry)?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
@@ -114,13 +117,15 @@ pub fn list(conn: &Connection, project_id: Option<&str>) -> AppResult<Vec<Expiry
 }
 
 pub fn get(conn: &Connection, id: &str) -> AppResult<Expiry> {
+    // 这条已有 JOIN，区谓词直接进 SQL：不再叠一次 `ensure_active_row`（同一次读不做两遍同样的判断）。
     let sql = format!(
         "SELECT {SELECT_COLUMNS}
            FROM project_expiries e
            JOIN projects p ON p.id = e.project_id AND p.deleted_at IS NULL
+                              AND p.workspace_id = ?2
           WHERE e.id = ?1 AND e.deleted_at IS NULL"
     );
-    conn.query_row(&sql, [id], map_expiry)
+    conn.query_row(&sql, params![id, crate::workspace::active_id(conn)?], map_expiry)
         .optional()?
         .ok_or_else(|| not_found(id))
 }
@@ -155,6 +160,7 @@ pub fn create(conn: &Connection, input: &ExpiryInput) -> AppResult<Expiry> {
 
 /// 只改日期与备注两列（D2：续期 = 改日期）。`kind`/`label`/`project_id` 一律不碰。
 pub fn update(conn: &Connection, id: &str, upd: &ExpiryUpdate) -> AppResult<()> {
+    crate::workspace::ensure_active_row(conn, "project_expiries", id)?;
     let expire_date = req_date("到期日期", upd.expire_date.clone())?;
     let note = norm(upd.note.clone()).unwrap_or_default();
     let changed = conn.execute(
@@ -169,6 +175,7 @@ pub fn update(conn: &Connection, id: &str, upd: &ExpiryUpdate) -> AppResult<()> 
 }
 
 pub fn delete(conn: &Connection, id: &str) -> AppResult<()> {
+    crate::workspace::ensure_active_row(conn, "project_expiries", id)?;
     let changed = conn.execute(
         "UPDATE project_expiries SET deleted_at = datetime('now'), updated_at = datetime('now')
           WHERE id = ?1 AND deleted_at IS NULL",
@@ -411,6 +418,38 @@ mod tests {
                 "updatedAt"
             ],
             "Expiry 的键集合变了就要同步 src/types/expiry.ts"
+        );
+    }
+
+    /// 到期事项的读与写都只认活动区（M15 spec §4.1 / §4.2）。
+    #[test]
+    fn expiry_list_and_mutators_are_scoped() {
+        let conn = db::open_in_memory().unwrap();
+        seed(&conn, "p-scope");
+        let e = create(&conn, &input("p-scope", "域名", "oa.gov.cn", Some("2027-01-31"), None)).unwrap();
+        assert_eq!(list(&conn, None).unwrap().len(), 1, "活动区里的到期事项先要读得到");
+
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        conn.execute(
+            "UPDATE projects SET workspace_id = ?1 WHERE id = ?2",
+            params![b.id, "p-scope"],
+        )
+        .unwrap();
+
+        assert!(list(&conn, None).unwrap().is_empty(), "别区到期事项不许漏进当前区");
+        assert!(list(&conn, Some("p-scope")).unwrap().is_empty());
+        // 这条走的是 `expiry::get` 自己的 JOIN：红在「居然读到了行」而不是守卫报错，断言形状仍一样。
+        assert_eq!(get(&conn, &e.id).unwrap_err().code, "not_found");
+        assert_eq!(update(&conn, &e.id, &upd(Some("2028-01-31"), None)).unwrap_err().code, "not_found");
+        assert_eq!(delete(&conn, &e.id).unwrap_err().code, "not_found");
+        assert_eq!(
+            create(&conn, &input("p-scope", "证书", "tls", Some("2027-02-28"), None)).unwrap_err().code,
+            "not_found"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM project_expiries", [], |r| r.get::<_, i64>(0)).unwrap(),
+            1,
+            "被拒的登记一条都不许多，跨区的行也没被删"
         );
     }
 }

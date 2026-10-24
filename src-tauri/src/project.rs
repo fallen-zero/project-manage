@@ -498,6 +498,7 @@ fn replace_tags(conn: &Connection, project_id: &str, tags: &[String]) -> AppResu
 /// 刚回收的行被写回来。即时那一半由这里的 `clear_project` 负责，被写回来的那一半由
 /// `index_job::sweep_unrooted_projects` 在本轮末尾（最迟下一轮末尾）收敛；本轮不引入跨连接互斥。
 pub fn set_root_dir(conn: &Connection, project_id: &str, input: &DirInput) -> AppResult<ProjectDir> {
+    crate::workspace::ensure_active_project(conn, project_id)?;
     let path = validate_path(&input.path)?;
     get_project(conn, project_id)?;
     // `old` 的读必须留在事务外 —— 挪进来会让本事务变成先读后写的 DEFERRED 形态，
@@ -528,6 +529,7 @@ pub fn set_root_dir(conn: &Connection, project_id: &str, input: &DirInput) -> Ap
 }
 
 pub fn add_entry_dir(conn: &Connection, project_id: &str, input: &DirInput) -> AppResult<ProjectDir> {
+    crate::workspace::ensure_active_project(conn, project_id)?;
     let path = validate_path(&input.path)?;
     get_project(conn, project_id)?;
     conn.execute(
@@ -558,6 +560,7 @@ pub fn add_entry_dir(conn: &Connection, project_id: &str, input: &DirInput) -> A
 /// 这里负责即时回收那一半，被写回来的那一半由 `index_job::sweep_unrooted_projects` 在本轮末尾
 /// （最迟下一轮末尾）收敛；软删项目的行不在 sweep 范围内，那是留给恢复的。
 pub fn remove_dir(conn: &Connection, project_id: &str, dir_id: &str) -> AppResult<()> {
+    crate::workspace::ensure_active_project(conn, project_id)?;
     // 先读 kind 再删：删掉之后就问不出这一行原本是 root 还是 entry 了。
     let kind = conn
         .query_row(
@@ -1287,5 +1290,31 @@ mod tests {
             crate::workspace::DEFAULT_ID,
             "跟随那一句也必须一起回滚，否则界面停在空区"
         );
+    }
+
+    /// 三个目录 mutator 都不许碰别区项目（M15 spec §4.2）：跨区与不存在同走 not_found，且不落行。
+    /// `remove_dir` 故意拿**本区先登记好的真 dir_id**：传任意串的话，守卫删掉也照样 not_found，这条就红不了。
+    #[test]
+    fn directory_mutators_reject_a_foreign_project() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let p = create_project(&conn, &input("目录守卫项目")).unwrap();
+        let dir = DirInput { path: "C:/m15-scope/root".to_owned(), label: None, sort: None };
+        add_entry_dir(&conn, &p.id, &dir).unwrap();
+        let dir_id = get_project(&conn, &p.id).unwrap().dirs[0].id.clone();
+
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        conn.execute(
+            "UPDATE projects SET workspace_id = ?1 WHERE id = ?2",
+            rusqlite::params![b.id, p.id],
+        )
+        .unwrap();
+
+        assert_eq!(set_root_dir(&conn, &p.id, &dir).unwrap_err().code, "not_found");
+        assert_eq!(add_entry_dir(&conn, &p.id, &dir).unwrap_err().code, "not_found");
+        assert_eq!(remove_dir(&conn, &p.id, &dir_id).unwrap_err().code, "not_found");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_dirs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "被拒的登记一条都不许多，跨区的那行也没被删");
     }
 }

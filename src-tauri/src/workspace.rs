@@ -220,7 +220,6 @@ pub fn switch(conn: &Connection, id: &str) -> AppResult<String> {
 // dead_code 豁免是这一程的过门写法（先例：`db.rs:30`），Task 4–6 落地后各自删掉（回收路径见计划 Global Constraints）。
 // 注释里不许出现那个方括号字面量：豁免门是 grep -rn 数行数，注释写进去一次读数就假涨（与 async 门同款坑，Task 2 评审抓到）。
 /// 断言项目属于活动区且未软删。所有「按 project_id 挂新数据」的 create 路径靠它（spec §4.2）。
-#[allow(dead_code)]
 pub fn ensure_active_project(conn: &Connection, project_id: &str) -> AppResult<()> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM projects
@@ -238,7 +237,6 @@ pub fn ensure_active_project(conn: &Connection, project_id: &str) -> AppResult<(
 /// 同一种「表名由调用方以常量传入」的写法），九张表都有 `project_id` 与 `deleted_at` 两列。
 /// **不加 `p.deleted_at IS NULL`**：spec §四 的 SQL 就是这个形状，软删项目下的行仍可靠地
 /// 属于那个区，多半个谓词只会让读路径与写路径口径分叉。
-#[allow(dead_code)]
 pub fn ensure_active_row(conn: &Connection, table: &'static str, id: &str) -> AppResult<()> {
     let n: i64 = conn.query_row(
         &format!(
