@@ -1412,19 +1412,23 @@ pub fn update_project(conn: &Connection, id: &str, input: &ProjectInput) -> AppR
     // 前端新建表单的种子值因此不会造出一个「迁到 id 为空串的区」。
     let target = normalize(input.workspace_id.clone()).filter(|w| w != &old.workspace_id);
     let workspace = target.as_deref().unwrap_or(old.workspace_id.as_str());
-    validate_parent(&tx, Some(id), parent_id.as_deref(), workspace)?;
 
+    // D7 先判：有父（库里的或本次提交的）就不许单独换区。这句必须排在 `validate_parent`
+    // 之前 —— 换区时 `validate_parent` 用的是目标区，库里的父在旧区，会先报「所属总包不存在
+    // 或已删除」，把「子项目不能单独换区」这个真因盖掉。
     if let Some(target) = &target {
-        if !crate::workspace::exists(&tx, target)? {
-            return Err(invalid("目标工作区不存在"));
-        }
-        // 有父（库里的或本次提交的）就拒绝单独换区（D7）：跨区父子边一出现，
-        // `validate_parent` 与树视图两头都会裂。
         if old.parent_id.is_some() || parent_id.is_some() {
             return Err(invalid(
                 "子项目不能单独换区，请编辑它的父项目（整棵子树一起随迁）",
             ));
         }
+        if !crate::workspace::exists(&tx, target)? {
+            return Err(invalid("目标工作区不存在"));
+        }
+    }
+    validate_parent(&tx, Some(id), parent_id.as_deref(), workspace)?;
+
+    if let Some(target) = &target {
         let subtree = collect_subtree(&tx, id)?;
         let placeholders = subtree.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let args: Vec<&str> = std::iter::once(target.as_str())
@@ -1473,8 +1477,8 @@ pub fn update_project(conn: &Connection, id: &str, input: &ProjectInput) -> AppR
 
 > `validate_parent(…, workspace)` 传的是 **effective 区**（换区时是目标区）：先判父再写，父必须在子即将落座的那个区里。
 
-Run: `cd src-tauri && cargo test -j 1 --lib project::tests::move_ project::tests::child_project_cannot_move_alone`
-Expected: 三条都 PASS。其中 `move_is_atomic_when_the_log_write_fails` 是真的在验三步同事务（DROP 掉日志表 ⇒ 子树 UPDATE 与 `set_active` 都写完之后才失败）；它必须**红在 Step 3 之前** —— 如果它在只做 Step 2 的读过滤时就绿了，说明 `update_project` 里的三步还没进同一个 `tx`，回到 Step 3 检查是不是有人把 `tx.execute` 写成了 `conn.execute`。
+Run: `cd src-tauri && cargo test -j 1 --lib project::tests::`
+Expected: 三条新测试都 PASS（`cargo test` 只接一个筛选词，别把两条测试名并列）。其中 `move_is_atomic_when_the_log_write_fails` 是真的在验三步同事务（DROP 掉日志表 ⇒ 子树 UPDATE 与 `set_active` 都写完之后才失败）；它必须**红在 Step 3 之前** —— 如果它在只做 Step 2 的读过滤时就绿了，说明 `update_project` 里的三步还没进同一个 `tx`，回到 Step 3 检查是不是有人把 `tx.execute` 写成了 `conn.execute`。
 
 - [ ] **Step 4: 日志字段（`project_audit.rs`）**
 
