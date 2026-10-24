@@ -142,7 +142,7 @@ pub struct VersionUpdate {
 - `src/lib/api.ts` 加 `listVersions/createVersion/updateVersion/deleteVersion` 四条 invoke 包装。
 - 新建 `src/components/version-panel.tsx`：
   - 顶部新增行：版本号 `Input`、上线时间 `Input type="date"`、上线内容 `Textarea`、保存按钮；
-  - 列表：版本号、上线时间、内容（长文本截断）、编辑、删除；
+  - 列表：版本号、上线时间、内容（全文换行展示；不截断）、编辑、删除；
   - 编辑复用同一组字段（行内展开或顶部表单切换），删除成功后从本地列表移除；
   - 错误/提示沿用 `milestone-panel` 的 `notice` + `error` 形态；
   - 不新增 zustand store。
