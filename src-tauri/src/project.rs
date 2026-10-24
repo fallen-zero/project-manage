@@ -1025,12 +1025,11 @@ mod tests {
     /// create 必须写活动区，**忽略客户端塞进来的区 id**（spec §六 第 1 条）：
     /// 接受它就能用一条 IPC 把项目造进当前视野看不见的区，变成哪一区都找不到的孤儿。
     #[test]
-    fn create_project_lands_in_the_active_workspace_not_the_input_one() {
+    fn create_project_ignores_input_workspace() {
         let conn = crate::db::open_in_memory().unwrap();
         let b = crate::workspace::create(&conn, "客户乙").unwrap();
         let mut input = input("孤儿防御");
         input.workspace_id = Some(b.id.clone());
-        input.parent_id = None;
 
         let p = create_project(&conn, &input).unwrap();
         assert_eq!(p.workspace_id, crate::workspace::DEFAULT_ID, "create 恒落活动区，不吃 input");
@@ -1048,8 +1047,7 @@ mod tests {
         let a = create_project(&conn, &input("默认区项目")).unwrap();
         let b = crate::workspace::create(&conn, "客户乙").unwrap();
         crate::workspace::switch(&conn, &b.id).unwrap();
-        let mut b_input = input("乙区项目");
-        b_input.parent_id = None;
+        let b_input = input("乙区项目");
         let b_project = create_project(&conn, &b_input).unwrap();
 
         let in_b: Vec<String> = list_projects(&conn).unwrap().into_iter().map(|p| p.id).collect();
@@ -1063,7 +1061,7 @@ mod tests {
     }
 
     /// 跨区父子边必须造不出来：父项存在性那条 SQL 加区谓词（spec §六）。
-    /// 用裸 SQL 把一个项目挪到别区，模拟「父在乙、子在丙」这个不该存在的形状。
+    /// 用裸 SQL 把一个项目挪到别区，模拟「父在乙区、子想落进默认区」这个不该存在的跨区父子边。
     #[test]
     fn parent_must_live_in_the_active_workspace() {
         let conn = crate::db::open_in_memory().unwrap();
