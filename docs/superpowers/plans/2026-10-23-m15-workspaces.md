@@ -18,7 +18,7 @@
 - SQL 一律参数绑定。唯一允许的字符串拼接是 `&'static str` 常量表名（与 `ledger.rs:212 soft_delete` 同形）和 `IN (?,?,…)` 占位符。
 - 注释、用户文案、commit message 一律中文；错误码字面量与 SQL 除外。
 - **`allow(dead_code)` 门 = 1（`db.rs`）的临时破例与回收路径**（Task 2 评审抓到，控制方裁定）：Task 2 要把 `workspace.rs` 四个读侧函数与 `project.rs` 两个新字段先落地（后五格都靠它们），而它们在 Task 3–6 之前没有**非测试**调用点，clippy `-D warnings` 就过不去 ⇒ 本分支的豁免数临时从 1 升到 7。裁定为「保留临时豁免 + 逐格回收」，不做「把每个函数挪到它的消费格」的重构：重构要改五格计划文本、新缺陷概率高于收益，而这个数由 Task 9 Step 1 的门自动兜住。硬要求：
-  1. **Task 3 Step 4** 落地 `ensure_active_project` 的调用点后删掉它的豁免；**Task 3 Step 2** 之后 `Project.workspace_id` 被 SELECT 真读，删掉它的豁免；
+  1. **Task 5 Step 4** 落地 `ledger::list`/`ledger::reveal` 的调用点后删掉 `ensure_active_project` 的豁免（Task 3 报告实测：该函数在 Task 3 内没有生产调用点，当场删掉撞 clippy `--lib -D warnings` exit 101；裁定只改回收格、不在 Task 3 里造调用点）；**Task 3 Step 2** 之后 `Project.workspace_id` 被 SELECT 真读，删掉它的豁免；
   2. **Task 4 Step 4** 落地 `name_of` 时**不带**豁免（同格就被 `workspace_name` 消费）、并在本格删掉 `ProjectInput.workspace_id` 的豁免（本格起读它）；
   3. **Task 5 Step 1** 起 `ensure_active_row` 有调用点，删它的豁免；**Task 6 Step 4** 起 `active_project_ids` 有调用点，删它的豁免；
   4. 到 Task 9 Step 1 现跑 `grep -rn "allow(dead_code)" src-tauri/src/ | wc -l` 必须回到 **1**；没回收干净就是那一格的红，不要去改门的期望值。
@@ -1779,6 +1779,8 @@ fn soft_delete(conn: &Connection, table: &'static str, id: &str) -> AppResult<()
     crate::workspace::ensure_active_row(conn, table, id)?;
 ```
 
+> **本步收掉 `ensure_active_project` 的 dead_code 豁免**（Global Constraints 第 1 条）：`list` 与 `reveal` 是本分支里它的首个生产调用点（Task 3 报告已实测 Task 3 内无调用点）。删完现跑 `cargo clippy -j 1 --lib -- -D warnings` 必须 exit 0；本步收工后豁免读数应为 **2**（`db.rs` + `active_project_ids`）。
+>
 > `secret_column` 回的是 `(&'static str, &'static str, &'static str)`（`ledger.rs:156`），直接能喂给守卫。
 
 - [ ] **Step 5: `project.rs` 三个目录 mutator**
