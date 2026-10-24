@@ -2479,6 +2479,7 @@ git commit -m "feat(m15): 前端工作区线格式/API/store 与三个纯函数�
 - Modify: `src/components/project-form.tsx:31-51`（props）、`:74-91`（值与提交归一化）、`:127-149`（渲染，紧挨「所属总包」）
 - Modify: `src/pages/projects.tsx:105`（`emptySeed`）、`:208`（`parentOptions` 那行旁边加 `workspaceOptions`）、`:295-311`（`emptySeed` 体）
 - Modify: `src/pages/project-detail.tsx:340`
+- Modify: `src/lib/apply-template.ts`（返回新对象时保留 `workspaceId`）、`tests/apply-template.test.ts`（既有用例补一条断言）
 
 **Interfaces:**
 - Consumes: Task 7 的 `useWorkspacesStore`、`Workspace`、`nameHint`、`deleteGuard`、`Project.workspaceId`。
@@ -2785,6 +2786,8 @@ props 加一项（放在 `parentOptions` 之后）：
       )}
 ```
 
+> **`applyTemplate` 必须保留 `workspaceId`**：`src/lib/apply-template.ts` 返回新对象时补 `workspaceId: input.workspaceId,`，否则「先选区、再套模板」会静默丢掉选择。既有 `tests/apply-template.test.ts` 的 `base` 加 `workspaceId: "ws-2"`，在「保留 parentId」那条里加 `assert.equal(got.workspaceId, "ws-2")`（不新增测试，node 仍 75）。
+>
 > `patch("workspaceId", …)` 复用既有的 `patch`；它的第二个实参是 `string`，`ProjectInput.workspaceId` 收 `string | null | undefined` 兼容。`workspaceOptions` **只在编辑根项目/普通编辑时传**（新建不传 ⇒ 整行不渲染，与 spec §8.4 一致；`TemplateManager` 用的那个 `ProjectForm` 也不传 ⇒ 模板表单里不会出现这一行）。
 > 注意 `workspaceValue` 不能是空串（Radix `Select` 的 `value=""` 会当未选中处理）—— `workspaceOptions` 非空时它必然命中 `form.workspaceId` 或 `isActive` 那格；两者都取不到时 `Select` 显示 placeholder，用户选一次即写入。
 
@@ -2809,7 +2812,7 @@ UI 的完整证据走 Task 9 的真机格（C-1…C-12）；本 Task **不**在�
 - [ ] **Step 7: 提交**
 
 ```bash
-git add src/components/workspace-switcher.tsx src/components/workspace-manager.tsx src/components/app-shell.tsx src/components/project-form.tsx src/pages/projects.tsx src/pages/project-detail.tsx
+git add src/components/workspace-switcher.tsx src/components/workspace-manager.tsx src/components/app-shell.tsx src/components/project-form.tsx src/pages/projects.tsx src/pages/project-detail.tsx src/lib/apply-template.ts tests/apply-template.test.ts
 git commit -m "feat(m15): 顶栏工作区切换器与管理弹窗、换区重挂载整棵页面子树、项目表单工作区一行"
 ```
 
