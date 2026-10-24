@@ -13,6 +13,8 @@ export function applyTemplate(input: ProjectInput, template: ProjectTemplate): P
   return {
     name: input.name,
     parentId: input.parentId,
+    // 套模板不是换区：用户先选好的工作区必须留住，否则「先选区、再套模板」会静默丢选择。
+    workspaceId: input.workspaceId,
     code: pick(input.code, template.code),
     manager: pick(input.manager, template.manager),
     customer: pick(input.customer, template.customer),

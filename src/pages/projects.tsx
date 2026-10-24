@@ -31,6 +31,7 @@ import {
 import { copyText, openFolder } from "@/lib/api";
 import { useProjectsStore } from "@/stores/projects";
 import { useTemplatesStore } from "@/stores/templates";
+import { useWorkspacesStore } from "@/stores/workspaces";
 import { toInput, type Project, type ProjectInput } from "@/types/project";
 
 export function ProjectsPage() {
@@ -44,11 +45,14 @@ export function ProjectsPage() {
   const [formKey, setFormKey] = useState(0);
   const [selectedTemplate, setSelectedTemplate] = useState("none");
   const [view, setView] = useState<"all" | "tree">("all");
+  const workspaces = useWorkspacesStore((s) => s.items);
+  const refreshWorkspaces = useWorkspacesStore((s) => s.refresh);
 
   useEffect(() => {
     void refresh();
     void refreshTemplates();
-  }, [refresh, refreshTemplates]);
+    void refreshWorkspaces();
+  }, [refresh, refreshTemplates, refreshWorkspaces]);
 
   const openRoot = async (p: Project) => {
     const root = p.dirs.find((d) => d.kind === "root");
@@ -206,6 +210,7 @@ export function ProjectsPage() {
                 statuses={statuses}
                 saving={saving}
                 parentOptions={parentCandidates(items, editing.id)}
+                workspaceOptions={editing.id === null ? undefined : workspaces}
                 onChange={(input) => setEditing((prev) => (prev ? { ...prev, input } : prev))}
                 onCancel={() => setEditing(null)}
                 onSubmit={async (input) => {

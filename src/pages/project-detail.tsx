@@ -27,6 +27,7 @@ import { ExpiryPanel } from "@/components/expiry-panel";
 import { copyText, openFolder, pickFolder, revealFolder } from "@/lib/api";
 import { parentCandidates } from "@/lib/project-tree";
 import { useProjectsStore } from "@/stores/projects";
+import { useWorkspacesStore } from "@/stores/workspaces";
 import { toInput, type ProjectDir } from "@/types/project";
 
 function Info({ label, value }: { label: string; value: string | null }) {
@@ -54,6 +55,8 @@ export function ProjectDetailPage() {
   } = useProjectsStore();
 
   const project = items.find((p) => p.id === projectId);
+  const workspaces = useWorkspacesStore((s) => s.items);
+  const refreshWorkspaces = useWorkspacesStore((s) => s.refresh);
   const [editing, setEditing] = useState(false);
   const [manualPath, setManualPath] = useState("");
   const [manualLabel, setManualLabel] = useState("");
@@ -67,10 +70,11 @@ export function ProjectDetailPage() {
   // 不改成 store 里 `loading: false`：那会让首帧闪「列表为空」，且库真为空时又变回不拉。
   const attemptedRefresh = useRef(false);
   useEffect(() => {
+    void refreshWorkspaces();
     if (attemptedRefresh.current || items.length > 0) return;
     attemptedRefresh.current = true;
     void refresh();
-  }, [items.length, refresh]);
+  }, [items.length, refresh, refreshWorkspaces]);
 
   if (loading) return <p className="px-6 py-8 text-sm text-muted-foreground">读取项目档案…</p>;
   if (!project)
@@ -338,6 +342,7 @@ export function ProjectDetailPage() {
             statuses={statuses}
             saving={saving}
             parentOptions={parentCandidates(items, project.id)}
+            workspaceOptions={workspaces}
             onCancel={() => setEditing(false)}
             onSubmit={async (input) => {
               const ok = await save(project.id, input);

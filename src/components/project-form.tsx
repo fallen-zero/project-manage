@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/select";
 import { EMPTY_INPUT, type ProjectInput } from "@/types/project";
 import type { ParentOption } from "@/lib/project-tree";
+import type { Workspace } from "@/types/workspace";
 
 // 中英文逗号、顿号、空格都当分隔符：台账里的标签是人手打的，分隔符不会统一。
 function parseTags(raw: string): string[] {
@@ -38,6 +39,7 @@ export function ProjectForm({
   nameRequiredMessage = "项目名称不能为空",
   onChange,
   parentOptions,
+  workspaceOptions,
 }: {
   initial?: ProjectInput;
   statuses: string[];
@@ -48,6 +50,7 @@ export function ProjectForm({
   nameRequiredMessage?: string;
   onChange?: (input: ProjectInput) => void;
   parentOptions?: ParentOption[];
+  workspaceOptions?: Workspace[];
 }) {
   const [form, setForm] = useState<ProjectInput>(initial ?? EMPTY_INPUT);
   const [tagsText, setTagsText] = useState((initial ?? EMPTY_INPUT).tags.join("，"));
@@ -77,6 +80,12 @@ export function ProjectForm({
       ? currentParentId
       : "none";
 
+  // 换区只对「根项目」开放：有父（库里的或本次提交的）就随父走（spec §六.2）。
+  const hasParent = form.parentId !== null;
+  const workspaceValue =
+    form.workspaceId ?? workspaceOptions?.find((w) => w.isActive)?.id ?? "";
+  const workspaceHint = hasParent ? "子项目随父项目一起换区，请编辑它的父项目" : null;
+
   const submit = async () => {
     if (!form.name.trim()) {
       setNameError(nameRequiredMessage);
@@ -86,7 +95,8 @@ export function ProjectForm({
       parentOptions && form.parentId && !parentOptions.some((o) => o.id === form.parentId)
         ? null
         : form.parentId;
-    const ok = await onSubmit({ ...form, parentId, tags: parseTags(tagsText) });
+    const workspaceId = hasParent ? null : (form.workspaceId ?? null);
+    const ok = await onSubmit({ ...form, parentId, workspaceId, tags: parseTags(tagsText) });
     if (!ok) setNameError("保存失败，详见下方错误提示");
   };
 
@@ -145,6 +155,29 @@ export function ProjectForm({
               ))}
             </SelectContent>
           </Select>
+        </div>
+      )}
+
+      {workspaceOptions && (
+        <div className="grid gap-2">
+          <Label>工作区</Label>
+          <Select
+            value={workspaceValue}
+            onValueChange={(v) => patch("workspaceId", String(v))}
+            disabled={hasParent || workspaceOptions.length === 0}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {workspaceOptions.map((w) => (
+                <SelectItem key={w.id} value={w.id}>
+                  {w.name}（{w.projectCount}）
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {workspaceHint && <p className="text-xs text-muted-foreground">{workspaceHint}</p>}
         </div>
       )}
 

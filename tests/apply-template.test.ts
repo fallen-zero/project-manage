@@ -16,6 +16,7 @@ const base: ProjectInput = {
   deliveryDeadline: "2026-12-31",
   status: "立项",
   parentId: "parent-1",
+  workspaceId: "ws-2",
   tags: ["原标签"],
 };
 
@@ -73,6 +74,7 @@ test("返回新对象，不修改入参", () => {
 test("套用模板保留当前 parentId", () => {
   const got = applyTemplate(base, tpl({ manager: "模板经理" }));
   assert.equal(got.parentId, "parent-1");
+  assert.equal(got.workspaceId, "ws-2");
   const empty = applyTemplate({ ...base, parentId: null }, tpl());
   assert.equal(empty.parentId, null);
 });

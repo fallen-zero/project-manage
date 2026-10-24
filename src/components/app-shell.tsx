@@ -2,8 +2,10 @@ import { useEffect } from "react";
 import { Link, Outlet } from "@tanstack/react-router";
 import { Badge } from "@/components/ui/badge";
 import { VaultControl } from "@/components/vault-dialog";
+import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 import { useAppStore } from "@/stores/app-store";
 import { useVaultStore } from "@/stores/vault";
+import { useWorkspacesStore } from "@/stores/workspaces";
 
 const nav = [
   { to: "/", label: "搜索" },
@@ -18,11 +20,14 @@ const nav = [
 export function AppShell() {
   const { status, error, loading, refresh } = useAppStore();
   const refreshVault = useVaultStore((s) => s.refresh);
+  const refreshWorkspaces = useWorkspacesStore((s) => s.refresh);
+  const activeWorkspaceId = useWorkspacesStore((s) => s.activeId);
 
   useEffect(() => {
     void refresh();
     void refreshVault();
-  }, [refresh, refreshVault]);
+    void refreshWorkspaces();
+  }, [refresh, refreshVault, refreshWorkspaces]);
 
   return (
     <div className="flex h-screen flex-col bg-muted/30">
@@ -38,13 +43,16 @@ export function AppShell() {
             {n.label}
           </Link>
         ))}
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-2">
+          <WorkspaceSwitcher />
           <VaultControl />
         </div>
       </header>
 
       <main className="flex-1 overflow-auto">
-        <Outlet />
+        <div key={activeWorkspaceId ?? "boot"}>
+          <Outlet />
+        </div>
       </main>
 
       <footer className="flex items-center gap-2 border-t bg-background px-4 py-1.5 text-xs">
