@@ -178,7 +178,7 @@ workspace_switch(id: String) -> AppResult<String>   // 回切换后的活动区 
 
 - 新增 `src/types/workspace.ts`：`export interface Workspace { id: string; name: string; projectCount: number; isActive: boolean }`（字段名与 §五 的 camelCase 序列化逐一对齐）。
 - `src/lib/api.ts` 加 5 个 invoke 包装：`listWorkspaces` / `createWorkspace` / `renameWorkspace` / `deleteWorkspace` / `switchWorkspace`，命令名字面量与 §五 一致。
-- `src/types/project.ts`：`Project` 加 `workspaceId: string`（后端列 NOT NULL，恒有值）；`ProjectInput` 加 `workspaceId: string | null`（`null` = 沿用当前区）；`EMPTY_INPUT`（`:44`）补 `workspaceId: null`，`toInput`（`:59`）把 `p.workspaceId` 带进去。
+- `src/types/project.ts`：`Project` 加 `workspaceId: string`（后端列 NOT NULL，恒有值）；`ProjectInput` 加 `workspaceId?: string | null`（缺省/null/空串 = 沿用当前区；写成可选属性是为了不破坏既有 `ProjectInput` 字面量，Rust 侧 `#[serde(default)]` 同样收缺省）；`EMPTY_INPUT`（`:44`）**不补**（新建 = 不改区，后端忽略），`toInput`（`:59`）把 `p.workspaceId` 带进去。
 
 ### 8.2 store
 
