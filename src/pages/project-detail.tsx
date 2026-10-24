@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
-import { ArrowLeft, Copy, ExternalLink, FolderOpen, FolderPlus, Pencil, Plus, X } from "lucide-react";
+import { ArrowLeft, Copy, ExternalLink, FilePlus, FolderOpen, FolderPlus, Pencil, Plus, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -24,7 +24,8 @@ import { LedgerPanel } from "@/components/ledger-panel";
 import { LedgerExport } from "@/components/ledger-export";
 import { MilestonePanel } from "@/components/milestone-panel";
 import { ExpiryPanel } from "@/components/expiry-panel";
-import { copyText, openFolder, pickFolder, revealFolder } from "@/lib/api";
+import { VersionPanel } from "@/components/version-panel";
+import { copyText, openFolder, pickFile, pickFolder, revealFolder } from "@/lib/api";
 import { parentCandidates } from "@/lib/project-tree";
 import { useProjectsStore } from "@/stores/projects";
 import { useWorkspacesStore } from "@/stores/workspaces";
@@ -113,6 +114,12 @@ export function ProjectDetailPage() {
   const chooseEntry = () =>
     guard(async () => {
       const path = await pickFolder();
+      if (path) await addEntry(project.id, path);
+    });
+
+  const chooseEntryFile = () =>
+    guard(async () => {
+      const path = await pickFile();
       if (path) await addEntry(project.id, path);
     });
 
@@ -263,6 +270,9 @@ export function ProjectDetailPage() {
           <Button size="sm" variant="ghost" className="ml-auto" disabled={saving} onClick={chooseEntry}>
             <FolderPlus /> 选择目录
           </Button>
+          <Button size="sm" variant="ghost" disabled={saving} onClick={chooseEntryFile}>
+            <FilePlus /> 选择文件
+          </Button>
         </div>
 
         {entries.length === 0 ? (
@@ -325,6 +335,10 @@ export function ProjectDetailPage() {
 
       <div className="mt-4 rounded-xl border bg-background p-4">
         <MilestonePanel projectId={project.id} />
+      </div>
+
+      <div className="mt-4 rounded-xl border bg-background p-4">
+        <VersionPanel projectId={project.id} />
       </div>
 
       <div className="mt-4 rounded-xl border bg-background p-4">

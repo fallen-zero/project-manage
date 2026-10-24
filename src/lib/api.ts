@@ -25,6 +25,7 @@ import type { BackupSummary, ImportOutcome, PackageInfo } from "@/types/backup";
 import type { Todo, TodoInput, TodoEdit } from "@/types/todo";
 import type { Milestone, MilestoneInput, MilestoneEdit } from "@/types/milestone";
 import type { Expiry, ExpiryInput, ExpiryUpdate } from "@/types/expiry";
+import type { Version, VersionInput, VersionUpdate } from "@/types/version";
 import type {
   DailyReport,
   DailyReportEdit,
@@ -90,6 +91,12 @@ export async function pickFolder(): Promise<string | null> {
   return typeof picked === "string" ? picked : null;
 }
 
+// 原生文件选择器。取消返回 null（与 pickFolder 同一取消语义）。
+export async function pickFile(): Promise<string | null> {
+  const picked = await openDialog({ multiple: false, directory: false });
+  return typeof picked === "string" ? picked : null;
+}
+
 // —— M8 备份：三条命令 + 两个原生对话框封装 ——
 // 取消不是错误：save/open 返回 null 时由调用方直接 return，绝不写进 error。
 // dialog:default 实测含 allow-save / allow-open，补 save 不需要新权限。
@@ -146,6 +153,13 @@ export const listExpiries = (projectId: string | null) => invoke<Expiry[]>("expi
 export const createExpiry = (input: ExpiryInput) => invoke<Expiry>("expiry_create", { input });
 export const updateExpiry = (id: string, input: ExpiryUpdate) => invoke<void>("expiry_update", { id, input });
 export const deleteExpiry = (id: string) => invoke<void>("expiry_delete", { id });
+
+// —— M16-a 项目版本台账：四个封装 ——
+export const listVersions = (projectId: string) => invoke<Version[]>("version_list", { projectId });
+export const createVersion = (input: VersionInput) => invoke<Version>("version_create", { input });
+export const updateVersion = (id: string, input: VersionUpdate) =>
+  invoke<Version>("version_update", { id, input });
+export const deleteVersion = (id: string) => invoke<void>("version_delete", { id });
 
 // —— M10 日报导出 ——
 export async function pickXlsxSavePath(defaultName: string): Promise<string | null> {
