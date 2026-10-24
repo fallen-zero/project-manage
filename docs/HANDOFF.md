@@ -1,6 +1,6 @@
 # 交接文档 —— 项目资料管理（写给一个完全没有上下文的新对话）
 
-**2026-10-24 快照**：**M15 多工作区代码 + 12 处变异 + 真机 12 格全完，待需求方批准合并**（分支 `feat/m15-workspaces`，代码终态 `e73f351`）；门禁 cargo **405** / node **75** / 命令 **75** / async 7 / `TARGET_VERSION` **11** / 豁免 1 / `Cargo.lock` 616 / collect 9；真机 12 格 ALL-PASS、真实目录前后 `sha256=200456e1f9ca` 一致。证据在 `.superpowers/sdd/2026-10-23-m15-workspaces/`（git-ignored，收口前别清）。旧快照（M14）保留在下方。
+**2026-10-24 快照**：**M15 多工作区代码 + 12 处变异 + 真机 12 格全完，待需求方批准合并**（分支 `feat/m15-workspaces`，终端 `30b4b5f`）；门禁 cargo **405** / node **75** / 命令 **75** / async 7 / `TARGET_VERSION` **11** / 豁免 1 / `Cargo.lock` 616 / collect 9；真机 12 格 ALL-PASS、真实目录前后 `sha256=200456e1f9ca` 一致。**功能分支两次 `git push origin feat/m15-workspaces` 均 `TLS connect error`（exit=128），未上远端；合并前需补推。** 证据在 `.superpowers/sdd/2026-10-23-m15-workspaces/`（git-ignored，收口前别清）。旧快照（M14）保留在下方。
 
 **快照时间**：2026-10-23（**M14 操作日志已 fast-forward 合入 `master`（合并点 `e707b7c`）**：终审 With fixes（0C/1I/7M）→ BEGIN IMMEDIATE 修复已落地并经限定复审；合并后在 `master` 树上复跑整套门全绿。Task 1–6 complete，cargo **372** / node **71** / 命令 **70** / async **7** / `TARGET_VERSION` **10** / 豁免 **1** / `Cargo.lock` **616** / collect **9**；十一处变异全红、真机 12 格 ALL-PASS；M13 已合入 `master`（合并点 `1f8b9b2`），M12 已合入 `master`（合并点 `d548e32`），M11-b 已合入 `master`（合并点 `3efbc18`），M11-a 已合入 `master`（合并点 `b99f154`）。**所有 sha 与读数一律现取**（`git rev-parse --short master` / `git ls-remote --heads origin` / §4-A 那串命令），本文不写死「同指」。详见 §3。全历史零 merge commit（`git rev-list --merges --count --all` 现取）。
 
