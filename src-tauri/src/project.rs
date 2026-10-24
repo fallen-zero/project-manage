@@ -1312,6 +1312,10 @@ mod tests {
         assert_eq!(set_root_dir(&conn, &p.id, &dir).unwrap_err().code, "not_found");
         assert_eq!(add_entry_dir(&conn, &p.id, &dir).unwrap_err().code, "not_found");
         assert_eq!(remove_dir(&conn, &p.id, &dir_id).unwrap_err().code, "not_found");
+        // 非法路径 + 跨区：守卫必须在 validate_path 之前，否则会回 invalid_input（暴露路径形状）。
+        let bad = DirInput { path: "relative/dir".to_owned(), label: None, sort: None };
+        assert_eq!(set_root_dir(&conn, &p.id, &bad).unwrap_err().code, "not_found");
+        assert_eq!(add_entry_dir(&conn, &p.id, &bad).unwrap_err().code, "not_found");
         let n: i64 = conn
             .query_row("SELECT COUNT(*) FROM project_dirs", [], |r| r.get(0))
             .unwrap();

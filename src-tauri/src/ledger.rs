@@ -961,8 +961,22 @@ mod tests {
     /// 台账的读与写都只认活动区（M15 spec §4.1 / §4.2）：跨区与不存在同走 not_found。
     #[test]
     fn ledger_read_and_write_paths_are_scoped() {
-        let (conn, pid, _mk) = fixture();
+        let (conn, pid, mk) = fixture();
         let env = create_env(&conn, &pid, &env_input("prod", "生产门户")).unwrap();
+        // 四个 update_* 各插一张表名不同的字面量守卫，逐一给证据（soft_delete 是共享函数，delete_env 一条即覆盖五个）。
+        let cred = create_credential(&conn, &mk, &pid, &cred_input("审批后台", Some(USER), Some(PW))).unwrap();
+        let srv = create_server(&conn, &mk, &pid, &server_input("应用节点 1", Some(USER))).unwrap();
+        let link = create_link(&conn, &pid, &link_input("jira", "迭代看板")).unwrap();
+        let note = create_note(
+            &conn,
+            &pid,
+            &NoteInput {
+                title: "坑点".to_owned(),
+                body: Some("验证码接口有 IP 白名单".to_owned()),
+                tag: None,
+            },
+        )
+        .unwrap();
         let b = crate::workspace::create(&conn, "客户乙").unwrap();
         conn.execute(
             "UPDATE projects SET workspace_id = ?1 WHERE id = ?2",
@@ -979,6 +993,24 @@ mod tests {
             .query_row("SELECT name FROM ledger_envs WHERE id = ?1", [&env.id], |r| r.get(0))
             .unwrap();
         assert_eq!(name, "生产门户", "被拒的更新一个字都不许改");
+        assert_eq!(
+            update_credential(&conn, &mk, &cred.id, &cred_input("改", None, Some(PW2))).unwrap_err().code,
+            "not_found"
+        );
+        assert_eq!(
+            update_server(&conn, &mk, &srv.id, &server_input("改", Some(USER))).unwrap_err().code,
+            "not_found"
+        );
+        assert_eq!(
+            update_link(&conn, &link.id, &link_input("wiki", "改")).unwrap_err().code,
+            "not_found"
+        );
+        assert_eq!(
+            update_note(&conn, &note.id, &NoteInput { title: "改".to_owned(), body: None, tag: None })
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
         assert_eq!(delete_env(&conn, &env.id).unwrap_err().code, "not_found");
         assert_eq!(
             create_env(&conn, &pid, &env_input("dev", "别区挂环境")).unwrap_err().code,

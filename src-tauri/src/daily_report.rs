@@ -1364,6 +1364,7 @@ mod tests {
     fn daily_report_list_and_mutators_are_scoped() {
         let conn = db::open_in_memory().unwrap();
         seed(&conn, "p-scope");
+        seed(&conn, "p-keep");
         let r = create(&conn, &input("p-scope", Some("2026-10-23"), "推进一期", 1.0)).unwrap();
         assert_eq!(list(&conn, None).unwrap().len(), 1, "活动区里的日报先要读得到");
 
@@ -1376,9 +1377,11 @@ mod tests {
 
         assert!(list(&conn, None).unwrap().is_empty(), "别区日报不许漏进当前区");
         assert!(list(&conn, Some("p-scope")).unwrap().is_empty());
+        assert!(existing_keys(&conn).unwrap().is_empty(), "查重键也只认活动区");
         assert_eq!(get(&conn, &r.id).unwrap_err().code, "not_found");
         let edit = DailyReportEdit {
-            project_id: "p-scope".to_owned(),
+            // 新宿主必须是**活动区**的另一个项目：否则 project_exists 会替行守卫挡刀，守卫删掉也红不了。
+            project_id: "p-keep".to_owned(),
             report_date: Some("2026-10-24".to_owned()),
             content: "推进二期".to_owned(),
             hours: 2.0,
@@ -1403,7 +1406,7 @@ mod tests {
 
     /// 导入只认活动区项目：预检拒掉别区行，落库整批回 invalid_input。
     #[test]
-    fn daily_report_import_only_matches_active_projects() {
+    fn import_matches_only_active_workspace_projects() {
         let conn = db::open_in_memory().unwrap();
         let mk_project = |conn: &Connection, name: &str, code: &str| {
             crate::project::create_project(
