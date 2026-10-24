@@ -95,7 +95,7 @@ fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
 
 /// 线性版本迁移：一个版本一段 DDL，只追加不改历史，便于备份包跨版本恢复。
 /// 提 `pub(crate)` 是给 M8 的验包判据比：包里的库比本机新就该拒（`backup::read_package`）。
-pub(crate) const TARGET_VERSION: i64 = 11;
+pub(crate) const TARGET_VERSION: i64 = 12;
 
 /// `pub(crate)` 是 M8 加的：`backup_import` 灌完包内库要能重放迁移（包里可能是旧版本）。
 pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
@@ -127,6 +127,7 @@ pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
             9 => V9,
             10 => V10,
             11 => V11,
+            12 => V12,
             _ => "",
         };
         apply_version(conn, target, ddl)?;
@@ -482,6 +483,26 @@ CREATE INDEX ix_project_workspace ON projects(workspace_id);
 INSERT OR IGNORE INTO settings (key, value) VALUES ('active_workspace_id', 'default');
 ";
 
+/// v12：项目版本台账（M16-a spec §三）。一行一次上线；软删；同项目版本号唯一（软删不占号）。
+const V12: &str = "
+CREATE TABLE project_versions (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    version     TEXT NOT NULL,
+    released_at TEXT NOT NULL,
+    content     TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at  TEXT
+);
+
+CREATE INDEX ix_project_version_project ON project_versions(project_id, released_at);
+
+CREATE UNIQUE INDEX ux_project_version_project_version
+    ON project_versions(project_id, version)
+    WHERE deleted_at IS NULL;
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -750,13 +771,13 @@ mod tests {
     }
 
     #[test]
-    fn v11_schema_meta_reaches_target_version_eleven() {
+    fn v12_schema_meta_reaches_target_version_twelve() {
         let conn = open_in_memory().unwrap();
         let ver: i64 = conn
             .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, 11, "迁移必须跑到 11");
-        assert_eq!(TARGET_VERSION, 11, "= 上一条，两处别各写各的");
+        assert_eq!(ver, 12, "迁移必须跑到 12");
+        assert_eq!(TARGET_VERSION, 12, "= 上一条，两处别各写各的");
     }
 
     /// V10 必须建出日志表与两条显式索引。
@@ -1320,5 +1341,97 @@ mod tests {
             .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
             .unwrap();
         assert_eq!(ver, 10, "失败的版本一律不许登记 schema_meta");
+    }
+
+    /// V12 必须建出 project_versions 的八列与两条具名索引；唯一索引必须带 partial 条件。
+    #[test]
+    fn v12_project_versions_table_and_indexes_exist() {
+        let conn = open_in_memory().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('project_versions') ORDER BY cid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(
+            cols.join(","),
+            "id,project_id,version,released_at,content,created_at,updated_at,deleted_at",
+            "V12 的 project_versions 列集合/顺序不对：{cols:?}"
+        );
+        let idx: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                  WHERE type='index' AND tbl_name='project_versions' AND sql IS NOT NULL
+                  ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(
+            idx,
+            vec!["ix_project_version_project", "ux_project_version_project_version"],
+            "V12 的具名索引不对：{idx:?}"
+        );
+        let ux: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='ux_project_version_project_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(ux.contains("WHERE deleted_at IS NULL"), "唯一索引必须是 partial：{ux}");
+    }
+
+    /// V12 零回填：库停在 V11 时先落项目与标签，跑 migrate 后版本表必须 0 行，
+    /// 其余业务字段一个字节都不许变。
+    #[test]
+    fn v12_backfills_nothing() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta (version INTEGER NOT NULL, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for (target, ddl) in [
+            (1, V1), (2, V2), (3, V3), (4, V4), (5, V5),
+            (6, V6), (7, V7), (8, V8), (9, V9), (10, V10), (11, V11),
+        ] {
+            apply_version(&conn, target, ddl).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO projects (id, name, customer) VALUES ('p-old', '存量项目', '甲客户')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO project_tags (id, project_id, tag) VALUES ('t-old', 'p-old', '政务')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "V12 不许回填任何版本行");
+        let bits: String = conn
+            .query_row(
+                "SELECT name || '/' || customer FROM projects WHERE id = 'p-old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bits, "存量项目/甲客户", "V12 只建表，不许碰存量项目");
+        let tag: String = conn
+            .query_row("SELECT tag FROM project_tags WHERE id = 't-old'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tag, "政务");
+        let ver: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, TARGET_VERSION);
     }
 }
