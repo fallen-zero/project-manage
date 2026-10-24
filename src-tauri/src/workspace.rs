@@ -232,7 +232,7 @@ pub fn ensure_active_project(conn: &Connection, project_id: &str) -> AppResult<(
 }
 
 /// 断言某一行的宿主项目属于活动区。`table` 只接编译期常量（与 `ledger.rs:212 soft_delete`
-/// 同一种「表名由调用方以常量传入」的写法），九张表都有 `project_id` 与 `deleted_at` 两列。
+/// 同一种「表名由调用方以常量传入」的写法），十张表都有 `project_id` 与 `deleted_at` 两列。
 /// **不加 `p.deleted_at IS NULL`**：spec §四 的 SQL 就是这个形状，软删项目下的行仍可靠地
 /// 属于那个区，多半个谓词只会让读路径与写路径口径分叉。
 pub fn ensure_active_row(conn: &Connection, table: &'static str, id: &str) -> AppResult<()> {

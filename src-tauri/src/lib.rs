@@ -21,6 +21,7 @@ mod search;
 mod tokenize;
 mod todo;
 mod vault;
+mod version;
 mod watch;
 mod workspace;
 
@@ -40,6 +41,7 @@ use crate::milestone::{Milestone, MilestoneEdit, MilestoneInput};
 use crate::project::{DirInput, Project, ProjectInput};
 use crate::todo::{Todo, TodoEdit, TodoInput};
 use crate::vault::MasterKey;
+use crate::version::{Version, VersionInput, VersionUpdate};
 
 struct AppState {
     conn: Mutex<rusqlite::Connection>,
@@ -850,6 +852,32 @@ fn expiry_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
     expiry::delete(&conn, &id)
 }
 
+/// 项目版本台账四条命令（M16-a Task 2，形制照 `expiry_*`）：同步、函数体不写 await 点，
+/// async 标记那扇门**保持 7 条不动**（spec §六）。
+#[tauri::command]
+fn version_list(state: State<'_, AppState>, project_id: String) -> AppResult<Vec<Version>> {
+    let conn = db(&state)?;
+    version::list(&conn, &project_id)
+}
+
+#[tauri::command]
+fn version_create(state: State<'_, AppState>, input: VersionInput) -> AppResult<Version> {
+    let conn = db(&state)?;
+    version::create(&conn, &input)
+}
+
+#[tauri::command]
+fn version_update(state: State<'_, AppState>, id: String, input: VersionUpdate) -> AppResult<Version> {
+    let conn = db(&state)?;
+    version::update(&conn, &id, &input)
+}
+
+#[tauri::command]
+fn version_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    let conn = db(&state)?;
+    version::delete(&conn, &id)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LedgerExportInput {
@@ -1106,6 +1134,10 @@ pub fn run() {
             expiry_create,
             expiry_update,
             expiry_delete,
+            version_list,
+            version_create,
+            version_update,
+            version_delete,
             ledger_export,
             template_list,
             template_create,
@@ -1139,7 +1171,7 @@ mod tests {
             .unwrap();
         // 提 pub(crate) 是给 M8 的验包判据用的，这条顺带改成直接引用它 ——
         // 原来写字面 4 的那两句注释（「lib.rs 够不着」）已经不成立。
-        assert_eq!(ver, crate::db::TARGET_VERSION, "= db.rs 的 TARGET_VERSION，链头已随 M15 V11 走到 11");
+        assert_eq!(ver, crate::db::TARGET_VERSION, "= db.rs 的 TARGET_VERSION，链头已随 M16-a V12 走到 12");
     }
 
     /// 第 42 条命令必须是**零参数**的（spec §四：这条命令能启动外部安装器，
