@@ -1082,7 +1082,7 @@ mod tests {
     /// 只改项目段、或漏掉任一条 JOIN 段，都会让另一边的命中漏进当前区。
     #[test]
     fn field_hits_are_scoped_in_every_section() {
-        let (conn, a, _mk) = fixture();
+        let (conn, a, mk) = fixture();
         let b = crate::workspace::create(&conn, "客户乙").unwrap();
         crate::workspace::switch(&conn, &b.id).unwrap();
         let bp = seed_project(&conn, "政务云迁移乙");
@@ -1145,6 +1145,45 @@ mod tests {
                 },
             )
             .unwrap();
+            ledger::create_credential(
+                &conn,
+                &mk,
+                pid,
+                &ledger::CredentialInput {
+                    env_id: None,
+                    title: "串码凭据".to_owned(),
+                    username: Some("svc".to_owned()),
+                    password: Some("Secret#2026".to_owned()),
+                    url: None,
+                    note: None,
+                },
+            )
+            .unwrap();
+            ledger::create_server(
+                &conn,
+                &mk,
+                pid,
+                &ledger::ServerInput {
+                    name: "串码服务器".to_owned(),
+                    ip: Some("10.0.0.1".to_owned()),
+                    bastion: None,
+                    account: None,
+                    password: None,
+                    note: None,
+                },
+            )
+            .unwrap();
+            ledger::create_link(
+                &conn,
+                pid,
+                &ledger::LinkInput {
+                    kind: "jira".to_owned(),
+                    title: "串码链接".to_owned(),
+                    url: "https://example.gov.cn".to_owned(),
+                    note: None,
+                },
+            )
+            .unwrap();
         }
         crate::workspace::switch(&conn, crate::workspace::DEFAULT_ID).unwrap();
 
@@ -1157,8 +1196,8 @@ mod tests {
         // 每段都要**有**命中，否则「全在同一区」会因为某段压根没数据而假绿。
         assert_eq!(
             sources(&hits),
-            vec!["env", "note", "daily", "todo", "expiry"],
-            "九段里这五段各该留一条活动区命中：{:?}",
+            vec!["env", "credential", "server", "link", "note", "daily", "todo", "expiry"],
+            "九段里这八段各该留一条活动区命中：{:?}",
             sources(&hits)
         );
 
@@ -1166,5 +1205,19 @@ mod tests {
         let by_code = field_hits(&conn, "P-2026-009").unwrap();
         assert_eq!(by_code.len(), 1, "两个区各一条同码项目，过滤后只能剩活动区那一条");
         assert!(by_code.iter().all(|h| h.project_id == a), "项目段没带区谓词：{:?}", sources(&by_code));
+
+        // 换到乙区再查：`field_hits` 里那一次 `active_id` 若被写成常量，这里会拿到甲区结果。
+        crate::workspace::switch(&conn, &b.id).unwrap();
+        let hits_b = field_hits(&conn, "串码").unwrap();
+        assert!(hits_b.iter().all(|h| h.project_id == bp), "乙区查询必须换另一半");
+        assert_eq!(
+            sources(&hits_b),
+            vec!["env", "credential", "server", "link", "note", "daily", "todo", "expiry"],
+            "乙区同样八段各一条：{:?}",
+            sources(&hits_b)
+        );
+        let by_code_b = field_hits(&conn, "P-2026-009").unwrap();
+        assert_eq!(by_code_b.len(), 1, "乙区同码项目也只能剩一条");
+        assert!(by_code_b.iter().all(|h| h.project_id == bp), "项目段在乙区也要换边");
     }
 }

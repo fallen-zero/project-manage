@@ -822,5 +822,11 @@ mod tests {
         let hits = doc_hits(&c, "付款", 50).unwrap();
         assert_eq!(hits[0].project_id, "p-b", "切过去要换另一半");
         assert_eq!(indexed_project_count(&c).unwrap(), 1, "谓词同口径：切换后计数仍是 1");
+
+        // T-13 的零项目态：本区一个项目都没有时，首屏计数回 0、正文段也空（别区有正文）。
+        let empty = crate::workspace::create(&c, "客户丙").unwrap();
+        crate::workspace::switch(&c, &empty.id).unwrap();
+        assert_eq!(indexed_project_count(&c).unwrap(), 0, "本区零项目时首屏计数必须回 0");
+        assert!(doc_hits(&c, "付款", 50).unwrap().is_empty(), "本区零项目时正文段也必须空");
     }
 }
