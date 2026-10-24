@@ -43,6 +43,15 @@ pub fn write_doc(
         DocOutcome::Failed(msg) => ("failed", None, Some(msg), None),
     };
 
+    // 减锁（M5.5 D6）：`index_text` = `cut_for_search` + 逐词 String 分配 + join，是**纯 CPU**。
+    // 原先它在下面 `params![..]` 里求值，而事务第一句 INSERT（紧跟 `let tx` 之后的 index_docs 那笔）
+    // 早已拿到 SQLite 写锁 ⇒ 锁持有时间 ≈ 分词一整篇正文 + 两条 INSERT，自动轮进行中别的 sync 命令
+    // 就在 `busy_timeout` 上排队（M5 实测 4.2 s / 一次 5565 ms db_failed 的直接来源）。
+    // 提到开事务之前，锁里只剩取 rowid 的一条 SELECT、一条点删与两条 INSERT（全微秒级）。抽取本身本就在锁外（run_pass 的
+    // `match panic_to_err(|| extract_text(..))` 先抽、其 Ok arm 才调本函数写库）。
+    let name_tokens = index_text(&file.file_name);
+    let body_tokens = body.as_ref().map(|b| index_text(b));
+
     let tx = conn.unchecked_transaction()?;
     // ON CONFLICT 不动 id / doc_rowid（事实 21）：同一行被重新索引时 rowid 稳定，
     // 于是 FTS 侧可以先按 rowid 点删再插，不需要先查一次。
@@ -79,10 +88,10 @@ pub fn write_doc(
     // 这一笔是**硬性前提**而不是「免得累积历史版本」的优化：FTS5 对重复 rowid 直接回约束错误。
     // 控制方实测把这句抽掉，第二次写同路径当场 Err（rusqlite 文案 `constraint failed` → AppError `db_failed`）。
     tx.execute("DELETE FROM index_docs_fts WHERE rowid = ?1", params![rowid])?;
-    if let Some(body) = body {
+    if let Some(tokens) = body_tokens {
         tx.execute(
             "INSERT INTO index_docs_fts (rowid, name_tokens, body_tokens) VALUES (?1, ?2, ?3)",
-            params![rowid, index_text(&file.file_name), index_text(&body)],
+            params![rowid, name_tokens, tokens],
         )?;
     }
     tx.commit()?;
@@ -120,6 +129,38 @@ pub fn clear_project(conn: &Connection, project_id: &str) -> AppResult<u64> {
     let n = tx.execute("DELETE FROM index_docs WHERE project_id = ?1", params![project_id])? as u64;
     tx.commit()?;
     Ok(n)
+}
+
+/// 差集回收要的读入口：一个项目当前**尚未失效**的行。
+/// 排除 `missing` 有两个理由：重复 UPDATE 是空转；而熔断的分母得是「还可能失效的行」，
+/// 把历史 missing 行算进去会让第二轮比第一轮更容易触发熔断（那是假保险）。
+pub fn doc_rows_for_project(conn: &Connection, project_id: &str) -> AppResult<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT doc_rowid, path FROM index_docs
+          WHERE project_id = ?1 AND index_status <> 'missing'",
+    )?;
+    let rows = stmt
+        .query_map(params![project_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// 「登记还在、文件没了」的唯一写入口（spec D3）。两句话一个事务，形状照 `write_doc`。
+/// `skip_reason` / `error_msg` / `size` / `mtime` / `indexed_at` 一律不出现在 SET 子句里：
+/// 那是这一行最近一次被抽时的读数，而回填自愈靠的正是 size/mtime 与新值不匹配（D4/D6）。
+/// 召回与预览都不需要新代码：`SELECT_SQL` 与 `row_for_preview` 写的都是正向 `= 'ok'`。
+pub fn mark_missing(conn: &Connection, doc_rowid: i64) -> AppResult<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE index_docs SET index_status = 'missing', updated_at = datetime('now')
+          WHERE doc_rowid = ?1",
+        params![doc_rowid],
+    )?;
+    // 按 rowid 点删（出处 `db.rs:278`：`doc_rowid` 是给虚表当 rowid 的对齐锚，按 `doc_id` 列删虚表
+    // 是全表扫，按 rowid 是点删）。FTS5 无外键、不参与级联，所以删一侧就必须显式删另一侧。
+    tx.execute("DELETE FROM index_docs_fts WHERE rowid = ?1", params![doc_rowid])?;
+    tx.commit()?;
+    Ok(())
 }
 
 /// 跨表不变量的**全表**形态（终审 m2 里本轮要做的那条）：`index_docs_fts` 是 FTS5 虚表、没有外键，
@@ -168,8 +209,8 @@ pub fn indexed_project_count(conn: &Connection) -> AppResult<usize> {
         "SELECT count(DISTINCT d.project_id)
            FROM index_docs d
            JOIN projects p ON p.id = d.project_id
-          WHERE d.index_status = 'ok' AND p.deleted_at IS NULL",
-        [],
+          WHERE d.index_status = 'ok' AND p.deleted_at IS NULL AND p.workspace_id = ?1",
+        params![crate::workspace::active_id(conn)?],
         |r| r.get::<_, i64>(0),
     )?;
     Ok(n as usize)
@@ -195,6 +236,7 @@ pub fn list_docs(
     limit: i64,
     offset: i64,
 ) -> AppResult<Vec<DocRow>> {
+    crate::workspace::ensure_active_project(conn, project_id)?;
     // status 走参数而不是拼进 SQL：这一层暴露给 IPC，任何字符串拼接都是注入面。
     let sql = "SELECT id, path, ext, size, index_status, skip_reason, error_msg, indexed_at
                  FROM index_docs
@@ -247,12 +289,13 @@ const SELECT_SQL: &str = "SELECT d.id, d.project_id, p.name, d.path,
  WHERE index_docs_fts MATCH ?1
    AND d.index_status = 'ok'
    AND p.deleted_at IS NULL
+   AND p.workspace_id = ?3
  ORDER BY bm25(index_docs_fts)
  LIMIT ?2";
 
 fn run_select(conn: &Connection, expr: &str, limit: i64, matched_by: &'static str) -> AppResult<Vec<DocHit>> {
     let mut stmt = conn.prepare(SELECT_SQL)?;
-    let rows = stmt.query_map(params![expr, limit], |r| {
+    let rows = stmt.query_map(params![expr, limit, crate::workspace::active_id(conn)?], |r| {
         Ok(DocHit {
             doc_id: r.get(0)?,
             project_id: r.get(1)?,
@@ -309,9 +352,14 @@ mod tests {
         db::open_in_memory().unwrap()
     }
 
+    /// 裸 INSERT 显式写活动区：列 DEFAULT 恒落 `default`，否则「在别区建项目」这条夹具造不出来（Task 6）。
     fn seed_project(conn: &Connection, id: &str) {
-        conn.execute("INSERT INTO projects (id, name, status) VALUES (?1, ?2, '立项')", params![id, "政务云迁移"])
-            .unwrap();
+        let ws = crate::workspace::active_id(conn).unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, name, status, workspace_id) VALUES (?1, ?2, '立项', ?3)",
+            params![id, "政务云迁移", ws],
+        )
+        .unwrap();
     }
 
     fn file(path: &str) -> ScannedFile {
@@ -680,5 +728,105 @@ mod tests {
         assert_eq!(doc_hits(&c, "验收", 1).unwrap().len(), 1, "limit 要真的限制条数");
         assert_eq!(doc_hits(&c, "验收", -1).unwrap().len(), 2, "负数 limit 原样交给 SQL（SQLite：不限行）");
         assert!(doc_hits(&c, "验收", 0).unwrap().is_empty(), "0 就是 0 行，不许悄悄变成默认值");
+    }
+
+    /// D4 的五根禁列一次守住：只断 `skip_reason` 时，往 SET 里加 indexed_at = NULL 或
+    /// error_msg = 'gone' 都抓不到（Task 1 评审实测）。改成元组对比后五列各自承重。
+    /// `updated_at` 不入快照（同秒必等，断它会 flaky）且全仓零消费者 ⇒ 这一格无守护，
+    /// 是裁过的有名缺口，别当漏写（Task 2 评审 Minor-2）。
+    fn snapshot(c: &Connection, doc_rowid: i64) -> (Option<String>, Option<String>, i64, i64, Option<String>) {
+        c.query_row(
+            "SELECT skip_reason, error_msg, size, mtime, indexed_at FROM index_docs WHERE doc_rowid = ?1",
+            params![doc_rowid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap()
+    }
+
+    /// 磁盘上没了的一行：主表标 missing、虚表点删，元数据行留着。
+    /// 断言各有归属：status 是本轮唯一的新语义；D4 的五根禁列由写前/写后整行快照对比守（单断
+    /// `skip_reason` 那一列时，`indexed_at = NULL` 与 `error_msg = 'gone'` 两种变异都抓不到）；
+    /// 行数 = 1 是 D3「保留元数据行」的唯一证据 —— 双侧删行也照样红，只是先红在取行那一步
+    /// （`query_row(...).unwrap()` 当场 panic 于 QueryEmpty，红点前移而已）。
+    /// 虚表侧的孤儿与总行数各一条：少了总行数那条，「死正文继续躺在虚表里污染 bm25
+    /// 文档频率统计」这个 M3 终审 I3 否掉过的形态就会重新变成正确行为。
+    #[test]
+    fn mark_missing_flips_the_status_and_drops_only_the_fts_row() {
+        let c = conn();
+        seed_project(&c, "p1");
+        let rowid = write_doc(&c, "p1", &file("C:/x/合同验收.docx"), DocOutcome::Ok("甲方要求验收指标".into())).unwrap();
+        assert_eq!(fts_orphan_rows(&c), 0, "前提：写完两侧是对齐的");
+
+        let before = snapshot(&c, rowid);
+        mark_missing(&c, rowid).unwrap();
+
+        let status: String = c
+            .query_row("SELECT index_status FROM index_docs WHERE doc_rowid = ?1", params![rowid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(status, "missing", "失效行必须改状态，否则它继续进召回");
+        assert_eq!(snapshot(&c, rowid), before,
+            "mark_missing 只许动 index_status 与 updated_at（spec D4）；变异：SET 里加 indexed_at = NULL ⇒ 这条红");
+        let kept: i64 = c
+            .query_row("SELECT count(*) FROM index_docs WHERE doc_rowid = ?1", params![rowid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1, "元数据行要留着：界面得能回答「曾被索引、现在磁盘上没了」");
+        assert_eq!(fts_orphan_rows(&c), 0, "点删不许留下对不上主表的虚表行");
+        let fts_total: i64 = c
+            .query_row("SELECT count(*) FROM index_docs_fts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fts_total, 0, "死正文继续躺在虚表里就是继续污染 bm25 的文档频率统计");
+    }
+
+    /// 已标 missing 的行不再进候选集（幂等 + 熔断分母干净）。两个方向都断：不许含已失效那行，
+    /// 也不许丢 skipped 那行 —— 把谓词写成 `= 'ok'` 会把 skipped/failed 漏掉，
+    /// 「超限文件后来被删了」这类失效就永远没人标。
+    #[test]
+    fn doc_rows_for_project_skips_rows_already_marked_missing() {
+        let c = conn();
+        seed_project(&c, "p1");
+        let a = write_doc(&c, "p1", &file("C:/x/甲.docx"), DocOutcome::Ok("甲 付款条件".into())).unwrap();
+        let b = write_doc(&c, "p1", &file("C:/x/乙.docx"), DocOutcome::Ok("乙 付款条件".into())).unwrap();
+        write_doc(&c, "p1", &file("C:/y/丙.docx"), DocOutcome::Skipped("too_large")).unwrap();
+        mark_missing(&c, a).unwrap();
+
+        let rows = doc_rows_for_project(&c, "p1").unwrap();
+        assert_eq!(rows.len(), 2, "三行里只有已 missing 的那行该被排除：{rows:?}");
+        assert!(rows.iter().any(|(id, _)| *id == b), "没失效的行不许被漏掉");
+        assert!(!rows.iter().any(|(id, _)| *id == a), "变异：把 <> 'missing' 删掉 ⇒ 先红在 rows.len()");
+        assert_eq!(doc_rows_for_project(&c, "p-不存在").unwrap().len(), 0, "别的项目的行不许串进来");
+    }
+
+    /// 正文命中与首屏空态谓词**必须同口径**（M3 起就在的那句注释：少半个谓词就会出现
+    /// 「文案说正文有索引、正文段却是空的」）。两个区各写一条 ok 正文，
+    /// 断 `doc_hits` 与 `indexed_project_count` 同时只认活动区。
+    #[test]
+    fn doc_hits_and_indexed_project_count_use_the_same_scope() {
+        let c = conn();
+        seed_project(&c, "p-a");
+        let b = crate::workspace::create(&c, "客户乙").unwrap();
+        crate::workspace::switch(&c, &b.id).unwrap();
+        seed_project(&c, "p-b");
+        crate::workspace::switch(&c, crate::workspace::DEFAULT_ID).unwrap();
+
+        for pid in ["p-a", "p-b"] {
+            write_doc(&c, pid, &file(&format!("C:/{pid}.docx")), DocOutcome::Ok("付款通知".into()))
+                .unwrap();
+        }
+
+        assert_eq!(indexed_project_count(&c).unwrap(), 1, "只数活动区的可搜项目");
+        let hits = doc_hits(&c, "付款", 50).unwrap();
+        assert_eq!(hits.len(), 1, "当前区的正文命中只能有一条：{}", hits.len());
+        assert_eq!(hits[0].project_id, "p-a");
+
+        crate::workspace::switch(&c, &b.id).unwrap();
+        let hits = doc_hits(&c, "付款", 50).unwrap();
+        assert_eq!(hits[0].project_id, "p-b", "切过去要换另一半");
+        assert_eq!(indexed_project_count(&c).unwrap(), 1, "谓词同口径：切换后计数仍是 1");
+
+        // T-13 的零项目态：本区一个项目都没有时，首屏计数回 0、正文段也空（别区有正文）。
+        let empty = crate::workspace::create(&c, "客户丙").unwrap();
+        crate::workspace::switch(&c, &empty.id).unwrap();
+        assert_eq!(indexed_project_count(&c).unwrap(), 0, "本区零项目时首屏计数必须回 0");
+        assert!(doc_hits(&c, "付款", 50).unwrap().is_empty(), "本区零项目时正文段也必须空");
     }
 }

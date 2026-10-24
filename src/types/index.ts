@@ -65,6 +65,11 @@ export interface IndexOverview {
   maxFileBytes: number;
   maxFilesPerProject: number;
   supportedExts: string[];
+  /** 本机 Windows OCR 是否可用（Rust 侧 `ocr::ocr_available()` 活探测，非 ScanOptions 的惰性默认）。 */
+  ocrAvailable: boolean;
+  /** 本机是否有 LibreOffice 可用（Rust 侧 `legacy_office::soffice_available()` 活探测）。
+   *  false 时 `.doc`/`.ppt` 在扫描门整类不建行，界面上给一键安装入口。 */
+  sofficeAvailable: boolean;
 }
 
 export interface DocRow {

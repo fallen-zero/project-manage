@@ -10,6 +10,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { EMPTY_INPUT, type ProjectInput } from "@/types/project";
+import type { ParentOption } from "@/lib/project-tree";
+import type { Workspace } from "@/types/workspace";
 
 // 中英文逗号、顿号、空格都当分隔符：台账里的标签是人手打的，分隔符不会统一。
 function parseTags(raw: string): string[] {
@@ -33,26 +35,71 @@ export function ProjectForm({
   saving,
   onSubmit,
   onCancel,
+  nameLabel = "项目名称",
+  nameRequiredMessage = "项目名称不能为空",
+  onChange,
+  parentOptions,
+  workspaceOptions,
 }: {
   initial?: ProjectInput;
   statuses: string[];
   saving: boolean;
   onSubmit: (input: ProjectInput) => Promise<boolean>;
   onCancel: () => void;
+  nameLabel?: string;
+  nameRequiredMessage?: string;
+  onChange?: (input: ProjectInput) => void;
+  parentOptions?: ParentOption[];
+  workspaceOptions?: Workspace[];
 }) {
   const [form, setForm] = useState<ProjectInput>(initial ?? EMPTY_INPUT);
   const [tagsText, setTagsText] = useState((initial ?? EMPTY_INPUT).tags.join("，"));
   const [nameError, setNameError] = useState<string | null>(null);
 
-  const patch = (key: keyof ProjectInput, value: string) =>
-    setForm((prev) => ({ ...prev, [key]: value }));
+  const emit = (next: ProjectInput, tags: string) =>
+    onChange?.({ ...next, tags: parseTags(tags) });
+  const patch = (key: keyof ProjectInput, value: string) => {
+    const next = { ...form, [key]: value };
+    setForm(next);
+    emit(next, tagsText);
+  };
+  const onTagsChange = (value: string) => {
+    setTagsText(value);
+    emit(form, value);
+  };
+  const setParent = (value: string) => {
+    const parentId = value === "none" ? null : value;
+    const next = { ...form, parentId };
+    setForm(next);
+    emit(next, tagsText);
+  };
+
+  const currentParentId = form.parentId;
+  const parentValue =
+    currentParentId !== null && parentOptions?.some((o) => o.id === currentParentId)
+      ? currentParentId
+      : "none";
+
+  // 换区只对「根项目」开放：有父（库里的或本次提交的）就随父走（spec §六.2）。
+  const hasParent = form.parentId !== null;
+  // 有父时下拉禁用、提交 null；显示值要回到原区，否则会「看着 B、实际留 A」。
+  const workspaceValue =
+    (hasParent ? initial?.workspaceId : form.workspaceId) ??
+    workspaceOptions?.find((w) => w.isActive)?.id ??
+    "";
+  const workspaceHint = hasParent ? "子项目随父项目一起换区，请编辑它的父项目" : null;
 
   const submit = async () => {
     if (!form.name.trim()) {
-      setNameError("项目名称不能为空");
+      setNameError(nameRequiredMessage);
       return;
     }
-    const ok = await onSubmit({ ...form, tags: parseTags(tagsText) });
+    const parentId =
+      parentOptions && form.parentId && !parentOptions.some((o) => o.id === form.parentId)
+        ? null
+        : form.parentId;
+    const workspaceId = hasParent ? null : (form.workspaceId ?? null);
+    const ok = await onSubmit({ ...form, parentId, workspaceId, tags: parseTags(tagsText) });
     if (!ok) setNameError("保存失败，详见下方错误提示");
   };
 
@@ -60,7 +107,7 @@ export function ProjectForm({
     <div className="grid gap-3">
       <div className="grid gap-2">
         <Label htmlFor="p-name">
-          项目名称 <span className="text-destructive">*</span>
+          {nameLabel} <span className="text-destructive">*</span>
         </Label>
         <Input
           id="p-name"
@@ -90,6 +137,53 @@ export function ProjectForm({
         </Select>
       </div>
 
+      {parentOptions && (
+        <div className="grid gap-2">
+          <Label>所属总包</Label>
+          <Select
+            value={parentValue}
+            onValueChange={setParent}
+            disabled={parentOptions.length === 0}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="none">无（顶层项目）</SelectItem>
+              {parentOptions.map((o) => (
+                <SelectItem key={o.id} value={o.id}>
+                  {"— ".repeat(o.depth)}
+                  {o.name}（{o.status}）
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
+      {workspaceOptions && workspaceOptions.length > 0 && (
+        <div className="grid gap-2">
+          <Label>工作区</Label>
+          <Select
+            value={workspaceValue}
+            onValueChange={(v) => patch("workspaceId", String(v))}
+            disabled={hasParent || workspaceOptions.length === 0}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {workspaceOptions.map((w) => (
+                <SelectItem key={w.id} value={w.id}>
+                  {w.name}（{w.projectCount}）
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {workspaceHint && <p className="text-xs text-muted-foreground">{workspaceHint}</p>}
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-3">
         {FIELDS.map((f) => (
           <div key={f.key} className="grid gap-1.5">
@@ -114,7 +208,7 @@ export function ProjectForm({
           id="p-tags"
           value={tagsText}
           placeholder="政务，维保中"
-          onChange={(e) => setTagsText(e.target.value)}
+          onChange={(e) => onTagsChange(e.target.value)}
         />
       </div>
 

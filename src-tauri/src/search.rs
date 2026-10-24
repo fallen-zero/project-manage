@@ -39,7 +39,7 @@ const MAX_PROJECT_HITS: usize = 15;
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldHit {
-    /// project | env | credential | server | link | note
+    /// project | env | credential | server | link | note | daily | todo | expiry
     pub source: &'static str,
     pub id: String,
     pub project_id: String,
@@ -122,9 +122,15 @@ fn map_row(r: &Row<'_>) -> rusqlite::Result<Cells> {
     ))
 }
 
-fn collect(source: &'static str, sql: &str, conn: &Connection, pattern: &str) -> AppResult<Vec<FieldHit>> {
+fn collect(
+    source: &'static str,
+    sql: &str,
+    conn: &Connection,
+    pattern: &str,
+    workspace: &str,
+) -> AppResult<Vec<FieldHit>> {
     let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(params![pattern, PER_GROUP_LIMIT], map_row)?;
+    let rows = stmt.query_map(params![pattern, PER_GROUP_LIMIT, workspace], map_row)?;
     let mut out = Vec::new();
     for row in rows {
         let (id, project_id, project_name, title, b1, b2, b3) = row?;
@@ -140,7 +146,7 @@ fn collect(source: &'static str, sql: &str, conn: &Connection, pattern: &str) ->
     Ok(out)
 }
 
-/// 空查询直接返回空：不扫库，也避免首屏一进来就发六条全表 LIKE。
+/// 空查询直接返回空：不扫库，也避免首屏一进来就发九条全表 LIKE。
 pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
     let q = query.trim();
     if q.is_empty() {
@@ -154,6 +160,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
         ));
     }
     let p = like_pattern(q);
+    let workspace = crate::workspace::active_id(conn)?;
     let mut hits = Vec::new();
 
     hits.append(&mut collect(
@@ -161,6 +168,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
         "SELECT p.id, p.id, p.name, p.name, p.code, p.customer, p.status
            FROM projects p
           WHERE p.deleted_at IS NULL
+            AND p.workspace_id = ?3
             AND (  p.name LIKE ?1 ESCAPE '\\'
                 OR p.code LIKE ?1 ESCAPE '\\'
                 OR p.manager LIKE ?1 ESCAPE '\\'
@@ -176,13 +184,14 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
           LIMIT ?2",
         conn,
         &p,
+        &workspace,
     )?);
 
     hits.append(&mut collect(
         "env",
         "SELECT e.id, e.project_id, p.name, e.name, e.env, e.url, e.port
            FROM ledger_envs e
-           JOIN projects p ON p.id = e.project_id AND p.deleted_at IS NULL
+           JOIN projects p ON p.id = e.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
           WHERE e.deleted_at IS NULL
             AND (  e.name LIKE ?1 ESCAPE '\\'
                 OR e.url LIKE ?1 ESCAPE '\\'
@@ -192,6 +201,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
           LIMIT ?2",
         conn,
         &p,
+        &workspace,
     )?);
 
     // 凭据：只搜用途标题、登录地址、备注。username/password 是密文列，不在 SQL 里。
@@ -199,7 +209,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
         "credential",
         "SELECT c.id, c.project_id, p.name, c.title, c.url, c.note, NULL
            FROM ledger_credentials c
-           JOIN projects p ON p.id = c.project_id AND p.deleted_at IS NULL
+           JOIN projects p ON p.id = c.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
           WHERE c.deleted_at IS NULL
             AND (  c.title LIKE ?1 ESCAPE '\\'
                 OR c.url LIKE ?1 ESCAPE '\\'
@@ -208,6 +218,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
           LIMIT ?2",
         conn,
         &p,
+        &workspace,
     )?);
 
     // 服务器：远程账号与密码同样是密文列，只搜名称/IP/堡垒机/备注。
@@ -215,7 +226,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
         "server",
         "SELECT s.id, s.project_id, p.name, s.name, s.ip, s.bastion, s.note
            FROM ledger_servers s
-           JOIN projects p ON p.id = s.project_id AND p.deleted_at IS NULL
+           JOIN projects p ON p.id = s.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
           WHERE s.deleted_at IS NULL
             AND (  s.name LIKE ?1 ESCAPE '\\'
                 OR s.ip LIKE ?1 ESCAPE '\\'
@@ -225,13 +236,14 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
           LIMIT ?2",
         conn,
         &p,
+        &workspace,
     )?);
 
     hits.append(&mut collect(
         "link",
         "SELECT l.id, l.project_id, p.name, l.title, l.kind, l.url, l.note
            FROM ledger_links l
-           JOIN projects p ON p.id = l.project_id AND p.deleted_at IS NULL
+           JOIN projects p ON p.id = l.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
           WHERE l.deleted_at IS NULL
             AND (  l.title LIKE ?1 ESCAPE '\\'
                 OR l.url LIKE ?1 ESCAPE '\\'
@@ -240,6 +252,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
           LIMIT ?2",
         conn,
         &p,
+        &workspace,
     )?);
 
     // 备注正文可能很长，副标题只取前 80 字，整段留给详情页看。
@@ -247,7 +260,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
         "note",
         "SELECT n.id, n.project_id, p.name, n.title, n.tag, SUBSTR(n.body, 1, 80), NULL
            FROM ledger_notes n
-           JOIN projects p ON p.id = n.project_id AND p.deleted_at IS NULL
+           JOIN projects p ON p.id = n.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
           WHERE n.deleted_at IS NULL
             AND (  n.title LIKE ?1 ESCAPE '\\'
                 OR n.tag LIKE ?1 ESCAPE '\\'
@@ -256,6 +269,61 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
           LIMIT ?2",
         conn,
         &p,
+        &workspace,
+    )?);
+
+    // 日报：只搜工作内容。工时与日期拼成副标题（CAST 成 TEXT 是为了进 `join_bits` 那个
+    // [Option<String>; 3]，别改成 printf —— bundled SQLite 的 printf 不在本轮验证过的前提上）。
+    hits.append(&mut collect(
+        "daily",
+        "SELECT d.id, d.project_id, p.name, SUBSTR(d.content, 1, 80), d.report_date,
+                ('工时 ' || CAST(d.hours AS TEXT) || ' 小时'), NULL
+           FROM daily_reports d
+           JOIN projects p ON p.id = d.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
+          WHERE d.deleted_at IS NULL
+            AND d.content LIKE ?1 ESCAPE '\\'
+          ORDER BY d.updated_at DESC
+          LIMIT ?2",
+        conn,
+        &p,
+        &workspace,
+    )?);
+
+    // 待办：只搜标题（M9 已裁定 todos 表没有 note 列，正文就是 title）。
+    // D4 当次反转了 M9 spec §十一「待办正文不进任何检索通路」那句，理由写在 spec §九.8。
+    hits.append(&mut collect(
+        "todo",
+        "SELECT t.id, t.project_id, p.name, t.title, t.due_date,
+                CASE t.done WHEN 1 THEN '已完成' ELSE '未完成' END, NULL
+           FROM todos t
+           JOIN projects p ON p.id = t.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
+          WHERE t.deleted_at IS NULL
+            AND t.title LIKE ?1 ESCAPE '\\'
+          ORDER BY t.updated_at DESC
+          LIMIT ?2",
+        conn,
+        &p,
+        &workspace,
+    )?);
+
+    // 到期事项：搜名称与备注两列（spec D6 / §八）。**日期列不进 WHERE** —— 搜「10」「2027」这种
+    // 短串会把一堆到期日捞成命中，那是噪声；日期只进副标题的 bit。种类也只进副标题。
+    // 第三个 bit 用 `SUBSTR(e.note, 1, 80)` 而不是裸 `e.note`：`note` 长度无上限，仓内两格先例
+    // （上面 note 那条的 `SUBSTR(n.body, 1, 80)`、daily 那条的 `SUBSTR(d.content, 1, 80)`）对长
+    // 自由文本一律截 80 再进副标题，否则结果页一行能被备注撑成整段。
+    hits.append(&mut collect(
+        "expiry",
+        "SELECT e.id, e.project_id, p.name, e.label, e.kind, e.expire_date,
+                SUBSTR(e.note, 1, 80)
+           FROM project_expiries e
+           JOIN projects p ON p.id = e.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
+          WHERE e.deleted_at IS NULL
+            AND (e.label LIKE ?1 ESCAPE '\\' OR e.note LIKE ?1 ESCAPE '\\')
+          ORDER BY e.updated_at DESC
+          LIMIT ?2",
+        conn,
+        &p,
+        &workspace,
     )?);
 
     Ok(hits)
@@ -274,7 +342,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
 ///   变异取证一律用反转形态；
 /// - 第三级 id：**当前没有任何测试能把它打红**（删掉它实测 120 条全绿）。要它生效得有两个同名且
 ///   同条数的簇，而测试没法把随机 id 的「插入序 vs id 序」摆成固定先后，`sort_by` 又是稳定排序。
-///   有名缺口，交 M5（补法要么给 `projects.id` 开测试注入点，要么在测试里用裸 SQL 固定 id）。
+///   有名缺口，归 M5.5（本批按预期不红处理，见 spec 第四节清账#6；补法要么给 `projects.id` 开测试注入点，要么在测试里用裸 SQL 固定 id）。
 fn cluster_by_project<T>(
     items: Vec<T>,
     project_of: impl Fn(&T) -> (String, String),
@@ -334,7 +402,7 @@ pub fn unified_bundle(conn: &Connection, query: &str) -> AppResult<SearchBundle>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{db, index_scan::ScannedFile, index_store, ledger, project, vault};
+    use crate::{db, daily_report, expiry, index_scan::ScannedFile, index_store, ledger, project, todo, vault};
     use rusqlite::Connection;
 
     const SECRET: &str = "机密串-Zhang@2026";
@@ -364,6 +432,8 @@ mod tests {
                 delivery_deadline: None,
                 status: "开发".to_owned(),
                 tags: vec!["政务".to_owned(), "维保中".to_owned()],
+                parent_id: None,
+                workspace_id: None,
             },
         )
         .unwrap()
@@ -576,6 +646,50 @@ mod tests {
         ledger::delete_note(&conn, &note_id).unwrap();
         assert!(field_hits(&conn, "租户参数").unwrap().is_empty());
 
+        // 日报与待办那两条 collect 各自带着行级判据（`x.deleted_at IS NULL`）。
+        // 必须在项目还活着的时候验：一旦项目被软删，JOIN 里的项目级判据会先把整行挡掉，
+        // 行级判据就再也观察不到了 —— 这一格只能钉在下面的 delete_project 之前。
+        let d = daily_report::create(
+            &conn,
+            &daily_report::DailyReportInput {
+                project_id: pid.clone(),
+                report_date: Some("2026-10-16".to_owned()),
+                content: "季度巡检记录".to_owned(),
+                hours: 3.5,
+            },
+        )
+        .unwrap();
+        let t = todo::create(
+            &conn,
+            &todo::TodoInput {
+                project_id: pid.clone(),
+                title: "季度巡检待办跟进".to_owned(),
+                due_date: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            field_hits(&conn, "季度巡检记录").unwrap().len(),
+            1,
+            "前置条件：活项目的日报行要能搜到"
+        );
+        assert_eq!(
+            field_hits(&conn, "季度巡检待办跟进").unwrap().len(),
+            1,
+            "前置条件：活项目的待办行要能搜到"
+        );
+
+        daily_report::delete(&conn, &d.id).unwrap();
+        assert!(
+            field_hits(&conn, "季度巡检记录").unwrap().is_empty(),
+            "软删的日报行不该再被搜到"
+        );
+        todo::delete(&conn, &t.id).unwrap();
+        assert!(
+            field_hits(&conn, "季度巡检待办跟进").unwrap().is_empty(),
+            "软删的待办行不该再被搜到"
+        );
+
         project::delete_project(&conn, &pid).unwrap();
         assert!(field_hits(&conn, "运维后台").unwrap().is_empty(), "项目删除后其台账不再可搜");
         assert!(field_hits(&conn, "政务云迁移").unwrap().is_empty());
@@ -706,6 +820,31 @@ mod tests {
     }
 
     #[test]
+    fn ledger_section_is_capped_by_cluster_limit_too() {
+        // 终审 Minor：正文段有 `section_drops_the_31st_cluster…`，台账段共用 cluster_by_project
+        // 却**没有独立用例** ⇒ 台账段若哪天不再走同一上限，无人看守。补这一格。
+        // notes.body/title 是**明文列**（ledger.rs:621 create_note 不要 MasterKey），故本用例无需 vault。
+        let conn = db::open_in_memory().unwrap();
+        for i in 0..31 {
+            let pid = seed_project(&conn, &format!("台账项目{i:02}"));
+            ledger::create_note(
+                &conn,
+                &pid,
+                &ledger::NoteInput {
+                    title: "台账封顶".to_owned(),
+                    body: Some("这条正文含关键词台账封顶".to_owned()),
+                    tag: None,
+                },
+            )
+            .unwrap();
+        }
+        let bundle = unified_bundle(&conn, "台账封顶").unwrap();
+        // 上限 30：31 个簇必须砍到 30，并如实报 hidden=1。
+        assert_eq!(bundle.ledger.clusters.len(), MAX_CLUSTERS_PER_SECTION, "台账段应截到上限 30");
+        assert_eq!(bundle.ledger.hidden_clusters, 1, "31 减 30 应报隐藏 1 个簇");
+    }
+
+    #[test]
     fn cluster_keeps_15_items_and_reports_the_other_2() {
         let (c, pid, _) = fixture();
         for i in 0..17 {
@@ -777,5 +916,308 @@ mod tests {
             assert!(cluster.as_object().unwrap().contains_key(key), "簇缺 {key}");
         }
         assert!(v["ledger"].as_object().unwrap().contains_key("hiddenClusters"));
+    }
+
+    /// D4 的兑现点：需求原文 §四.1 点名的「日报内容」进台账检索，M9 欠的待办那格一起兑。
+    /// 诱饵词故意与各表既有夹具都不重叠 —— `only_hit` 断的是「本次命中恰好只有这一条」。
+    #[test]
+    fn daily_report_content_and_todo_title_join_the_ledger_section() {
+        let (conn, pid, mk) = fixture();
+        seed_ledger(&conn, &pid, &mk);
+        daily_report::create(
+            &conn,
+            &daily_report::DailyReportInput {
+                project_id: pid.clone(),
+                report_date: Some("2026-10-16".to_owned()),
+                content: "压测报告补材料".to_owned(),
+                hours: 3.5,
+            },
+        )
+        .unwrap();
+        todo::create(
+            &conn,
+            &todo::TodoInput {
+                project_id: pid.clone(),
+                title: "补齐压测报告附件清单".to_owned(),
+                due_date: Some("2026-10-20".to_owned()),
+            },
+        )
+        .unwrap();
+
+        let hit = only_hit(&conn, "压测报告补材料", "daily", "压测报告补材料");
+        assert_eq!(hit.project_id, pid, "日报命中要带上所属项目，供结果页分组与跳转");
+        assert!(hit.detail.contains("2026-10-16"), "副标题要念日期：{}", hit.detail);
+        assert!(hit.detail.contains("3.5"), "副标题要念工时：{}", hit.detail);
+
+        let t = only_hit(&conn, "补齐压测报告附件清单", "todo", "补齐压测报告附件清单");
+        assert_eq!(t.project_id, pid);
+        assert!(t.detail.contains("未完成"), "待办副标题要念勾选状态：{}", t.detail);
+    }
+
+    /// 软删项目的行不进检索 —— 这条与 `todo.rs`/`daily_report.rs` 的同名判据是**同一形状**，
+    /// 变异 M①（摘掉 `p.deleted_at IS NULL`）在这三处任一都能被相应断言打红。
+    #[test]
+    fn soft_deleted_project_hides_daily_and_todo_hits() {
+        let (conn, pid, _mk) = fixture();
+        daily_report::create(
+            &conn,
+            &daily_report::DailyReportInput {
+                project_id: pid.clone(),
+                report_date: Some("2026-10-15".to_owned()),
+                content: "季度巡检记录".to_owned(),
+                hours: 2.0,
+            },
+        )
+        .unwrap();
+        todo::create(
+            &conn,
+            &todo::TodoInput {
+                project_id: pid.clone(),
+                title: "季度巡检待办跟进".to_owned(),
+                due_date: None,
+            },
+        )
+        .unwrap();
+        assert!(!field_hits(&conn, "季度巡检记录").unwrap().is_empty(), "前置条件：项目还活着时两条都要能搜到");
+        assert_eq!(field_hits(&conn, "季度巡检记录").unwrap().len(), 1);
+        assert_eq!(field_hits(&conn, "季度巡检待办跟进").unwrap().len(), 1);
+
+        conn.execute("UPDATE projects SET deleted_at = datetime('now') WHERE id = ?1", [&pid])
+            .unwrap();
+        for needle in ["季度巡检记录", "季度巡检待办跟进"] {
+            assert!(
+                field_hits(&conn, needle).unwrap().is_empty(),
+                "软删项目的行不该进检索：{needle}"
+            );
+        }
+    }
+
+    /// D6：到期事项的名称与备注进全局检索，副标题念出种类与到期日。
+    /// **日期本身不参与匹配**（spec §八）：否则搜「10」能把一堆日期捞出来，那是噪声不是结果。
+    /// Task 8 变异 **M⑥** 的靶子：把 `WHERE` 里的 `e.label/e.note` 换成 `e.expire_date` 去 LIKE，
+    /// 下面那两条断言会同时反向红（搜得到日期、搜不到备注）。
+    #[test]
+    fn expiry_label_and_note_are_searchable_but_the_date_column_is_not() {
+        let (conn, pid, _mk) = fixture();
+        expiry::create(
+            &conn,
+            &expiry::ExpiryInput {
+                project_id: pid.clone(),
+                kind: "域名".to_owned(),
+                label: "oa-gateway.gov.cn".to_owned(),
+                expire_date: Some("2027-01-31".to_owned()),
+                note: Some("续费要走信息中心审批".to_owned()),
+            },
+        )
+        .unwrap();
+
+        let by_label = only_hit(&conn, "oa-gateway", "expiry", "oa-gateway.gov.cn");
+        assert_eq!(by_label.project_id, pid, "到期事项命中要带所属项目，供结果页分组与跳转");
+        assert!(by_label.detail.contains("域名"), "副标题要念种类：{}", by_label.detail);
+        assert!(by_label.detail.contains("2027-01-31"), "副标题要念到期日：{}", by_label.detail);
+
+        let by_note = only_hit(&conn, "信息中心审批", "expiry", "oa-gateway.gov.cn");
+        assert_eq!(by_note.title, "oa-gateway.gov.cn", "备注命中出来的还是这一行");
+        // 第三条 detail bit 是 `SUBSTR(e.note, 1, 80)`（spec §八）。少了它，「靠备注命中」和
+        // 「靠名称命中」两行在结果页渲染成逐字相同的行，用户看不出命中的是哪一列。
+        assert!(
+            by_note.detail.contains("信息中心审批"),
+            "靠备注命中时副标题要念得出备注：{}",
+            by_note.detail
+        );
+
+        // 日期列不进匹配：单独搜日期片段必须一条台账命中也没有（正文段是另一条通路，本夹具里没有正文）。
+        assert!(
+            field_hits(&conn, "2027-01").unwrap().is_empty(),
+            "日期不许当检索列：{:?}",
+            sources(&field_hits(&conn, "2027-01").unwrap())
+        );
+    }
+
+    /// spec §九.3 在检索侧的兑现点，Task 8 变异 **M①** 的第二格靶子：
+    /// 摘掉本条 collect 的 `p.deleted_at IS NULL` ⇒ 这条当场红。
+    #[test]
+    fn soft_deleted_project_hides_expiry_hits() {
+        let (conn, pid, _mk) = fixture();
+        expiry::create(
+            &conn,
+            &expiry::ExpiryInput {
+                project_id: pid.clone(),
+                kind: "证书".to_owned(),
+                label: "tls-wildcard".to_owned(),
+                expire_date: Some("2027-02-28".to_owned()),
+                note: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(sources(&field_hits(&conn, "tls-wildcard").unwrap()), vec!["expiry"]);
+
+        conn.execute(
+            "UPDATE projects SET deleted_at = datetime('now') WHERE id = ?1",
+            [&pid],
+        )
+        .unwrap();
+        assert!(
+            field_hits(&conn, "tls-wildcard").unwrap().is_empty(),
+            "软删项目的到期事项不能出现在搜索结果里"
+        );
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_expiries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "软删项目只挡住读，行本身留在库里");
+
+        // 把项目恢复回活状态再搜一次：这一句才是上面那句断言里「恢复项目即原样可搜」的兑现点，
+        // 一次同时钉住两件事 —— 库里的行是活的（不是被连带软删了）、`p.deleted_at IS NULL`
+        // 那道门是可逆的（不是把行读没了）。
+        conn.execute("UPDATE projects SET deleted_at = NULL WHERE id = ?1", [&pid])
+            .unwrap();
+        assert_eq!(
+            sources(&field_hits(&conn, "tls-wildcard").unwrap()),
+            vec!["expiry"],
+            "恢复项目后到期事项要原样搜得到"
+        );
+    }
+
+    /// 九段检索**每一段**都要带区谓词。同一串关键词「串码」埋进活动区与别区的**各**数据类里：
+    /// 只改项目段、或漏掉任一条 JOIN 段，都会让另一边的命中漏进当前区。
+    #[test]
+    fn field_hits_are_scoped_in_every_section() {
+        let (conn, a, mk) = fixture();
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        crate::workspace::switch(&conn, &b.id).unwrap();
+        let bp = seed_project(&conn, "政务云迁移乙");
+        crate::workspace::switch(&conn, crate::workspace::DEFAULT_ID).unwrap();
+
+        // 关联行必须在**它宿主项目所属的那一区**里创建：Task 5 之后 `todo::create` 一类的 create 守卫
+        // 会拒跨区（`project_exists` 已带区谓词）。所以两段各切一次区，而不是在活动区=默认区的循环里
+        // 给别区的项目建行（那会当场 panic 在 `.unwrap()`）。
+        for (pid, ws) in [(&a, crate::workspace::DEFAULT_ID.to_owned()), (&bp, b.id.clone())] {
+            crate::workspace::switch(&conn, &ws).unwrap();
+            todo::create(
+                &conn,
+                &todo::TodoInput {
+                    project_id: pid.to_owned(),
+                    title: "串码待办".to_owned(),
+                    due_date: None,
+                },
+            )
+            .unwrap();
+            daily_report::create(
+                &conn,
+                &daily_report::DailyReportInput {
+                    project_id: pid.to_owned(),
+                    report_date: Some("2026-10-23".to_owned()),
+                    content: "串码日报".to_owned(),
+                    hours: 1.0,
+                },
+            )
+            .unwrap();
+            expiry::create(
+                &conn,
+                &expiry::ExpiryInput {
+                    project_id: pid.to_owned(),
+                    kind: "域名".to_owned(),
+                    label: "串码域名".to_owned(),
+                    expire_date: Some("2027-01-31".to_owned()),
+                    note: None,
+                },
+            )
+            .unwrap();
+            ledger::create_env(
+                &conn,
+                pid,
+                &ledger::EnvInput {
+                    env: "prod".to_owned(),
+                    name: "串码环境".to_owned(),
+                    url: None,
+                    port: None,
+                    note: None,
+                },
+            )
+            .unwrap();
+            ledger::create_note(
+                &conn,
+                pid,
+                &ledger::NoteInput {
+                    title: "串码备注".to_owned(),
+                    body: Some("串码正文".to_owned()),
+                    tag: None,
+                },
+            )
+            .unwrap();
+            ledger::create_credential(
+                &conn,
+                &mk,
+                pid,
+                &ledger::CredentialInput {
+                    env_id: None,
+                    title: "串码凭据".to_owned(),
+                    username: Some("svc".to_owned()),
+                    password: Some("Secret#2026".to_owned()),
+                    url: None,
+                    note: None,
+                },
+            )
+            .unwrap();
+            ledger::create_server(
+                &conn,
+                &mk,
+                pid,
+                &ledger::ServerInput {
+                    name: "串码服务器".to_owned(),
+                    ip: Some("10.0.0.1".to_owned()),
+                    bastion: None,
+                    account: None,
+                    password: None,
+                    note: None,
+                },
+            )
+            .unwrap();
+            ledger::create_link(
+                &conn,
+                pid,
+                &ledger::LinkInput {
+                    kind: "jira".to_owned(),
+                    title: "串码链接".to_owned(),
+                    url: "https://example.gov.cn".to_owned(),
+                    note: None,
+                },
+            )
+            .unwrap();
+        }
+        crate::workspace::switch(&conn, crate::workspace::DEFAULT_ID).unwrap();
+
+        let hits = field_hits(&conn, "串码").unwrap();
+        assert!(
+            hits.iter().all(|h| h.project_id == a),
+            "有别的区的行漏进当前区：{:?}",
+            hits.iter().map(|h| (h.source, h.project_id.clone())).collect::<Vec<_>>()
+        );
+        // 每段都要**有**命中，否则「全在同一区」会因为某段压根没数据而假绿。
+        assert_eq!(
+            sources(&hits),
+            vec!["env", "credential", "server", "link", "note", "daily", "todo", "expiry"],
+            "九段里这八段各该留一条活动区命中：{:?}",
+            sources(&hits)
+        );
+
+        // 项目段单独验一次（`seed_project` 的 code 两边同为 `P-2026-009`）：
+        let by_code = field_hits(&conn, "P-2026-009").unwrap();
+        assert_eq!(by_code.len(), 1, "两个区各一条同码项目，过滤后只能剩活动区那一条");
+        assert!(by_code.iter().all(|h| h.project_id == a), "项目段没带区谓词：{:?}", sources(&by_code));
+
+        // 换到乙区再查：`field_hits` 里那一次 `active_id` 若被写成常量，这里会拿到甲区结果。
+        crate::workspace::switch(&conn, &b.id).unwrap();
+        let hits_b = field_hits(&conn, "串码").unwrap();
+        assert!(hits_b.iter().all(|h| h.project_id == bp), "乙区查询必须换另一半");
+        assert_eq!(
+            sources(&hits_b),
+            vec!["env", "credential", "server", "link", "note", "daily", "todo", "expiry"],
+            "乙区同样八段各一条：{:?}",
+            sources(&hits_b)
+        );
+        let by_code_b = field_hits(&conn, "P-2026-009").unwrap();
+        assert_eq!(by_code_b.len(), 1, "乙区同码项目也只能剩一条");
+        assert!(by_code_b.iter().all(|h| h.project_id == bp), "项目段在乙区也要换边");
     }
 }

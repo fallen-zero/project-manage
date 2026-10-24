@@ -1,10 +1,11 @@
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::error::{AppError, AppResult};
 use crate::index_store::clear_project;
+use crate::project_audit;
 
 /// 全局统一的项目状态枚举（需求方确认：状态全局统一，不按项目自定义阶段模板）。
 pub const STATUSES: [&str; 8] = [
@@ -25,6 +26,10 @@ pub struct Project {
     pub contract_period: Option<String>,
     pub delivery_deadline: Option<String>,
     pub status: String,
+    pub parent_id: Option<String>,
+    /// 所属工作区 id。列是 NOT NULL，读出来恒有值：`list_projects`/`get_project` 都按活动区
+    /// 过滤并取回这一列，create 恒落活动区（spec §六 第 1 条）。改归属只有 update 一条合法路径。
+    pub workspace_id: String,
     pub tags: Vec<String>,
     pub dirs: Vec<ProjectDir>,
 }
@@ -55,6 +60,13 @@ pub struct ProjectInput {
     pub contract_period: Option<String>,
     pub delivery_deadline: Option<String>,
     pub status: String,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// 编辑时改归属用：`update_project` 的换区流程读它（`None`/空串/与旧值相同 = 不换区）。
+    /// create **完全不看这一格**（spec §六 第 1 条：恒落活动区，否则一条 IPC 就能把项目造进
+    /// 当前视野外的区）。前端带着旧字段来也要能反序列化，所以 `serde(default)`。
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     pub tags: Vec<String>,
 }
 
@@ -86,6 +98,57 @@ fn validate(input: &ProjectInput) -> AppResult<()> {
     Ok(())
 }
 
+/// 父项校验。`workspace` 是这一行**写入后**所属的区（spec §六 第 3 条：跨区父子边造不出来）：
+/// create 传活动区，update 传 effective 区（Task 4 的换区流程按目标区传）。
+/// 环检测只在同一个区内部才成立，所以那段 SQL 不带区谓词。
+fn validate_parent(
+    conn: &Connection,
+    self_id: Option<&str>,
+    parent_id: Option<&str>,
+    workspace: &str,
+) -> AppResult<()> {
+    let Some(pid) = parent_id else {
+        return Ok(());
+    };
+    if self_id == Some(pid) {
+        return Err(invalid("项目不能把自己设为所属总包"));
+    }
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM projects WHERE id = ?1 AND deleted_at IS NULL AND workspace_id = ?2",
+            params![pid, workspace],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !exists {
+        return Err(AppError::new(
+            "invalid_input",
+            "所属总包不存在或已删除",
+            Some("刷新项目列表后重新选择"),
+        ));
+    }
+    let mut cursor = Some(pid.to_owned());
+    let mut visited = HashSet::new();
+    while let Some(cur) = cursor {
+        if self_id == Some(cur.as_str()) {
+            return Err(invalid("不能把项目挂到自己的子项目下（会形成循环）"));
+        }
+        if !visited.insert(cur.clone()) {
+            return Err(invalid("父子关系存在循环，请先解除循环后再保存"));
+        }
+        cursor = conn
+            .query_row(
+                "SELECT parent_id FROM projects WHERE id = ?1 AND deleted_at IS NULL",
+                [&cur],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+    }
+    Ok(())
+}
+
 /// 只登记路径，绝不创建、移动或改写目标；因此要求绝对路径，
 /// 否则相对路径会随工作目录变化指向不同位置，索引器与「一键打开」都会指错。
 fn validate_path(path: &str) -> AppResult<String> {
@@ -105,13 +168,29 @@ fn path_exists(path: &str) -> bool {
     Path::new(path).exists()
 }
 
+fn write_tx(conn: &Connection) -> AppResult<rusqlite::Transaction<'_>> {
+    // 项目写事务里有「先读旧值/父项、再写」的形态；DEFERRED 在索引 worker 另一连接提交后
+    // 升级写锁会立刻撞 SQLITE_BUSY_SNAPSHOT（不走 busy_timeout），与 set_root_dir 的 risk 8 同族。
+    Ok(rusqlite::Transaction::new_unchecked(
+        conn,
+        TransactionBehavior::Immediate,
+    )?)
+}
+
 pub fn create_project(conn: &Connection, input: &ProjectInput) -> AppResult<Project> {
     validate(input)?;
+    // create 恒落活动区，**不看 `input.workspace_id`**（spec §六 第 1 条）：接受客户端给的区
+    // 就等于开一条「把项目造进当前视野外」的通路。改归属只有一条合法路径 —— update。
+    let workspace = crate::workspace::active_id(conn)?;
+    let parent_id = normalize(input.parent_id.clone());
+    let tx = write_tx(conn)?;
+    validate_parent(&tx, None, parent_id.as_deref(), &workspace)?;
     let id = uuid::Uuid::new_v4().to_string();
-    conn.execute(
+    tx.execute(
         "INSERT INTO projects (id, name, code, manager, customer, contact_name, contact_phone,
-                               contract_no, contract_period, delivery_deadline, status)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                               contract_no, contract_period, delivery_deadline, status, parent_id,
+                               workspace_id)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         params![
             id,
             input.name.trim(),
@@ -124,18 +203,65 @@ pub fn create_project(conn: &Connection, input: &ProjectInput) -> AppResult<Proj
             normalize(input.contract_period.clone()),
             normalize(input.delivery_deadline.clone()),
             input.status,
+            parent_id,
+            workspace,
         ],
     )?;
-    replace_tags(conn, &id, &input.tags)?;
+    replace_tags(&tx, &id, &input.tags)?;
+    project_audit::record_create(&tx, &id, input, &workspace)?;
+    tx.commit()?;
     get_project(conn, &id)
 }
 
 pub fn update_project(conn: &Connection, id: &str, input: &ProjectInput) -> AppResult<Project> {
     validate(input)?;
-    let changed = conn.execute(
+    let parent_id = normalize(input.parent_id.clone());
+    let tx = write_tx(conn)?;
+    let old = get_project(&tx, id)?;
+    // 目标区：`None` 或与旧值相同 = 不换区。`normalize` 顺带把空串当「不改」处理，
+    // 前端新建表单的种子值因此不会造出一个「迁到 id 为空串的区」。
+    let target = normalize(input.workspace_id.clone()).filter(|w| w != &old.workspace_id);
+    let workspace = target.as_deref().unwrap_or(old.workspace_id.as_str());
+
+    // D7 先判：有父（库里的或本次提交的）就不许单独换区。这句必须排在 `validate_parent`
+    // 之前 —— 换区时 `validate_parent` 用的是目标区，库里的父在旧区，会先报「所属总包不存在
+    // 或已删除」，把「子项目不能单独换区」这个真因盖掉。
+    if let Some(target) = &target {
+        if old.parent_id.is_some() || parent_id.is_some() {
+            return Err(invalid(
+                "子项目不能单独换区，请编辑它的父项目（整棵子树一起随迁）",
+            ));
+        }
+        if !crate::workspace::exists(&tx, target)? {
+            return Err(invalid("目标工作区不存在"));
+        }
+    }
+    // 传 **effective 区**（换区时是目标区）：先判父再写，父必须在子即将落座的那个区里。
+    validate_parent(&tx, Some(id), parent_id.as_deref(), workspace)?;
+
+    if let Some(target) = &target {
+        // 一条语句收整棵子树（Step 0 探针：本机 sqlite 3.50.4 OK；bundled 3.53.2 同结论，
+        // WITH 前缀的 UPDATE 自 3.8.3 起就支持）。递归项用 `UNION` 而不是 `UNION ALL`：库里若被人手
+        // 改成环（`validate_parent` 只在命令路径上判，`existing_ancestor_cycle_…` 就是这么造环的），
+        // 不去重会永远走不到尽头；去重后遇到环最多多扫一轮空集。
+        // 软删行也随迁：一个区的软删项目仍占着 `workspace_id`（§五 删除守卫含软删就是这个理由），
+        // 一起带走才不会在旧区留下无主行。
+        // 后代**不动 updated_at**：列表按 updated_at 倒序，随迁不该把整棵子树挤到列表顶上。
+        tx.execute(
+            "WITH RECURSIVE sub(id) AS (
+                SELECT ?2 UNION SELECT p.id FROM projects p JOIN sub s ON p.parent_id = s.id
+             )
+             UPDATE projects SET workspace_id = ?1 WHERE id IN (SELECT id FROM sub)",
+            params![target, id],
+        )?;
+        // 换区跟随（spec §六.4）：活动区跟着子树走，`get_project` 才读得到本次返回的项目。
+        crate::workspace::set_active(&tx, target)?;
+    }
+
+    let changed = tx.execute(
         "UPDATE projects SET name=?2, code=?3, manager=?4, customer=?5, contact_name=?6,
                 contact_phone=?7, contract_no=?8, contract_period=?9, delivery_deadline=?10,
-                status=?11, updated_at=datetime('now')
+                status=?11, parent_id=?12, updated_at=datetime('now')
          WHERE id=?1 AND deleted_at IS NULL",
         params![
             id,
@@ -149,19 +275,36 @@ pub fn update_project(conn: &Connection, id: &str, input: &ProjectInput) -> AppR
             normalize(input.contract_period.clone()),
             normalize(input.delivery_deadline.clone()),
             input.status,
+            parent_id,
         ],
     )?;
     if changed == 0 {
         return Err(not_found(id));
     }
-    replace_tags(conn, id, &input.tags)?;
+    replace_tags(&tx, id, &input.tags)?;
+    project_audit::record_update(&tx, &old, input)?;
+    tx.commit()?;
     get_project(conn, id)
 }
 
 /// 软删除：数据模型带 deleted_at 是「先单人、预留多人」的唯一代价，
 /// 保留行才能在未来同步时区分「删除」与「本机从未有过」。
 pub fn delete_project(conn: &Connection, id: &str) -> AppResult<()> {
-    let changed = conn.execute(
+    let tx = write_tx(conn)?;
+    let old = get_project(&tx, id)?;
+    let children: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM projects WHERE parent_id = ?1 AND deleted_at IS NULL",
+        [id],
+        |r| r.get(0),
+    )?;
+    if children > 0 {
+        return Err(AppError::new(
+            "invalid_input",
+            &format!("项目「{}」下还有 {children} 个未删除的子项目，请先调整归属或删除子项目", old.name),
+            Some("子项目删除或改挂到其他项目后，本项才能删除"),
+        ));
+    }
+    let changed = tx.execute(
         "UPDATE projects SET deleted_at = datetime('now'), updated_at = datetime('now')
          WHERE id = ?1 AND deleted_at IS NULL",
         [id],
@@ -169,17 +312,20 @@ pub fn delete_project(conn: &Connection, id: &str) -> AppResult<()> {
     if changed == 0 {
         return Err(not_found(id));
     }
+    project_audit::record_delete(&tx, &old)?;
+    tx.commit()?;
     Ok(())
 }
 
 pub fn list_projects(conn: &Connection) -> AppResult<Vec<Project>> {
+    let workspace = crate::workspace::active_id(conn)?;
     let mut rows = conn.prepare(
         "SELECT id, name, code, manager, customer, contact_name, contact_phone,
-                contract_no, contract_period, delivery_deadline, status
-         FROM projects WHERE deleted_at IS NULL ORDER BY updated_at DESC",
+                contract_no, contract_period, delivery_deadline, status, parent_id, workspace_id
+         FROM projects WHERE deleted_at IS NULL AND workspace_id = ?1 ORDER BY updated_at DESC",
     )?;
     let mut projects: Vec<Project> = rows
-        .query_map([], |r| {
+        .query_map(params![workspace], |r| {
             Ok(Project {
                 id: r.get(0)?,
                 name: r.get(1)?,
@@ -192,6 +338,8 @@ pub fn list_projects(conn: &Connection) -> AppResult<Vec<Project>> {
                 contract_period: r.get(8)?,
                 delivery_deadline: r.get(9)?,
                 status: r.get(10)?,
+                parent_id: r.get(11)?,
+                workspace_id: r.get(12)?,
                 tags: Vec::new(),
                 dirs: Vec::new(),
             })
@@ -246,9 +394,9 @@ pub fn get_project(conn: &Connection, id: &str) -> AppResult<Project> {
     let base = conn
         .query_row(
             "SELECT name, code, manager, customer, contact_name, contact_phone,
-                    contract_no, contract_period, delivery_deadline, status
-             FROM projects WHERE id = ?1 AND deleted_at IS NULL",
-            [id],
+                    contract_no, contract_period, delivery_deadline, status, parent_id, workspace_id
+             FROM projects WHERE id = ?1 AND deleted_at IS NULL AND workspace_id = ?2",
+            params![id, crate::workspace::active_id(conn)?],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -261,6 +409,8 @@ pub fn get_project(conn: &Connection, id: &str) -> AppResult<Project> {
                     r.get::<_, Option<String>>(7)?,
                     r.get::<_, Option<String>>(8)?,
                     r.get::<_, String>(9)?,
+                    r.get::<_, Option<String>>(10)?,
+                    r.get::<_, String>(11)?,
                 ))
             },
         )
@@ -286,6 +436,8 @@ pub fn get_project(conn: &Connection, id: &str) -> AppResult<Project> {
         contract_period: base.7,
         delivery_deadline: base.8,
         status: base.9,
+        parent_id: base.10,
+        workspace_id: base.11,
         tags,
         dirs,
     })
@@ -346,8 +498,11 @@ fn replace_tags(conn: &Connection, project_id: &str, tags: &[String]) -> AppResu
 /// 刚回收的行被写回来。即时那一半由这里的 `clear_project` 负责，被写回来的那一半由
 /// `index_job::sweep_unrooted_projects` 在本轮末尾（最迟下一轮末尾）收敛；本轮不引入跨连接互斥。
 pub fn set_root_dir(conn: &Connection, project_id: &str, input: &DirInput) -> AppResult<ProjectDir> {
+    crate::workspace::ensure_active_project(conn, project_id)?;
     let path = validate_path(&input.path)?;
     get_project(conn, project_id)?;
+    // `old` 的读必须留在事务外 —— 挪进来会让本事务变成先读后写的 DEFERRED 形态，
+    // 触发 SQLite 的立即 `SQLITE_BUSY` 而不走 `busy_timeout`（规格风险 8 的降级就靠这个形状）。
     let old = conn
         .query_row(
             "SELECT path FROM project_dirs WHERE project_id = ?1 AND kind = 'root'",
@@ -355,11 +510,16 @@ pub fn set_root_dir(conn: &Connection, project_id: &str, input: &DirInput) -> Ap
             |r| r.get::<_, String>(0),
         )
         .optional()?;
-    conn.execute("DELETE FROM project_dirs WHERE project_id = ?1 AND kind = 'root'", [project_id])?;
-    conn.execute(
+    // 两条语句必须原子：轮末的 sweep 落在中间会把「刚删掉旧 root」误读成「这项目没 root 行」，
+    // 连带清掉整项目索引行（M3 残留 11）。`unchecked_transaction` 收 &Connection ⇒ 签名不动；
+    // 中途 Err 时它的 Drop 是 DropBehavior::Rollback（vendored transaction.rs 已核，见事实 9）。
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM project_dirs WHERE project_id = ?1 AND kind = 'root'", [project_id])?;
+    tx.execute(
         "INSERT INTO project_dirs (id, project_id, kind, path, label, sort) VALUES (?1,?2,'root',?3,?4,0)",
         params![uuid::Uuid::new_v4().to_string(), project_id, path, normalize(input.label.clone())],
     )?;
+    tx.commit()?;
     // 只有「旧根存在且指向别处」才回收。同一路径重复登记不许清空索引：那会把一次
     // 无意义的登记重写升级成几十 GB 的全量重抽。
     if old.is_some_and(|old_path| old_path != path) {
@@ -369,6 +529,7 @@ pub fn set_root_dir(conn: &Connection, project_id: &str, input: &DirInput) -> Ap
 }
 
 pub fn add_entry_dir(conn: &Connection, project_id: &str, input: &DirInput) -> AppResult<ProjectDir> {
+    crate::workspace::ensure_active_project(conn, project_id)?;
     let path = validate_path(&input.path)?;
     get_project(conn, project_id)?;
     conn.execute(
@@ -399,6 +560,7 @@ pub fn add_entry_dir(conn: &Connection, project_id: &str, input: &DirInput) -> A
 /// 这里负责即时回收那一半，被写回来的那一半由 `index_job::sweep_unrooted_projects` 在本轮末尾
 /// （最迟下一轮末尾）收敛；软删项目的行不在 sweep 范围内，那是留给恢复的。
 pub fn remove_dir(conn: &Connection, project_id: &str, dir_id: &str) -> AppResult<()> {
+    crate::workspace::ensure_active_project(conn, project_id)?;
     // 先读 kind 再删：删掉之后就问不出这一行原本是 root 还是 entry 了。
     let kind = conn
         .query_row(
@@ -455,6 +617,8 @@ mod tests {
             contract_period: None,
             delivery_deadline: None,
             status: "开发".into(),
+            parent_id: None,
+            workspace_id: None,
             tags: vec!["政务".into(), " 政务 ".into(), "".into()],
         }
     }
@@ -681,5 +845,480 @@ mod tests {
 
         assert_eq!(both_sides(&conn, &p.id), before, "删 entry 目录不许清掉索引行");
         assert_eq!(doc_hits(&conn, "验收", 20).unwrap().len(), 1, "删 entry 之后正文照旧可搜");
+    }
+
+    /// 残留 11：`set_root_dir` 原来是 DELETE + INSERT 两条独立的自动提交语句，作业轮末的
+    /// `sweep_unrooted_projects` 恰好落在两条之间就会把该项目看成「无 root 行」⇒ 整项目索引行被清。
+    /// 包进一个事务后这个窗口不存在。回滚探针用「同路径的 entry 行」：DELETE root 先成功，
+    /// INSERT 必撞 `UNIQUE (project_id, path)`，于是能观测到 DELETE 有没有被一起回滚。
+    /// 变异：把事务拆回两条 `conn.execute` ⇒ 第二条断言红（旧 root 行已自动提交掉了）。
+    #[test]
+    fn a_failed_root_replacement_keeps_the_old_root_row() {
+        let c = crate::db::open_in_memory().unwrap();
+        let p = create_project(&c, &input("事务验证")).unwrap();
+        add_entry_dir(&c, &p.id, &DirInput { path: "E:/同一路径".into(), label: None, sort: None }).unwrap();
+        set_root_dir(&c, &p.id, &DirInput { path: "E:/旧根".into(), label: None, sort: None }).unwrap();
+
+        let err = set_root_dir(&c, &p.id, &DirInput { path: "E:/同一路径".into(), label: None, sort: None })
+            .expect_err("INSERT 该撞 UNIQUE(project_id, path)：entry 行已经占了那个路径");
+        assert_eq!(err.code, "db_failed", "rusqlite 的约束错误走 error.rs 那条 From，不该被翻译成别的码");
+
+        let root: Option<String> = c
+            .query_row(
+                "SELECT path FROM project_dirs WHERE project_id = ?1 AND kind = 'root'",
+                [&p.id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(root.as_deref(), Some("E:/旧根"), "INSERT 失败必须把 DELETE 一起回滚");
+        let dirs: i64 = c
+            .query_row("SELECT count(*) FROM project_dirs WHERE project_id = ?1", [&p.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(dirs, 2, "entry 与旧 root 都该还在：一次失败的改指不许留下半张表");
+    }
+
+    #[test]
+    fn create_with_parent_roundtrips_in_get_and_list() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let parent = create_project(&conn, &input("总包")).unwrap();
+        let mut child_input = input("子项目");
+        child_input.parent_id = Some(parent.id.clone());
+        let child = create_project(&conn, &child_input).unwrap();
+
+        assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+        assert_eq!(
+            get_project(&conn, &child.id).unwrap().parent_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+        let listed = list_projects(&conn).unwrap();
+        assert_eq!(
+            listed.iter().find(|p| p.id == child.id).unwrap().parent_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+    }
+
+    #[test]
+    fn update_moves_project_and_can_clear_parent() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let a = create_project(&conn, &input("总包甲")).unwrap();
+        let b = create_project(&conn, &input("总包乙")).unwrap();
+        let mut child_input = input("子项目");
+        child_input.parent_id = Some(a.id.clone());
+        let child = create_project(&conn, &child_input).unwrap();
+
+        let mut move_input = input("子项目");
+        move_input.parent_id = Some(b.id.clone());
+        let moved = update_project(&conn, &child.id, &move_input).unwrap();
+        assert_eq!(moved.parent_id.as_deref(), Some(b.id.as_str()));
+
+        let mut clear_input = input("子项目");
+        clear_input.parent_id = None;
+        let cleared = update_project(&conn, &child.id, &clear_input).unwrap();
+        assert_eq!(cleared.parent_id, None);
+    }
+
+    #[test]
+    fn self_parent_is_rejected() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let p = create_project(&conn, &input("自指项目")).unwrap();
+        let mut self_input = input("自指项目");
+        self_input.parent_id = Some(p.id.clone());
+
+        let err = update_project(&conn, &p.id, &self_input).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("自己"), "{}", err.message);
+    }
+
+    #[test]
+    fn descendant_parent_is_rejected_as_a_cycle() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let a = create_project(&conn, &input("总包")).unwrap();
+        let mut b_input = input("子项目");
+        b_input.parent_id = Some(a.id.clone());
+        let b = create_project(&conn, &b_input).unwrap();
+        let mut c_input = input("孙项目");
+        c_input.parent_id = Some(b.id.clone());
+        let c = create_project(&conn, &c_input).unwrap();
+
+        let mut cycle_input = input("总包");
+        cycle_input.parent_id = Some(c.id.clone());
+        let err = update_project(&conn, &a.id, &cycle_input).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("循环"), "{}", err.message);
+
+        let mut direct_input = input("总包");
+        direct_input.parent_id = Some(b.id.clone());
+        assert_eq!(
+            update_project(&conn, &a.id, &direct_input).unwrap_err().code,
+            "invalid_input",
+            "直接挂到自己的子项目也必须拒"
+        );
+    }
+
+    #[test]
+    fn existing_ancestor_cycle_is_rejected_on_create_and_update() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let a = create_project(&conn, &input("环甲")).unwrap();
+        let b = create_project(&conn, &input("环乙")).unwrap();
+        // 绕过命令层造既有环：A→B→A
+        conn.execute(
+            "UPDATE projects SET parent_id = ?1 WHERE id = ?2",
+            rusqlite::params![b.id, a.id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE projects SET parent_id = ?1 WHERE id = ?2",
+            rusqlite::params![a.id, b.id],
+        )
+        .unwrap();
+
+        let mut create_input = input("环外新子项");
+        create_input.parent_id = Some(a.id.clone());
+        let err = create_project(&conn, &create_input).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("循环"), "{}", err.message);
+
+        let c = create_project(&conn, &input("环外项目")).unwrap();
+        let mut update_input = input("环外项目");
+        update_input.parent_id = Some(b.id.clone());
+        let err = update_project(&conn, &c.id, &update_input).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("循环"), "{}", err.message);
+    }
+
+    #[test]
+    fn missing_or_deleted_parent_is_rejected() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let mut orphan_input = input("孤儿项目");
+        orphan_input.parent_id = Some("no-such-parent".into());
+        let err = create_project(&conn, &orphan_input).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("不存在"), "{}", err.message);
+        assert_eq!(err.hint.as_deref(), Some("刷新项目列表后重新选择"));
+
+        let p = create_project(&conn, &input("待删总包")).unwrap();
+        delete_project(&conn, &p.id).unwrap();
+        let mut deleted_input = input("新子项目");
+        deleted_input.parent_id = Some(p.id.clone());
+        let err = create_project(&conn, &deleted_input).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("已删除"), "{}", err.message);
+    }
+
+    #[test]
+    fn archived_project_can_still_be_a_parent() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let mut archived_input = input("已归档总包");
+        archived_input.status = "归档".into();
+        let parent = create_project(&conn, &archived_input).unwrap();
+
+        let mut child_input = input("子项目");
+        child_input.parent_id = Some(parent.id.clone());
+        let child = create_project(&conn, &child_input).unwrap();
+        assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+    }
+
+    #[test]
+    fn delete_is_blocked_while_live_children_exist() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let parent = create_project(&conn, &input("总包")).unwrap();
+        let mut child_input = input("子项目");
+        child_input.parent_id = Some(parent.id.clone());
+        let child = create_project(&conn, &child_input).unwrap();
+
+        let err = delete_project(&conn, &parent.id).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("还有 1 个未删除的子项目"), "文案必须点名子项数量：{}", err.message);
+        assert!(get_project(&conn, &parent.id).is_ok(), "被拒后父项目必须还在");
+
+        delete_project(&conn, &child.id).unwrap();
+        delete_project(&conn, &parent.id).unwrap();
+        assert_eq!(get_project(&conn, &parent.id).unwrap_err().code, "not_found");
+    }
+
+    #[test]
+    fn a_soft_deleted_child_does_not_block_the_parent() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let parent = create_project(&conn, &input("总包")).unwrap();
+        let mut child_input = input("子项目");
+        child_input.parent_id = Some(parent.id.clone());
+        let child = create_project(&conn, &child_input).unwrap();
+
+        delete_project(&conn, &child.id).unwrap();
+        delete_project(&conn, &parent.id).unwrap_or_else(|e| {
+            panic!("已软删的子项目不该阻塞父项目删除：{e}");
+        });
+    }
+
+    #[test]
+    fn update_of_missing_project_reports_not_found_before_parent_errors() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let mut bad_input = input("不存在项目");
+        bad_input.parent_id = Some("no-such-parent".into());
+
+        let err = update_project(&conn, "no-such-id", &bad_input).unwrap_err();
+        assert_eq!(err.code, "not_found", "未知 id 必须先报 not_found，父项校验不能抢先");
+    }
+
+    /// create 必须写活动区，**忽略客户端塞进来的区 id**（spec §六 第 1 条）：
+    /// 接受它就能用一条 IPC 把项目造进当前视野看不见的区，变成哪一区都找不到的孤儿。
+    #[test]
+    fn create_project_ignores_input_workspace() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        let mut input = input("孤儿防御");
+        input.workspace_id = Some(b.id.clone());
+
+        let p = create_project(&conn, &input).unwrap();
+        assert_eq!(p.workspace_id, crate::workspace::DEFAULT_ID, "create 恒落活动区，不吃 input");
+
+        // 它只能从活动区的视野里被读到：切去乙区之后列表必须是空的。
+        crate::workspace::switch(&conn, &b.id).unwrap();
+        assert!(list_projects(&conn).unwrap().is_empty(), "被塞进别区的项目不能出现在乙区列表里");
+        assert_eq!(get_project(&conn, &p.id).unwrap_err().code, "not_found");
+    }
+
+    /// 读路径的两个入口都要收窄：列表按区过滤，详情跨区读不到（`/project/$id` 深链因此天然翻不过去）。
+    #[test]
+    fn list_and_get_are_scoped_to_active_workspace() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let a = create_project(&conn, &input("默认区项目")).unwrap();
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        crate::workspace::switch(&conn, &b.id).unwrap();
+        let b_input = input("乙区项目");
+        let b_project = create_project(&conn, &b_input).unwrap();
+
+        let in_b: Vec<String> = list_projects(&conn).unwrap().into_iter().map(|p| p.id).collect();
+        assert_eq!(in_b, vec![b_project.id.clone()], "列表只出活动区：{in_b:?}");
+        assert_eq!(get_project(&conn, &b_project.id).unwrap().workspace_id, b.id);
+        assert_eq!(get_project(&conn, &a.id).unwrap_err().code, "not_found", "跨区 id 与不存在的 id 同码");
+
+        crate::workspace::switch(&conn, crate::workspace::DEFAULT_ID).unwrap();
+        let in_default: Vec<String> = list_projects(&conn).unwrap().into_iter().map(|p| p.id).collect();
+        assert_eq!(in_default, vec![a.id.clone()], "切回来又是另一份列表：{in_default:?}");
+    }
+
+    /// 跨区父子边必须造不出来：父项存在性那条 SQL 加区谓词（spec §六）。
+    /// 用裸 SQL 把一个项目挪到别区，模拟「父在乙区、子想落进默认区」这个不该存在的跨区父子边。
+    #[test]
+    fn parent_must_live_in_the_active_workspace() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        let parent = create_project(&conn, &input("总包甲")).unwrap();
+        conn.execute(
+            "UPDATE projects SET workspace_id = ?1 WHERE id = ?2",
+            rusqlite::params![b.id, parent.id],
+        )
+        .unwrap();
+
+        let mut child = input("子项目乙");
+        child.parent_id = Some(parent.id.clone());
+        let err = create_project(&conn, &child).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(
+            err.message.contains("所属总包不存在或已删除"),
+            "文案要指名归属问题：{}",
+            err.message
+        );
+        assert_eq!(list_projects(&conn).unwrap().len(), 0, "默认区里此刻没有项目：父项已被挪走");
+    }
+
+    /// 三层树随根换区，并且**换区后活动区跟随到目标区**，返回值仍在当前视野里读得到
+    /// （spec §六.4：不跟随的话 `update_project` 末尾那次 `get_project` 会 not_found，
+    /// 于是这次保存「其实成功了但界面报失败」）。
+    #[test]
+    fn move_subtree_follows_root_and_keeps_return_visible() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let root = create_project(&conn, &input("总包甲")).unwrap();
+        let mut child_in = input("子项目乙");
+        child_in.parent_id = Some(root.id.clone());
+        let child = create_project(&conn, &child_in).unwrap();
+        let mut grand_in = input("孙项目丙");
+        grand_in.parent_id = Some(child.id.clone());
+        let grand = create_project(&conn, &grand_in).unwrap();
+        let mut soft_in = input("软删子项");
+        soft_in.parent_id = Some(child.id.clone());
+        let soft = create_project(&conn, &soft_in).unwrap();
+        conn.execute(
+            "UPDATE projects SET deleted_at = datetime('now') WHERE id = ?1",
+            [&soft.id],
+        )
+        .unwrap();
+        // 钉死后代时间戳：随迁若顺手改 updated_at，会在这里立即红（同秒精度下不断言会假绿）。
+        conn.execute(
+            "UPDATE projects SET updated_at = '2000-01-01 00:00:00' WHERE id IN (?1, ?2, ?3)",
+            rusqlite::params![&child.id, &grand.id, &soft.id],
+        )
+        .unwrap();
+
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        let mut move_in = input("总包甲");
+        move_in.parent_id = None;
+        move_in.workspace_id = Some(b.id.clone());
+        let moved = update_project(&conn, &root.id, &move_in).unwrap();
+        assert_eq!(moved.workspace_id, b.id, "返回值要能读得到，区也确实是目标区");
+
+        assert_eq!(
+            crate::workspace::active_id(&conn).unwrap(),
+            b.id,
+            "换区后活动区跟随（spec §六.4 的返回契约前提）"
+        );
+        // 不断顺序：根项目本次主 UPDATE 动了 `updated_at`，反而排到最前，子与孙同秒序不可靠。
+        // 本 Task 的判据是「三层齐、且都在乙区」。
+        let mut ids: Vec<String> = list_projects(&conn).unwrap().into_iter().map(|p| p.id).collect();
+        ids.sort();
+        let mut want = vec![root.id.clone(), child.id.clone(), grand.id.clone()];
+        want.sort();
+        assert_eq!(ids, want, "整棵子树三层都要在乙区：{ids:?}");
+
+        let read = |id: &str| -> (String, String) {
+            conn.query_row(
+                "SELECT workspace_id, updated_at FROM projects WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(read(&soft.id).0, b.id, "软删后代也要随迁：{soft:?}");
+        assert_eq!(read(&child.id).1, "2000-01-01 00:00:00", "后代 updated_at 不许动");
+        assert_eq!(read(&grand.id).1, "2000-01-01 00:00:00", "后代 updated_at 不许动");
+        assert_eq!(read(&soft.id).1, "2000-01-01 00:00:00", "软删后代 updated_at 不许动");
+
+        crate::workspace::switch(&conn, crate::workspace::DEFAULT_ID).unwrap();
+        assert!(list_projects(&conn).unwrap().is_empty(), "旧区必须一台不剩");
+    }
+
+    /// 有父的项目不许单独换区（D7）。两个方向都要拒：库里已有父、或本次提交里刚指定了父。
+    #[test]
+    fn child_project_cannot_move_alone() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let parent = create_project(&conn, &input("总包甲")).unwrap();
+        let mut child_in = input("子项目乙");
+        child_in.parent_id = Some(parent.id.clone());
+        let child = create_project(&conn, &child_in).unwrap();
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+
+        let mut move_in = input("子项目乙");
+        move_in.parent_id = Some(parent.id.clone());
+        move_in.workspace_id = Some(b.id.clone());
+        let err = update_project(&conn, &child.id, &move_in).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("子项目不能单独换区"), "文案要点名随迁：{}", err.message);
+
+        // 摘父 + 换区同一次保存也要拒（否则会绕过子树前提）。
+        let mut detach_and_move = input("子项目乙");
+        detach_and_move.parent_id = None;
+        detach_and_move.workspace_id = Some(b.id.clone());
+        assert_eq!(update_project(&conn, &child.id, &detach_and_move).unwrap_err().code, "invalid_input");
+
+        // 数据一个字节没变：区、父、活动区都还在原位。
+        assert_eq!(get_project(&conn, &child.id).unwrap().workspace_id, crate::workspace::DEFAULT_ID);
+        assert_eq!(
+            get_project(&conn, &child.id).unwrap().parent_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+        assert_eq!(crate::workspace::active_id(&conn).unwrap(), crate::workspace::DEFAULT_ID);
+    }
+
+    /// 目标区必须真实存在（spec §六.3 第 1 条）：拒绝且一行不写、活动区不动。
+    #[test]
+    fn move_to_a_missing_workspace_is_rejected() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let root = create_project(&conn, &input("总包甲")).unwrap();
+
+        let mut move_in = input("总包甲");
+        move_in.workspace_id = Some("no-such-workspace".to_owned());
+        let err = update_project(&conn, &root.id, &move_in).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("目标工作区不存在"), "文案要点名目标区：{}", err.message);
+
+        let ws: String = conn
+            .query_row("SELECT workspace_id FROM projects WHERE id = ?1", [&root.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ws, crate::workspace::DEFAULT_ID, "被拒的换区不得改行");
+        assert_eq!(crate::workspace::active_id(&conn).unwrap(), crate::workspace::DEFAULT_ID);
+    }
+
+    /// 顶层项目在同一次保存里「指定父 + 换区」也要拒（D7 的 `parent_id.is_some()` 半边）。
+    #[test]
+    fn root_cannot_move_while_attaching_to_a_parent() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let root = create_project(&conn, &input("总包甲")).unwrap();
+        let parent = create_project(&conn, &input("另一个总包")).unwrap();
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+
+        let mut move_in = input("总包甲");
+        move_in.parent_id = Some(parent.id.clone());
+        move_in.workspace_id = Some(b.id.clone());
+        let err = update_project(&conn, &root.id, &move_in).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("子项目不能单独换区"), "文案要点名随迁：{}", err.message);
+        assert_eq!(get_project(&conn, &root.id).unwrap().parent_id, None, "被拒后仍是顶层");
+        assert_eq!(crate::workspace::active_id(&conn).unwrap(), crate::workspace::DEFAULT_ID);
+    }
+
+    /// 半途失败不许留下「父在本区、子在别区、当前区已跟过去」。
+    /// 造失败的那一刀选在**子树 UPDATE 与 set_active 之后**：把日志表 DROP 掉，
+    /// `record_update` 就必失败（与 M14 的 `audit_insert_failure_rolls_back_project_write` 同一手法，
+    /// 不用给生产代码开测试注入点）。这样断的才是「三步同事务」，而不是「早退得早」。
+    #[test]
+    fn move_is_atomic_when_the_log_write_fails() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let root = create_project(&conn, &input("总包甲")).unwrap();
+        let mut child_in = input("子项目乙");
+        child_in.parent_id = Some(root.id.clone());
+        let child = create_project(&conn, &child_in).unwrap();
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+
+        conn.execute("DROP TABLE project_audit_logs", []).unwrap();
+
+        let mut move_in = input("总包甲");
+        move_in.parent_id = None;
+        move_in.workspace_id = Some(b.id.clone());
+        let err = update_project(&conn, &root.id, &move_in).unwrap_err();
+        assert_eq!(err.code, "db_failed", "日志写不进 ⇒ 整个项目写回滚：{:?}", err.code);
+
+        // get_project 现在按活动区过滤，所以这里全部走裸 SQL，读库里的真实形状。
+        let of = |id: &str| conn
+            .query_row("SELECT workspace_id FROM projects WHERE id = ?1", [id], |r| r.get::<_, String>(0))
+            .unwrap();
+        assert_eq!(of(&root.id), crate::workspace::DEFAULT_ID, "根没动才算回滚干净");
+        assert_eq!(of(&child.id), crate::workspace::DEFAULT_ID, "子树不能留在目标区");
+        assert_eq!(
+            crate::workspace::active_id(&conn).unwrap(),
+            crate::workspace::DEFAULT_ID,
+            "跟随那一句也必须一起回滚，否则界面停在空区"
+        );
+    }
+
+    /// 三个目录 mutator 都不许碰别区项目（M15 spec §4.2）：跨区与不存在同走 not_found，且不落行。
+    /// `remove_dir` 故意拿**本区先登记好的真 dir_id**：传任意串的话，守卫删掉也照样 not_found，这条就红不了。
+    #[test]
+    fn directory_mutators_reject_a_foreign_project() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let p = create_project(&conn, &input("目录守卫项目")).unwrap();
+        let dir = DirInput { path: "C:/m15-scope/root".to_owned(), label: None, sort: None };
+        add_entry_dir(&conn, &p.id, &dir).unwrap();
+        let dir_id = get_project(&conn, &p.id).unwrap().dirs[0].id.clone();
+
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        conn.execute(
+            "UPDATE projects SET workspace_id = ?1 WHERE id = ?2",
+            rusqlite::params![b.id, p.id],
+        )
+        .unwrap();
+
+        assert_eq!(set_root_dir(&conn, &p.id, &dir).unwrap_err().code, "not_found");
+        assert_eq!(add_entry_dir(&conn, &p.id, &dir).unwrap_err().code, "not_found");
+        assert_eq!(remove_dir(&conn, &p.id, &dir_id).unwrap_err().code, "not_found");
+        // 非法路径 + 跨区：守卫必须在 validate_path 之前，否则会回 invalid_input（暴露路径形状）。
+        let bad = DirInput { path: "relative/dir".to_owned(), label: None, sort: None };
+        assert_eq!(set_root_dir(&conn, &p.id, &bad).unwrap_err().code, "not_found");
+        assert_eq!(add_entry_dir(&conn, &p.id, &bad).unwrap_err().code, "not_found");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_dirs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "被拒的登记一条都不许多，跨区的那行也没被删");
     }
 }

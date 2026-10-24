@@ -2,7 +2,16 @@ import type { DocHit } from "@/types/index";
 
 // 与 Rust 侧 search::FieldHit 一一对应（serde 已转 camelCase）。
 // source 只用来分组，不参与任何权限判断。
-export type HitSource = "project" | "env" | "credential" | "server" | "link" | "note";
+export type HitSource =
+  | "project"
+  | "env"
+  | "credential"
+  | "server"
+  | "link"
+  | "note"
+  | "daily"
+  | "todo"
+  | "expiry";
 
 export interface FieldHit {
   source: HitSource;
@@ -21,6 +30,9 @@ export const SOURCE_LABELS: Record<HitSource, string> = {
   server: "服务器",
   link: "外部链接",
   note: "备注台账",
+  daily: "日报",
+  todo: "待办",
+  expiry: "到期事项",
 };
 
 // —— M4 统一检索的线格式，与 Rust 侧 search.rs / doc_preview.rs 逐字段对应（serde camelCase）。

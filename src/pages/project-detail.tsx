@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
-import { ArrowLeft, Copy, ExternalLink, FolderOpen, FolderPlus, Pencil, Plus, X } from "lucide-react";
+import { ArrowLeft, Copy, ExternalLink, FilePlus, FolderOpen, FolderPlus, Pencil, Plus, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,8 +21,14 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { ProjectForm } from "@/components/project-form";
 import { LedgerPanel } from "@/components/ledger-panel";
-import { copyText, openFolder, pickFolder, revealFolder } from "@/lib/api";
+import { LedgerExport } from "@/components/ledger-export";
+import { MilestonePanel } from "@/components/milestone-panel";
+import { ExpiryPanel } from "@/components/expiry-panel";
+import { VersionPanel } from "@/components/version-panel";
+import { copyText, openFolder, pickFile, pickFolder, revealFolder } from "@/lib/api";
+import { parentCandidates } from "@/lib/project-tree";
 import { useProjectsStore } from "@/stores/projects";
+import { useWorkspacesStore } from "@/stores/workspaces";
 import { toInput, type ProjectDir } from "@/types/project";
 
 function Info({ label, value }: { label: string; value: string | null }) {
@@ -50,6 +56,8 @@ export function ProjectDetailPage() {
   } = useProjectsStore();
 
   const project = items.find((p) => p.id === projectId);
+  const workspaces = useWorkspacesStore((s) => s.items);
+  const refreshWorkspaces = useWorkspacesStore((s) => s.refresh);
   const [editing, setEditing] = useState(false);
   const [manualPath, setManualPath] = useState("");
   const [manualLabel, setManualLabel] = useState("");
@@ -57,9 +65,17 @@ export function ProjectDetailPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 
+  // 一次性拉取守卫。原来的条件带 `!loading`，而 store 的初值就是 `loading: true`
+  // 且 app-shell 挂载时刷的是 app/vault 不是项目 ⇒ 深链直达本页时 items 空 + loading 恒真
+  // ⇒ 永不 refresh，页面无限停在「读取项目档案…」（搜索页与待办页的项目链接都能撞上）。
+  // 不改成 store 里 `loading: false`：那会让首帧闪「列表为空」，且库真为空时又变回不拉。
+  const attemptedRefresh = useRef(false);
   useEffect(() => {
-    if (items.length === 0 && !loading) void refresh();
-  }, [items.length, loading, refresh]);
+    void refreshWorkspaces();
+    if (attemptedRefresh.current || items.length > 0) return;
+    attemptedRefresh.current = true;
+    void refresh();
+  }, [items.length, refresh, refreshWorkspaces]);
 
   if (loading) return <p className="px-6 py-8 text-sm text-muted-foreground">读取项目档案…</p>;
   if (!project)
@@ -74,6 +90,11 @@ export function ProjectDetailPage() {
 
   const root = project.dirs.find((d) => d.kind === "root");
   const entries = project.dirs.filter((d) => d.kind === "entry");
+  const parent =
+    project.parentId && project.parentId !== project.id
+      ? items.find((p) => p.id === project.parentId)
+      : undefined;
+  const children = items.filter((p) => p.parentId === project.id && p.id !== project.id);
 
   const guard = async (fn: () => Promise<void>) => {
     try {
@@ -93,6 +114,12 @@ export function ProjectDetailPage() {
   const chooseEntry = () =>
     guard(async () => {
       const path = await pickFolder();
+      if (path) await addEntry(project.id, path);
+    });
+
+  const chooseEntryFile = () =>
+    guard(async () => {
+      const path = await pickFile();
       if (path) await addEntry(project.id, path);
     });
 
@@ -161,6 +188,52 @@ export function ProjectDetailPage() {
         </dl>
       </section>
 
+      <section className="mb-4 rounded-xl border bg-background p-4">
+        <h2 className="mb-3 text-sm font-medium">父子关系</h2>
+        <div className="mb-3 flex items-center gap-2 text-sm">
+          <span className="text-xs text-muted-foreground">所属总包</span>
+          {parent ? (
+            <>
+              <Link
+                to="/projects/$projectId"
+                params={{ projectId: parent.id }}
+                className="truncate font-medium hover:underline"
+              >
+                {parent.name}
+              </Link>
+              <Badge variant="secondary">{parent.status}</Badge>
+            </>
+          ) : project.parentId ? (
+            <span className="text-xs text-muted-foreground">所属总包已删除或不存在</span>
+          ) : (
+            <span className="text-xs text-muted-foreground">无（顶层项目）</span>
+          )}
+        </div>
+        <div className="mb-2 flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">子项目</span>
+          <span className="text-xs text-muted-foreground">共 {children.length} 项</span>
+        </div>
+        {children.length === 0 ? (
+          <p className="text-xs text-muted-foreground">暂无子项目。</p>
+        ) : (
+          <ul className="grid gap-1.5">
+            {children.map((c) => (
+              <li key={c.id} className="flex items-center gap-2 rounded-lg border px-3 py-2">
+                <Link
+                  to="/projects/$projectId"
+                  params={{ projectId: c.id }}
+                  className="min-w-0 truncate text-sm font-medium hover:underline"
+                >
+                  {c.name}
+                </Link>
+                <Badge variant="secondary">{c.status}</Badge>
+                <span className="truncate text-xs text-muted-foreground">{c.code || "—"}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
       <section className="rounded-xl border bg-background p-4">
         <div className="mb-1 flex items-center justify-between">
           <h2 className="text-sm font-medium">本地目录映射</h2>
@@ -196,6 +269,9 @@ export function ProjectDetailPage() {
           <span className="text-xs text-muted-foreground">需求文档、会议纪要等子目录或文件</span>
           <Button size="sm" variant="ghost" className="ml-auto" disabled={saving} onClick={chooseEntry}>
             <FolderPlus /> 选择目录
+          </Button>
+          <Button size="sm" variant="ghost" disabled={saving} onClick={chooseEntryFile}>
+            <FilePlus /> 选择文件
           </Button>
         </div>
 
@@ -254,6 +330,19 @@ export function ProjectDetailPage() {
 
       <div className="mt-4 rounded-xl border bg-background p-4">
         <LedgerPanel projectId={project.id} />
+        <LedgerExport projectId={project.id} projectName={project.name} />
+      </div>
+
+      <div className="mt-4 rounded-xl border bg-background p-4">
+        <MilestonePanel projectId={project.id} />
+      </div>
+
+      <div className="mt-4 rounded-xl border bg-background p-4">
+        <VersionPanel projectId={project.id} />
+      </div>
+
+      <div className="mt-4 rounded-xl border bg-background p-4">
+        <ExpiryPanel projectId={project.id} />
       </div>
 
       <Dialog open={editing} onOpenChange={setEditing}>
@@ -266,10 +355,16 @@ export function ProjectDetailPage() {
             initial={toInput(project)}
             statuses={statuses}
             saving={saving}
+            parentOptions={parentCandidates(items, project.id)}
+            workspaceOptions={workspaces}
             onCancel={() => setEditing(false)}
             onSubmit={async (input) => {
               const ok = await save(project.id, input);
-              if (ok) setEditing(false);
+              if (ok) {
+                setEditing(false);
+                // 换区由后端跟随，本地 activeId 不会自己变；不刷新就停旧区、整页不重挂载。
+                void refreshWorkspaces();
+              }
               return ok;
             }}
           />
