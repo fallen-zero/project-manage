@@ -22,6 +22,8 @@ export interface Project {
   deliveryDeadline: string | null;
   status: string;
   parentId: string | null;
+  /** V11 起 NOT NULL，读出来恒有值。 */
+  workspaceId: string;
   tags: string[];
   dirs: ProjectDir[];
 }
@@ -38,9 +40,14 @@ export interface ProjectInput {
   deliveryDeadline: string | null;
   status: string;
   parentId: string | null;
+  /** 缺省（`undefined`/`null`）= **不改归属**；`create` 一律忽略这一格（后端恒落活动区，
+   *  spec §六 第 1 条）。写成可选属性而不是 `string | null`，是为了不破坏
+   *  `apply-template.ts` / `template-manager.tsx:31` 那几处已有的 `ProjectInput` 字面量。 */
+  workspaceId?: string | null;
   tags: string[];
 }
 
+// 新建表单的初值不含 workspaceId：create 恒落活动区（M15 spec §六），传了也会被后端忽略。
 export const EMPTY_INPUT: ProjectInput = {
   name: "",
   code: "",
@@ -69,6 +76,7 @@ export function toInput(p: Project): ProjectInput {
     deliveryDeadline: p.deliveryDeadline ?? "",
     status: p.status,
     parentId: p.parentId ?? null,
+    workspaceId: p.workspaceId,
     tags: p.tags,
   };
 }

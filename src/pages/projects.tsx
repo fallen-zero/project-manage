@@ -306,6 +306,9 @@ function emptySeed(): Project {
     deliveryDeadline: null,
     status: "立项",
     parentId: null,
+    // 新建不参与区归属：create 恒落活动区（M15 spec §六）。这里给空串只为满足类型，
+    // toInput 之后它会被 normalize 成「不改」，后端也忽略。
+    workspaceId: "",
     tags: [],
     dirs: [],
   };

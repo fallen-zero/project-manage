@@ -5,6 +5,7 @@ import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialo
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type { Project, ProjectInput } from "@/types/project";
 import type { AuditAction, AuditPage } from "@/types/project-audit";
+import type { Workspace } from "@/types/workspace";
 import type { ProjectTemplate, TemplateInput } from "@/types/project-template";
 import type { DocPreview, SearchBundle } from "@/types/search";
 import type {
@@ -57,6 +58,14 @@ export const listAudit = (input: {
   limit?: number;
   offset?: number;
 } = {}) => invoke<AuditPage>("audit_list", input);
+
+// —— M15 工作区（五条同步命令；切换器与「管理工作区」弹窗的唯一出口）——
+export const listWorkspaces = () => invoke<Workspace[]>("workspace_list");
+export const createWorkspace = (name: string) => invoke<Workspace>("workspace_create", { name });
+export const renameWorkspace = (id: string, name: string) =>
+  invoke<Workspace>("workspace_rename", { id, name });
+export const deleteWorkspace = (id: string) => invoke<void>("workspace_delete", { id });
+export const switchWorkspace = (id: string) => invoke<string>("workspace_switch", { id });
 
 // —— M12 项目模板 ——
 export const listTemplates = () => invoke<ProjectTemplate[]>("template_list");
