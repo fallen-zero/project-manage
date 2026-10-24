@@ -2182,7 +2182,7 @@ git commit -m "feat(m15): 检索九段、正文命中与首屏谓词、索引总
 
 **Files:**
 - Create: `src/types/workspace.ts`、`src/lib/workspace-view.ts`、`src/stores/workspaces.ts`、`tests/workspace-view.test.ts`
-- Modify: `src/lib/api.ts`（M14 `listAudit` 之后加五条）、`src/types/project.ts:12-27`（`Project`）、`:29-42`（`ProjectInput`）、`:44-57`（`EMPTY_INPUT`）、`:59-74`（`toInput`）
+- Modify: `src/lib/api.ts`（M14 `listAudit` 之后加五条）、`src/types/project.ts:12-27`（`Project`）、`:29-42`（`ProjectInput`）、`:44-57`（`EMPTY_INPUT`）、`:59-74`（`toInput`）、`src/pages/projects.tsx:295`（`emptySeed` 补 `workspaceId`，否则 `tsc` 先红）
 
 **Interfaces:**
 - Consumes: Task 2 的五条命令名（`workspace_list` / `workspace_create` / `workspace_rename` / `workspace_delete` / `workspace_switch`）与 `Workspace` 的 camelCase 四键。
@@ -2465,7 +2465,7 @@ Run: `npm run build 2>&1 | grep -c "error TS"`
 Expected: `0`。**如果 tsc 报出别的 `Project` 字面量缺 `workspaceId`，就地补齐并在报告里点名补了哪几处** —— 那是本格的活，不留给 Task 8。（`noUnusedLocals: true` 是开着的：本 Step 新建文件里未使用的本地变量会直接红。）
 
 ```bash
-git add src/types/workspace.ts src/types/project.ts src/lib/api.ts src/lib/workspace-view.ts src/stores/workspaces.ts tests/workspace-view.test.ts
+git add src/types/workspace.ts src/types/project.ts src/lib/api.ts src/lib/workspace-view.ts src/stores/workspaces.ts tests/workspace-view.test.ts src/pages/projects.tsx
 git commit -m "feat(m15): 前端工作区线格式/API/store 与三个纯函数（node 71→75）"
 ```
 
