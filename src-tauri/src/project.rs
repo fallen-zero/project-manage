@@ -1125,7 +1125,7 @@ mod tests {
     /// （spec §六.4：不跟随的话 `update_project` 末尾那次 `get_project` 会 not_found，
     /// 于是这次保存「其实成功了但界面报失败」）。
     #[test]
-    fn move_subtree_follows_root_and_the_return_stays_readable() {
+    fn move_subtree_follows_root_and_keeps_return_visible() {
         let conn = crate::db::open_in_memory().unwrap();
         let root = create_project(&conn, &input("总包甲")).unwrap();
         let mut child_in = input("子项目乙");
@@ -1134,6 +1134,20 @@ mod tests {
         let mut grand_in = input("孙项目丙");
         grand_in.parent_id = Some(child.id.clone());
         let grand = create_project(&conn, &grand_in).unwrap();
+        let mut soft_in = input("软删子项");
+        soft_in.parent_id = Some(child.id.clone());
+        let soft = create_project(&conn, &soft_in).unwrap();
+        conn.execute(
+            "UPDATE projects SET deleted_at = datetime('now') WHERE id = ?1",
+            [&soft.id],
+        )
+        .unwrap();
+        // 钉死后代时间戳：随迁若顺手改 updated_at，会在这里立即红（同秒精度下不断言会假绿）。
+        conn.execute(
+            "UPDATE projects SET updated_at = '2000-01-01 00:00:00' WHERE id IN (?1, ?2, ?3)",
+            rusqlite::params![&child.id, &grand.id, &soft.id],
+        )
+        .unwrap();
 
         let b = crate::workspace::create(&conn, "客户乙").unwrap();
         let mut move_in = input("总包甲");
@@ -1154,6 +1168,19 @@ mod tests {
         let mut want = vec![root.id.clone(), child.id.clone(), grand.id.clone()];
         want.sort();
         assert_eq!(ids, want, "整棵子树三层都要在乙区：{ids:?}");
+
+        let read = |id: &str| -> (String, String) {
+            conn.query_row(
+                "SELECT workspace_id, updated_at FROM projects WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        };
+        assert_eq!(read(&soft.id).0, b.id, "软删后代也要随迁：{soft:?}");
+        assert_eq!(read(&child.id).1, "2000-01-01 00:00:00", "后代 updated_at 不许动");
+        assert_eq!(read(&grand.id).1, "2000-01-01 00:00:00", "后代 updated_at 不许动");
+        assert_eq!(read(&soft.id).1, "2000-01-01 00:00:00", "软删后代 updated_at 不许动");
 
         crate::workspace::switch(&conn, crate::workspace::DEFAULT_ID).unwrap();
         assert!(list_projects(&conn).unwrap().is_empty(), "旧区必须一台不剩");
@@ -1188,6 +1215,43 @@ mod tests {
             get_project(&conn, &child.id).unwrap().parent_id.as_deref(),
             Some(parent.id.as_str())
         );
+        assert_eq!(crate::workspace::active_id(&conn).unwrap(), crate::workspace::DEFAULT_ID);
+    }
+
+    /// 目标区必须真实存在（spec §六.3 第 1 条）：拒绝且一行不写、活动区不动。
+    #[test]
+    fn move_to_a_missing_workspace_is_rejected() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let root = create_project(&conn, &input("总包甲")).unwrap();
+
+        let mut move_in = input("总包甲");
+        move_in.workspace_id = Some("no-such-workspace".to_owned());
+        let err = update_project(&conn, &root.id, &move_in).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("目标工作区不存在"), "文案要点名目标区：{}", err.message);
+
+        let ws: String = conn
+            .query_row("SELECT workspace_id FROM projects WHERE id = ?1", [&root.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ws, crate::workspace::DEFAULT_ID, "被拒的换区不得改行");
+        assert_eq!(crate::workspace::active_id(&conn).unwrap(), crate::workspace::DEFAULT_ID);
+    }
+
+    /// 顶层项目在同一次保存里「指定父 + 换区」也要拒（D7 的 `parent_id.is_some()` 半边）。
+    #[test]
+    fn root_cannot_move_while_attaching_to_a_parent() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let root = create_project(&conn, &input("总包甲")).unwrap();
+        let parent = create_project(&conn, &input("另一个总包")).unwrap();
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+
+        let mut move_in = input("总包甲");
+        move_in.parent_id = Some(parent.id.clone());
+        move_in.workspace_id = Some(b.id.clone());
+        let err = update_project(&conn, &root.id, &move_in).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("子项目不能单独换区"), "文案要点名随迁：{}", err.message);
+        assert_eq!(get_project(&conn, &root.id).unwrap().parent_id, None, "被拒后仍是顶层");
         assert_eq!(crate::workspace::active_id(&conn).unwrap(), crate::workspace::DEFAULT_ID);
     }
 

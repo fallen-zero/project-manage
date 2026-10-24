@@ -387,6 +387,11 @@ mod tests {
         assert!(rows[0].changes.iter().all(|c| c.old_value.is_none()));
         assert_eq!(rows[0].changes[1].new_value.as_deref(), Some("P-1"));
         assert_eq!(rows[0].changes[6].new_value.as_deref(), Some("政务、运维"));
+        assert_eq!(
+            rows[0].changes[7].new_value.as_deref(),
+            Some("默认工作区"),
+            "create 记的是落进去的区名，不是裸 id"
+        );
     }
 
     #[test]
@@ -485,6 +490,9 @@ mod tests {
         assert!(rows[0].changes.iter().all(|c| c.new_value.is_none()));
         assert!(rows[0].changes.iter().any(|c| c.field == "name" && c.old_value.as_deref() == Some("甲项目")));
         assert!(rows[0].changes.iter().any(|c| c.field == "tags" && c.old_value.as_deref() == Some("政务、运维")));
+        assert!(rows[0].changes.iter().any(|c| {
+            c.field == "workspaceId" && c.old_value.as_deref() == Some("默认工作区")
+        }));
     }
 
     #[test]
@@ -567,7 +575,7 @@ mod tests {
 
     /// 根换区 ⇒ 恰一条 update 日志、「工作区」那条存两区中文名、随迁的后代不各自出日志。
     #[test]
-    fn workspace_change_is_logged_once_for_the_root() {
+    fn workspace_change_is_logged_once_for_root() {
         let conn = db::open_in_memory().unwrap();
         let root = crate::project::create_project(&conn, &input("总包甲")).unwrap();
         let mut child_in = input("子项目乙");
@@ -617,8 +625,21 @@ mod tests {
         let opts: Vec<&str> = page.projects.iter().map(|p| p.project_id.as_str()).collect();
         assert_eq!(opts, vec![a.id.as_str()], "项目下拉只出活动区有日志的项目：{opts:?}");
 
+        // 硬删的可见性必须在**乙区视野**里验：留在默认区删前删后都看不见 bp，那一步是恒真的。
+        crate::workspace::switch(&conn, &b.id).unwrap();
+        assert!(
+            list(&conn, None, None, None, None)
+                .unwrap()
+                .items
+                .iter()
+                .any(|e| e.project_id == bp.id),
+            "乙区视野里必须能看见 bp 的日志"
+        );
         conn.execute("DELETE FROM projects WHERE id = ?1", [&bp.id]).unwrap();
         let after = list(&conn, None, None, None, None).unwrap();
-        assert!(!after.items.iter().any(|e| e.project_id == bp.id));
+        assert!(
+            !after.items.iter().any(|e| e.project_id == bp.id),
+            "硬删项目行后日志从该区视野消失"
+        );
     }
 }
