@@ -64,11 +64,11 @@
 | 1 | +5（`db.rs` 4 + `backup.rs` 1） | 377 | — | 71 |
 | 2 | +7（`workspace.rs`） | 384 | — | 71 |
 | 3 | +3（`project.rs`） | 387 | — | 71 |
-| 4 | +5（`project.rs` 3 + `project_audit.rs` 2） | 392 | — | 71 |
-| 5 | +7（四模块 4 + `ledger.rs` 1 + 目录 1 + 日报导入 1） | 399 | — | 71 |
-| 6 | +3（`search.rs` 1 + `index_store.rs` 1 + 命令层 1） | 402 | — | 71 |
-| 7 | — | 402 | +4 | 75 |
-| 8 | — | 402 | 0（UI 无测试先例） | 75 |
+| 4 | +7（`project.rs` 5 + `project_audit.rs` 2；其中 M3/M6 两条由 Task 4 评审补上） | 394 | — | 71 |
+| 5 | +7（四模块 4 + `ledger.rs` 1 + 目录 1 + 日报导入 1） | 401 | — | 71 |
+| 6 | +3（`search.rs` 1 + `index_store.rs` 1 + 命令层 1） | 404 | — | 71 |
+| 7 | — | 404 | +4 | 75 |
+| 8 | — | 404 | 0（UI 无测试先例） | 75 |
 
 改名不增数：Task 1 把既有 `v10_schema_meta_reaches_target_version_ten` 改名为 `v11_..._eleven`，条数不变。**如果实现者在本格数出的实数与上表不符，以运行为准并把差异写进账本，不要顺着表改测试。**
 
@@ -1259,7 +1259,7 @@ Expected: 读数落进账本。**两条分支只走一条**：
     /// （spec §六.4：不跟随的话 `update_project` 末尾那次 `get_project` 会 not_found，
     /// 于是这次保存「其实成功了但界面报失败」）。
     #[test]
-    fn move_subtree_follows_root_and_the_return_stays_readable() {
+    fn move_subtree_follows_root_and_keeps_return_visible() {
         let conn = db::open_in_memory().unwrap();
         let root = create_project(&conn, &input("总包甲")).unwrap();
         let mut child_in = input("子项目乙");
@@ -1604,7 +1604,7 @@ pub fn record_create(
 ```rust
     /// 根换区 ⇒ 恰一条 update 日志、「工作区」那条存两区中文名、随迁的后代不各自出日志。
     #[test]
-    fn workspace_change_is_logged_once_for_the_root() {
+    fn workspace_change_is_logged_once_for_root() {
         let conn = db::open_in_memory().unwrap();
         let root = crate::project::create_project(&conn, &input("总包甲")).unwrap();
         let mut child_in = input("子项目乙");
@@ -1666,7 +1666,7 @@ Expected: 新增两条 PASS，既有 audit 测试全绿（`input(name)` 补 `wor
 - [ ] **Step 7: 全量回归 + 提交**
 
 Run: `cd src-tauri && cargo test -j 1 --lib`
-Expected: `392 passed; 0 failed`（387 + 5）。
+Expected: `394 passed; 0 failed`（387 + 7；评审 M3/M6 各补一条守卫）。
 
 ```bash
 git add src-tauri/src/project.rs src-tauri/src/project_audit.rs
@@ -1882,7 +1882,7 @@ Expected: 全绿（cargo 单 target 一次只接一个筛选词，所以分六�
 - [ ] **Step 7: 全量 + 提交**
 
 Run: `cd src-tauri && cargo test -j 1 --lib`
-Expected: `399 passed; 0 failed`（392 + 7）。
+Expected: `401 passed; 0 failed`（394 + 7）。
 
 ```bash
 git add src-tauri/src/todo.rs src-tauri/src/milestone.rs src-tauri/src/expiry.rs src-tauri/src/daily_report.rs src-tauri/src/ledger.rs src-tauri/src/project.rs
@@ -2144,7 +2144,7 @@ Expected: PASS。如果 `find("\n}")` 截到的函数体比预期短（`index_ov
 - [ ] **Step 6: 全量回归**
 
 Run: `cd src-tauri && cargo test -j 1 --lib`
-Expected: `402 passed; 0 failed`（399 + 3）。**这一格最容易红既有测试**：`search.rs` 有四十来条既有测试走 `field_hits`，`index_store.rs` 也是。它们的项目全在默认区 = 活动区，所以红 = 谓词写错位置（例如把 `?3` 绑到 `LIMIT` 之前、或 `run_select` 少传一个实参导致 `params!` 索引错位）。按红的位置改实现，**不许**为了让既有测试绿而放宽谓词。
+Expected: `404 passed; 0 failed`（401 + 3）。**这一格最容易红既有测试**：`search.rs` 有四十来条既有测试走 `field_hits`，`index_store.rs` 也是。它们的项目全在默认区 = 活动区，所以红 = 谓词写错位置（例如把 `?3` 绑到 `LIMIT` 之前、或 `run_select` 少传一个实参导致 `params!` 索引错位）。按红的位置改实现，**不许**为了让既有测试绿而放宽谓词。
 
 - [ ] **Step 7: 提交**
 
@@ -2824,7 +2824,7 @@ git diff --stat master..HEAD -- src-tauri/Cargo.lock src-tauri/Cargo.toml packag
 git rev-list --merges --count --all
 ```
 
-Expected 读数（**期望值不是断言，跑出来不符就报差异并查成因**）：cargo `402 passed`、node `tests 75 / pass 75 / fail 0`、`npm run build` `error TS` 0、`TARGET_VERSION 11`、命令 **75**、async **7**、豁免 **1**（`db.rs`）、`Cargo.lock` **616**、collect **9**、依赖 diff **空**、merge commit **0**。
+Expected 读数（**期望值不是断言，跑出来不符就报差异并查成因**）：cargo `404 passed`、node `tests 75 / pass 75 / fail 0`、`npm run build` `error TS` 0、`TARGET_VERSION 11`、命令 **75**、async **7**、豁免 **1**（`db.rs`）、`Cargo.lock` **616**、collect **9**、依赖 diff **空**、merge commit **0**。
 `grep -c ... | grep -v ":0"` 这类管道会把 `$?` 吞掉：**退出码一律单独 `echo "exit=$?"` 取**（本仓前科：管道 tail 吞掉退出码，把红报成绿）。
 
 - [ ] **Step 2: 十一处变异，逐处下靶 → 跑指定测试 → 记退出码 → 还原**
@@ -2838,8 +2838,8 @@ Expected 读数（**期望值不是断言，跑出来不符就报差异并查成
 | M② | 父项不判同区 | `project.rs` `validate_parent` 里 `AND workspace_id = ?2` 摘掉 | `project::tests::parent_must_live_in_the_active_workspace` |
 | M③ | 子项目可单独换区 | `update_project` 的 `if old.parent_id.is_some() \|\| parent_id.is_some()` 改成 `if false` | `project::tests::child_project_cannot_move_alone` |
 | M④ | create 信任入参区 | `let workspace = crate::workspace::active_id(conn)?;` 改成 `input.workspace_id.clone().filter(\|s\| !s.trim().is_empty()).unwrap_or_else(…active_id…)` | `project::tests::create_project_lands_in_the_active_workspace_not_the_input_one` |
-| M⑤ | 跟随缺失 | `update_project` 里 `crate::workspace::set_active(&tx, target)?;` 注释掉 | `project::tests::move_subtree_follows_root_and_the_return_stays_readable` |
-| M⑥ | 子树 UPDATE 不在同一事务 | `update_project` 里子树那句 `tx.execute(…workspace_id = ?1 WHERE id IN…)` 改成 `conn.execute(…)`（自动提交，跨出事务边界） | `project::tests::move_is_atomic_when_the_log_write_fails`（日志失败时子树已经落在目标区 ⇒ 三条区号断言必红）；同靶下 `move_subtree_follows_root_and_the_return_stays_readable` 仍绿是正常的，它验的是成功路径，不是回滚 |
+| M⑤ | 跟随缺失 | `update_project` 里 `crate::workspace::set_active(&tx, target)?;` 注释掉 | `project::tests::move_subtree_follows_root_and_keeps_return_visible` |
+| M⑥ | 子树 UPDATE 不在同一事务 | `update_project` 里子树那句 `tx.execute(…workspace_id = ?1 WHERE id IN…)` 改成 `conn.execute(…)`（自动提交，跨出事务边界） | `project::tests::move_is_atomic_when_the_log_write_fails`（日志失败时子树已经落在目标区 ⇒ 三条区号断言必红）；同靶下 `move_subtree_follows_root_and_keeps_return_visible` 仍绿是正常的，它验的是成功路径，不是回滚 |
 | M⑦ | 检索只改项目段 | 九段里只给项目段加 `?3`，其余八段的 `AND p.workspace_id = ?3` 摘掉（`collect` 多绑一个实参不会报错，SQLite 允许多余参数） | `search::tests::field_hits_are_scoped_in_every_section` |
 | M⑧ | 首屏谓词与正文不同步 | `index_store.rs:207` `indexed_project_count` 不加区谓词 | `index_store::tests::doc_hits_and_indexed_project_count_use_the_same_scope` |
 | M⑨ | 台账写守卫缺失 | `ledger.rs:212` `soft_delete` 首行的 `ensure_active_row` 摘掉 | `ledger::tests::ledger_read_and_write_paths_are_scoped` |
