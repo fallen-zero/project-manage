@@ -17,7 +17,8 @@ export function nameHint(name: string): string | null {
 }
 
 /** 删除按钮的禁用原因；`null` = 可删。
- *  三条原因的顺序与文案与后端 `workspace::delete` 的三道守卫逐字对应（M15 spec §五）。 */
+ *  顺序与后端 `workspace::delete` 三道守卫一致；前两条逐字同后端，第三条按 spec §8.5 的静态文案
+ *  （后端带软删计数，前端只持有未软删的 projectCount，不硬凑数字）。 */
 export function deleteGuard(ws: Workspace, activeId: string | null): string | null {
   if (ws.id === DEFAULT_WORKSPACE_ID) return "默认工作区不可删除";
   if (activeId !== null && ws.id === activeId) return "当前工作区不可删除，请先切换到其他工作区";

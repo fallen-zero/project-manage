@@ -85,7 +85,8 @@ export const useWorkspacesStore = create<WorkspacesState>((set, get) => {
         set({ saving: false });
       }
       await get().refresh();
-      return true;
+      // refresh 的失败只写 error 不抛；这里如实回报，免得调用方把「后端已换区、本地仍旧区」当成功。
+      return get().error === null;
     },
 
     clearError: () => set({ error: null }),

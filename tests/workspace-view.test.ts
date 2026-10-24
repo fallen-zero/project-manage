@@ -22,6 +22,9 @@ test("区名判据与后端同一口径：trim 非空、上限闭区间", () => 
   assert.equal(nameHint("客户乙"), null);
   assert.equal(nameHint("区".repeat(WORKSPACE_NAME_MAX)), null, "40 字是闭区间");
   assert.match(nameHint("区".repeat(WORKSPACE_NAME_MAX + 1)) ?? "", /不能超过 40 个字符/);
+  // 按码点不是 UTF-16 码元：40 个 emoji 的 .length 是 80，换成 .length 这条会红。
+  assert.equal(nameHint("😀".repeat(WORKSPACE_NAME_MAX)), null, "40 个码点合法");
+  assert.match(nameHint("😀".repeat(WORKSPACE_NAME_MAX + 1)) ?? "", /不能超过 40 个字符/);
 });
 
 test("删除禁用判据的三种原因与可删回 null", () => {
