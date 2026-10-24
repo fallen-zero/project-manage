@@ -2865,7 +2865,7 @@ Expected 读数（**期望值不是断言，跑出来不符就报差异并查成
 | M③ | 子项目可单独换区 | `update_project` 的 `if old.parent_id.is_some() \|\| parent_id.is_some()` 改成 `if false` | `project::tests::child_project_cannot_move_alone` |
 | M④ | create 信任入参区 | `let workspace = crate::workspace::active_id(conn)?;` 改成 `input.workspace_id.clone().filter(\|s\| !s.trim().is_empty()).unwrap_or_else(…active_id…)` | `project::tests::create_project_lands_in_the_active_workspace_not_the_input_one` |
 | M⑤ | 跟随缺失 | `update_project` 里 `crate::workspace::set_active(&tx, target)?;` 注释掉 | `project::tests::move_subtree_follows_root_and_keeps_return_visible` |
-| M⑥ | 子树 UPDATE 不在同一事务 | `update_project` 里子树那句 `tx.execute(…workspace_id = ?1 WHERE id IN…)` 改成 `conn.execute(…)`（自动提交，跨出事务边界） | `project::tests::move_is_atomic_when_the_log_write_fails`（日志失败时子树已经落在目标区 ⇒ 三条区号断言必红）；同靶下 `move_subtree_follows_root_and_keeps_return_visible` 仍绿是正常的，它验的是成功路径，不是回滚 |
+| M⑥ | 子树/主 UPDATE 提前提交、日志不在同一事务 | 把 `replace_tags(&tx, …)` 之后、`project_audit::record_update` 之前插 `tx.commit()?;`，audit 改走 `conn`，删末尾那句 `tx.commit()?;`（原计划写「`tx.execute`→`conn.execute`」是错的：同一连接上的 `conn.execute` 仍在事务里，Task 4 评审 A5 已指出打不红） | `project::tests::move_is_atomic_when_the_log_write_fails`（日志失败时子树/主 UPDATE 已提交 ⇒ 三条区号断言必红）；同靶下 `move_subtree_follows_root_and_keeps_return_visible` 仍绿是正常的，它验的是成功路径，不是回滚 |
 | M⑦ | 检索只改项目段 | 九段里只给项目段加 `?3`，其余八段的 `AND p.workspace_id = ?3` 摘掉（`collect` 多绑一个实参不会报错，SQLite 允许多余参数） | `search::tests::field_hits_are_scoped_in_every_section` |
 | M⑧ | 首屏谓词与正文不同步 | `index_store.rs:207` `indexed_project_count` 不加区谓词 | `index_store::tests::doc_hits_and_indexed_project_count_use_the_same_scope` |
 | M⑨ | 台账写守卫缺失 | `ledger.rs:212` `soft_delete` 首行的 `ensure_active_row` 摘掉 | `ledger::tests::ledger_read_and_write_paths_are_scoped` |
