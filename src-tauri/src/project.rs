@@ -62,12 +62,10 @@ pub struct ProjectInput {
     pub status: String,
     #[serde(default)]
     pub parent_id: Option<String>,
-    /// 编辑时改归属用（Task 4 的换区流程读它）。create **完全不看这一格**（spec §六 第 1 条：
-    /// 恒落活动区，否则一条 IPC 就能把项目造进当前视野外的区）。**字段声明是 Task 2 的跨任务前置**，
-    /// 前端带着旧字段来也要能反序列化，所以 `serde(default)`；本格还没有非测试调用点，
-    /// 中间这一程靠豁免过 `cargo clippy --lib -- -D warnings`（先例：`db.rs:30` 的 `open_in_memory`）。
+    /// 编辑时改归属用：`update_project` 的换区流程读它（`None`/空串/与旧值相同 = 不换区）。
+    /// create **完全不看这一格**（spec §六 第 1 条：恒落活动区，否则一条 IPC 就能把项目造进
+    /// 当前视野外的区）。前端带着旧字段来也要能反序列化，所以 `serde(default)`。
     #[serde(default)]
-    #[allow(dead_code)]
     pub workspace_id: Option<String>,
     pub tags: Vec<String>,
 }
@@ -210,7 +208,7 @@ pub fn create_project(conn: &Connection, input: &ProjectInput) -> AppResult<Proj
         ],
     )?;
     replace_tags(&tx, &id, &input.tags)?;
-    project_audit::record_create(&tx, &id, input)?;
+    project_audit::record_create(&tx, &id, input, &workspace)?;
     tx.commit()?;
     get_project(conn, &id)
 }
@@ -220,8 +218,46 @@ pub fn update_project(conn: &Connection, id: &str, input: &ProjectInput) -> AppR
     let parent_id = normalize(input.parent_id.clone());
     let tx = write_tx(conn)?;
     let old = get_project(&tx, id)?;
-    // 本轮先按「旧行所属区」判父项；Task 4 的换区流程把它换成 effective 值（目标区）。
-    validate_parent(&tx, Some(id), parent_id.as_deref(), old.workspace_id.as_str())?;
+    // 目标区：`None` 或与旧值相同 = 不换区。`normalize` 顺带把空串当「不改」处理，
+    // 前端新建表单的种子值因此不会造出一个「迁到 id 为空串的区」。
+    let target = normalize(input.workspace_id.clone()).filter(|w| w != &old.workspace_id);
+    let workspace = target.as_deref().unwrap_or(old.workspace_id.as_str());
+
+    // D7 先判：有父（库里的或本次提交的）就不许单独换区。这句必须排在 `validate_parent`
+    // 之前 —— 换区时 `validate_parent` 用的是目标区，库里的父在旧区，会先报「所属总包不存在
+    // 或已删除」，把「子项目不能单独换区」这个真因盖掉。
+    if let Some(target) = &target {
+        if old.parent_id.is_some() || parent_id.is_some() {
+            return Err(invalid(
+                "子项目不能单独换区，请编辑它的父项目（整棵子树一起随迁）",
+            ));
+        }
+        if !crate::workspace::exists(&tx, target)? {
+            return Err(invalid("目标工作区不存在"));
+        }
+    }
+    // 传 **effective 区**（换区时是目标区）：先判父再写，父必须在子即将落座的那个区里。
+    validate_parent(&tx, Some(id), parent_id.as_deref(), workspace)?;
+
+    if let Some(target) = &target {
+        // 一条语句收整棵子树（Step 0 探针：本机 sqlite 3.50.4 OK；bundled 3.53.2 同结论，
+        // WITH 前缀的 UPDATE 自 3.8.3 起就支持）。递归项用 `UNION` 而不是 `UNION ALL`：库里若被人手
+        // 改成环（`validate_parent` 只在命令路径上判，`existing_ancestor_cycle_…` 就是这么造环的），
+        // 不去重会永远走不到尽头；去重后遇到环最多多扫一轮空集。
+        // 软删行也随迁：一个区的软删项目仍占着 `workspace_id`（§五 删除守卫含软删就是这个理由），
+        // 一起带走才不会在旧区留下无主行。
+        // 后代**不动 updated_at**：列表按 updated_at 倒序，随迁不该把整棵子树挤到列表顶上。
+        tx.execute(
+            "WITH RECURSIVE sub(id) AS (
+                SELECT ?2 UNION SELECT p.id FROM projects p JOIN sub s ON p.parent_id = s.id
+             )
+             UPDATE projects SET workspace_id = ?1 WHERE id IN (SELECT id FROM sub)",
+            params![target, id],
+        )?;
+        // 换区跟随（spec §六.4）：活动区跟着子树走，`get_project` 才读得到本次返回的项目。
+        crate::workspace::set_active(&tx, target)?;
+    }
+
     let changed = tx.execute(
         "UPDATE projects SET name=?2, code=?3, manager=?4, customer=?5, contact_name=?6,
                 contact_phone=?7, contract_no=?8, contract_period=?9, delivery_deadline=?10,
@@ -1083,5 +1119,109 @@ mod tests {
             err.message
         );
         assert_eq!(list_projects(&conn).unwrap().len(), 0, "默认区里此刻没有项目：父项已被挪走");
+    }
+
+    /// 三层树随根换区，并且**换区后活动区跟随到目标区**，返回值仍在当前视野里读得到
+    /// （spec §六.4：不跟随的话 `update_project` 末尾那次 `get_project` 会 not_found，
+    /// 于是这次保存「其实成功了但界面报失败」）。
+    #[test]
+    fn move_subtree_follows_root_and_the_return_stays_readable() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let root = create_project(&conn, &input("总包甲")).unwrap();
+        let mut child_in = input("子项目乙");
+        child_in.parent_id = Some(root.id.clone());
+        let child = create_project(&conn, &child_in).unwrap();
+        let mut grand_in = input("孙项目丙");
+        grand_in.parent_id = Some(child.id.clone());
+        let grand = create_project(&conn, &grand_in).unwrap();
+
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        let mut move_in = input("总包甲");
+        move_in.parent_id = None;
+        move_in.workspace_id = Some(b.id.clone());
+        let moved = update_project(&conn, &root.id, &move_in).unwrap();
+        assert_eq!(moved.workspace_id, b.id, "返回值要能读得到，区也确实是目标区");
+
+        assert_eq!(
+            crate::workspace::active_id(&conn).unwrap(),
+            b.id,
+            "换区后活动区跟随（spec §六.4 的返回契约前提）"
+        );
+        // 不断顺序：根项目本次主 UPDATE 动了 `updated_at`，反而排到最前，子与孙同秒序不可靠。
+        // 本 Task 的判据是「三层齐、且都在乙区」。
+        let mut ids: Vec<String> = list_projects(&conn).unwrap().into_iter().map(|p| p.id).collect();
+        ids.sort();
+        let mut want = vec![root.id.clone(), child.id.clone(), grand.id.clone()];
+        want.sort();
+        assert_eq!(ids, want, "整棵子树三层都要在乙区：{ids:?}");
+
+        crate::workspace::switch(&conn, crate::workspace::DEFAULT_ID).unwrap();
+        assert!(list_projects(&conn).unwrap().is_empty(), "旧区必须一台不剩");
+    }
+
+    /// 有父的项目不许单独换区（D7）。两个方向都要拒：库里已有父、或本次提交里刚指定了父。
+    #[test]
+    fn child_project_cannot_move_alone() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let parent = create_project(&conn, &input("总包甲")).unwrap();
+        let mut child_in = input("子项目乙");
+        child_in.parent_id = Some(parent.id.clone());
+        let child = create_project(&conn, &child_in).unwrap();
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+
+        let mut move_in = input("子项目乙");
+        move_in.parent_id = Some(parent.id.clone());
+        move_in.workspace_id = Some(b.id.clone());
+        let err = update_project(&conn, &child.id, &move_in).unwrap_err();
+        assert_eq!(err.code, "invalid_input");
+        assert!(err.message.contains("子项目不能单独换区"), "文案要点名随迁：{}", err.message);
+
+        // 摘父 + 换区同一次保存也要拒（否则会绕过子树前提）。
+        let mut detach_and_move = input("子项目乙");
+        detach_and_move.parent_id = None;
+        detach_and_move.workspace_id = Some(b.id.clone());
+        assert_eq!(update_project(&conn, &child.id, &detach_and_move).unwrap_err().code, "invalid_input");
+
+        // 数据一个字节没变：区、父、活动区都还在原位。
+        assert_eq!(get_project(&conn, &child.id).unwrap().workspace_id, crate::workspace::DEFAULT_ID);
+        assert_eq!(
+            get_project(&conn, &child.id).unwrap().parent_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+        assert_eq!(crate::workspace::active_id(&conn).unwrap(), crate::workspace::DEFAULT_ID);
+    }
+
+    /// 半途失败不许留下「父在本区、子在别区、当前区已跟过去」。
+    /// 造失败的那一刀选在**子树 UPDATE 与 set_active 之后**：把日志表 DROP 掉，
+    /// `record_update` 就必失败（与 M14 的 `audit_insert_failure_rolls_back_project_write` 同一手法，
+    /// 不用给生产代码开测试注入点）。这样断的才是「三步同事务」，而不是「早退得早」。
+    #[test]
+    fn move_is_atomic_when_the_log_write_fails() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let root = create_project(&conn, &input("总包甲")).unwrap();
+        let mut child_in = input("子项目乙");
+        child_in.parent_id = Some(root.id.clone());
+        let child = create_project(&conn, &child_in).unwrap();
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+
+        conn.execute("DROP TABLE project_audit_logs", []).unwrap();
+
+        let mut move_in = input("总包甲");
+        move_in.parent_id = None;
+        move_in.workspace_id = Some(b.id.clone());
+        let err = update_project(&conn, &root.id, &move_in).unwrap_err();
+        assert_eq!(err.code, "db_failed", "日志写不进 ⇒ 整个项目写回滚：{:?}", err.code);
+
+        // get_project 现在按活动区过滤，所以这里全部走裸 SQL，读库里的真实形状。
+        let of = |id: &str| conn
+            .query_row("SELECT workspace_id FROM projects WHERE id = ?1", [id], |r| r.get::<_, String>(0))
+            .unwrap();
+        assert_eq!(of(&root.id), crate::workspace::DEFAULT_ID, "根没动才算回滚干净");
+        assert_eq!(of(&child.id), crate::workspace::DEFAULT_ID, "子树不能留在目标区");
+        assert_eq!(
+            crate::workspace::active_id(&conn).unwrap(),
+            crate::workspace::DEFAULT_ID,
+            "跟随那一句也必须一起回滚，否则界面停在空区"
+        );
     }
 }

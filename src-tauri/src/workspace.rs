@@ -72,9 +72,6 @@ pub fn exists(conn: &Connection, id: &str) -> AppResult<bool> {
 }
 
 /// 区名，给操作日志的「工作区」字段用（spec §七：日志里存显示名，不存裸 id）。
-/// Task 4 才有调用点，中间这一程靠 allow 过 `cargo clippy --lib -- -D warnings`
-/// （与 `db.rs:30` 的 `open_in_memory` 同款写法：先落签名、后落调用点）。
-#[allow(dead_code)]
 pub fn name_of(conn: &Connection, id: &str) -> AppResult<String> {
     let name: Option<String> = conn
         .query_row("SELECT name FROM workspaces WHERE id = ?1", [id], |r| r.get(0))
