@@ -928,7 +928,7 @@ mod tests {
             .map(|x| x.unwrap())
             .collect();
         assert_eq!(names, vec!["默认工作区", "客户乙"], "区行必须随整库快照进包：{names:?}");
-        let keys = serde_json::to_value(&sum.counts).unwrap();
+        let keys = serde_json::to_value(sum.counts).unwrap();
         assert_eq!(
             keys.as_object().unwrap().len(),
             7,
