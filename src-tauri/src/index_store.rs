@@ -209,8 +209,8 @@ pub fn indexed_project_count(conn: &Connection) -> AppResult<usize> {
         "SELECT count(DISTINCT d.project_id)
            FROM index_docs d
            JOIN projects p ON p.id = d.project_id
-          WHERE d.index_status = 'ok' AND p.deleted_at IS NULL",
-        [],
+          WHERE d.index_status = 'ok' AND p.deleted_at IS NULL AND p.workspace_id = ?1",
+        params![crate::workspace::active_id(conn)?],
         |r| r.get::<_, i64>(0),
     )?;
     Ok(n as usize)
@@ -236,6 +236,7 @@ pub fn list_docs(
     limit: i64,
     offset: i64,
 ) -> AppResult<Vec<DocRow>> {
+    crate::workspace::ensure_active_project(conn, project_id)?;
     // status 走参数而不是拼进 SQL：这一层暴露给 IPC，任何字符串拼接都是注入面。
     let sql = "SELECT id, path, ext, size, index_status, skip_reason, error_msg, indexed_at
                  FROM index_docs
@@ -288,12 +289,13 @@ const SELECT_SQL: &str = "SELECT d.id, d.project_id, p.name, d.path,
  WHERE index_docs_fts MATCH ?1
    AND d.index_status = 'ok'
    AND p.deleted_at IS NULL
+   AND p.workspace_id = ?3
  ORDER BY bm25(index_docs_fts)
  LIMIT ?2";
 
 fn run_select(conn: &Connection, expr: &str, limit: i64, matched_by: &'static str) -> AppResult<Vec<DocHit>> {
     let mut stmt = conn.prepare(SELECT_SQL)?;
-    let rows = stmt.query_map(params![expr, limit], |r| {
+    let rows = stmt.query_map(params![expr, limit, crate::workspace::active_id(conn)?], |r| {
         Ok(DocHit {
             doc_id: r.get(0)?,
             project_id: r.get(1)?,
@@ -350,9 +352,14 @@ mod tests {
         db::open_in_memory().unwrap()
     }
 
+    /// 裸 INSERT 显式写活动区：列 DEFAULT 恒落 `default`，否则「在别区建项目」这条夹具造不出来（Task 6）。
     fn seed_project(conn: &Connection, id: &str) {
-        conn.execute("INSERT INTO projects (id, name, status) VALUES (?1, ?2, '立项')", params![id, "政务云迁移"])
-            .unwrap();
+        let ws = crate::workspace::active_id(conn).unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, name, status, workspace_id) VALUES (?1, ?2, '立项', ?3)",
+            params![id, "政务云迁移", ws],
+        )
+        .unwrap();
     }
 
     fn file(path: &str) -> ScannedFile {
@@ -787,5 +794,33 @@ mod tests {
         assert!(rows.iter().any(|(id, _)| *id == b), "没失效的行不许被漏掉");
         assert!(!rows.iter().any(|(id, _)| *id == a), "变异：把 <> 'missing' 删掉 ⇒ 先红在 rows.len()");
         assert_eq!(doc_rows_for_project(&c, "p-不存在").unwrap().len(), 0, "别的项目的行不许串进来");
+    }
+
+    /// 正文命中与首屏空态谓词**必须同口径**（M3 起就在的那句注释：少半个谓词就会出现
+    /// 「文案说正文有索引、正文段却是空的」）。两个区各写一条 ok 正文，
+    /// 断 `doc_hits` 与 `indexed_project_count` 同时只认活动区。
+    #[test]
+    fn doc_hits_and_indexed_project_count_use_the_same_scope() {
+        let c = conn();
+        seed_project(&c, "p-a");
+        let b = crate::workspace::create(&c, "客户乙").unwrap();
+        crate::workspace::switch(&c, &b.id).unwrap();
+        seed_project(&c, "p-b");
+        crate::workspace::switch(&c, crate::workspace::DEFAULT_ID).unwrap();
+
+        for pid in ["p-a", "p-b"] {
+            write_doc(&c, pid, &file(&format!("C:/{pid}.docx")), DocOutcome::Ok("付款通知".into()))
+                .unwrap();
+        }
+
+        assert_eq!(indexed_project_count(&c).unwrap(), 1, "只数活动区的可搜项目");
+        let hits = doc_hits(&c, "付款", 50).unwrap();
+        assert_eq!(hits.len(), 1, "当前区的正文命中只能有一条：{}", hits.len());
+        assert_eq!(hits[0].project_id, "p-a");
+
+        crate::workspace::switch(&c, &b.id).unwrap();
+        let hits = doc_hits(&c, "付款", 50).unwrap();
+        assert_eq!(hits[0].project_id, "p-b", "切过去要换另一半");
+        assert_eq!(indexed_project_count(&c).unwrap(), 1, "谓词同口径：切换后计数仍是 1");
     }
 }

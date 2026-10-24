@@ -75,8 +75,8 @@ pub fn row_for_preview(conn: &Connection, doc_id: &str) -> AppResult<PreviewRow>
             "SELECT d.path, p.name
                FROM index_docs d
                JOIN projects p ON p.id = d.project_id AND p.deleted_at IS NULL
-              WHERE d.id = ?1 AND d.index_status = 'ok'",
-            params![doc_id],
+              WHERE d.id = ?1 AND d.index_status = 'ok' AND p.workspace_id = ?2",
+            params![doc_id, crate::workspace::active_id(conn)?],
             |r| Ok(PreviewRow { path: r.get(0)?, project_name: r.get(1)? }),
         )
         .optional()?;
@@ -581,6 +581,19 @@ mod tests {
         }));
         assert!(ran.is_err(), "前提：闭包确实 panic 了，否则下面那条断言什么都没证明");
         assert!(PreviewShared::try_enter(&shared).is_some(), "panic 展开也必须把闸门放掉");
+    }
+
+    /// 跨区 doc_id 必须走既有 `preview_unavailable`（spec §十 T-17）：不新增码，也不泄露路径。
+    #[test]
+    fn row_for_preview_refuses_a_foreign_workspace_doc() {
+        let c = conn();
+        let id = seed_row(&c, "C:/x/跨区.docx", DocOutcome::Ok("正文".into()));
+        let b = crate::workspace::create(&c, "客户乙").unwrap();
+        c.execute("UPDATE projects SET workspace_id = ?1 WHERE id = 'p1'", params![b.id])
+            .unwrap();
+        // `unwrap_err` 要 `PreviewRow: Debug`，本模块不为测试给生产结构加派生。
+        let e = row_for_preview(&c, &id).err().expect("跨区 doc_id 不许预览成功");
+        assert_eq!(e.code, "preview_unavailable");
     }
 
     #[test]

@@ -122,9 +122,15 @@ fn map_row(r: &Row<'_>) -> rusqlite::Result<Cells> {
     ))
 }
 
-fn collect(source: &'static str, sql: &str, conn: &Connection, pattern: &str) -> AppResult<Vec<FieldHit>> {
+fn collect(
+    source: &'static str,
+    sql: &str,
+    conn: &Connection,
+    pattern: &str,
+    workspace: &str,
+) -> AppResult<Vec<FieldHit>> {
     let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map(params![pattern, PER_GROUP_LIMIT], map_row)?;
+    let rows = stmt.query_map(params![pattern, PER_GROUP_LIMIT, workspace], map_row)?;
     let mut out = Vec::new();
     for row in rows {
         let (id, project_id, project_name, title, b1, b2, b3) = row?;
@@ -154,6 +160,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
         ));
     }
     let p = like_pattern(q);
+    let workspace = crate::workspace::active_id(conn)?;
     let mut hits = Vec::new();
 
     hits.append(&mut collect(
@@ -161,6 +168,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
         "SELECT p.id, p.id, p.name, p.name, p.code, p.customer, p.status
            FROM projects p
           WHERE p.deleted_at IS NULL
+            AND p.workspace_id = ?3
             AND (  p.name LIKE ?1 ESCAPE '\\'
                 OR p.code LIKE ?1 ESCAPE '\\'
                 OR p.manager LIKE ?1 ESCAPE '\\'
@@ -176,13 +184,14 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
           LIMIT ?2",
         conn,
         &p,
+        &workspace,
     )?);
 
     hits.append(&mut collect(
         "env",
         "SELECT e.id, e.project_id, p.name, e.name, e.env, e.url, e.port
            FROM ledger_envs e
-           JOIN projects p ON p.id = e.project_id AND p.deleted_at IS NULL
+           JOIN projects p ON p.id = e.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
           WHERE e.deleted_at IS NULL
             AND (  e.name LIKE ?1 ESCAPE '\\'
                 OR e.url LIKE ?1 ESCAPE '\\'
@@ -192,6 +201,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
           LIMIT ?2",
         conn,
         &p,
+        &workspace,
     )?);
 
     // 凭据：只搜用途标题、登录地址、备注。username/password 是密文列，不在 SQL 里。
@@ -199,7 +209,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
         "credential",
         "SELECT c.id, c.project_id, p.name, c.title, c.url, c.note, NULL
            FROM ledger_credentials c
-           JOIN projects p ON p.id = c.project_id AND p.deleted_at IS NULL
+           JOIN projects p ON p.id = c.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
           WHERE c.deleted_at IS NULL
             AND (  c.title LIKE ?1 ESCAPE '\\'
                 OR c.url LIKE ?1 ESCAPE '\\'
@@ -208,6 +218,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
           LIMIT ?2",
         conn,
         &p,
+        &workspace,
     )?);
 
     // 服务器：远程账号与密码同样是密文列，只搜名称/IP/堡垒机/备注。
@@ -215,7 +226,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
         "server",
         "SELECT s.id, s.project_id, p.name, s.name, s.ip, s.bastion, s.note
            FROM ledger_servers s
-           JOIN projects p ON p.id = s.project_id AND p.deleted_at IS NULL
+           JOIN projects p ON p.id = s.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
           WHERE s.deleted_at IS NULL
             AND (  s.name LIKE ?1 ESCAPE '\\'
                 OR s.ip LIKE ?1 ESCAPE '\\'
@@ -225,13 +236,14 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
           LIMIT ?2",
         conn,
         &p,
+        &workspace,
     )?);
 
     hits.append(&mut collect(
         "link",
         "SELECT l.id, l.project_id, p.name, l.title, l.kind, l.url, l.note
            FROM ledger_links l
-           JOIN projects p ON p.id = l.project_id AND p.deleted_at IS NULL
+           JOIN projects p ON p.id = l.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
           WHERE l.deleted_at IS NULL
             AND (  l.title LIKE ?1 ESCAPE '\\'
                 OR l.url LIKE ?1 ESCAPE '\\'
@@ -240,6 +252,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
           LIMIT ?2",
         conn,
         &p,
+        &workspace,
     )?);
 
     // 备注正文可能很长，副标题只取前 80 字，整段留给详情页看。
@@ -247,7 +260,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
         "note",
         "SELECT n.id, n.project_id, p.name, n.title, n.tag, SUBSTR(n.body, 1, 80), NULL
            FROM ledger_notes n
-           JOIN projects p ON p.id = n.project_id AND p.deleted_at IS NULL
+           JOIN projects p ON p.id = n.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
           WHERE n.deleted_at IS NULL
             AND (  n.title LIKE ?1 ESCAPE '\\'
                 OR n.tag LIKE ?1 ESCAPE '\\'
@@ -256,6 +269,7 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
           LIMIT ?2",
         conn,
         &p,
+        &workspace,
     )?);
 
     // 日报：只搜工作内容。工时与日期拼成副标题（CAST 成 TEXT 是为了进 `join_bits` 那个
@@ -265,13 +279,14 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
         "SELECT d.id, d.project_id, p.name, SUBSTR(d.content, 1, 80), d.report_date,
                 ('工时 ' || CAST(d.hours AS TEXT) || ' 小时'), NULL
            FROM daily_reports d
-           JOIN projects p ON p.id = d.project_id AND p.deleted_at IS NULL
+           JOIN projects p ON p.id = d.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
           WHERE d.deleted_at IS NULL
             AND d.content LIKE ?1 ESCAPE '\\'
           ORDER BY d.updated_at DESC
           LIMIT ?2",
         conn,
         &p,
+        &workspace,
     )?);
 
     // 待办：只搜标题（M9 已裁定 todos 表没有 note 列，正文就是 title）。
@@ -281,13 +296,14 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
         "SELECT t.id, t.project_id, p.name, t.title, t.due_date,
                 CASE t.done WHEN 1 THEN '已完成' ELSE '未完成' END, NULL
            FROM todos t
-           JOIN projects p ON p.id = t.project_id AND p.deleted_at IS NULL
+           JOIN projects p ON p.id = t.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
           WHERE t.deleted_at IS NULL
             AND t.title LIKE ?1 ESCAPE '\\'
           ORDER BY t.updated_at DESC
           LIMIT ?2",
         conn,
         &p,
+        &workspace,
     )?);
 
     // 到期事项：搜名称与备注两列（spec D6 / §八）。**日期列不进 WHERE** —— 搜「10」「2027」这种
@@ -300,13 +316,14 @@ pub fn field_hits(conn: &Connection, query: &str) -> AppResult<Vec<FieldHit>> {
         "SELECT e.id, e.project_id, p.name, e.label, e.kind, e.expire_date,
                 SUBSTR(e.note, 1, 80)
            FROM project_expiries e
-           JOIN projects p ON p.id = e.project_id AND p.deleted_at IS NULL
+           JOIN projects p ON p.id = e.project_id AND p.deleted_at IS NULL AND p.workspace_id = ?3
           WHERE e.deleted_at IS NULL
             AND (e.label LIKE ?1 ESCAPE '\\' OR e.note LIKE ?1 ESCAPE '\\')
           ORDER BY e.updated_at DESC
           LIMIT ?2",
         conn,
         &p,
+        &workspace,
     )?);
 
     Ok(hits)
@@ -1059,5 +1076,95 @@ mod tests {
             vec!["expiry"],
             "恢复项目后到期事项要原样搜得到"
         );
+    }
+
+    /// 九段检索**每一段**都要带区谓词。同一串关键词「串码」埋进活动区与别区的**各**数据类里：
+    /// 只改项目段、或漏掉任一条 JOIN 段，都会让另一边的命中漏进当前区。
+    #[test]
+    fn field_hits_are_scoped_in_every_section() {
+        let (conn, a, _mk) = fixture();
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        crate::workspace::switch(&conn, &b.id).unwrap();
+        let bp = seed_project(&conn, "政务云迁移乙");
+        crate::workspace::switch(&conn, crate::workspace::DEFAULT_ID).unwrap();
+
+        // 关联行必须在**它宿主项目所属的那一区**里创建：Task 5 之后 `todo::create` 一类的 create 守卫
+        // 会拒跨区（`project_exists` 已带区谓词）。所以两段各切一次区，而不是在活动区=默认区的循环里
+        // 给别区的项目建行（那会当场 panic 在 `.unwrap()`）。
+        for (pid, ws) in [(&a, crate::workspace::DEFAULT_ID.to_owned()), (&bp, b.id.clone())] {
+            crate::workspace::switch(&conn, &ws).unwrap();
+            todo::create(
+                &conn,
+                &todo::TodoInput {
+                    project_id: pid.to_owned(),
+                    title: "串码待办".to_owned(),
+                    due_date: None,
+                },
+            )
+            .unwrap();
+            daily_report::create(
+                &conn,
+                &daily_report::DailyReportInput {
+                    project_id: pid.to_owned(),
+                    report_date: Some("2026-10-23".to_owned()),
+                    content: "串码日报".to_owned(),
+                    hours: 1.0,
+                },
+            )
+            .unwrap();
+            expiry::create(
+                &conn,
+                &expiry::ExpiryInput {
+                    project_id: pid.to_owned(),
+                    kind: "域名".to_owned(),
+                    label: "串码域名".to_owned(),
+                    expire_date: Some("2027-01-31".to_owned()),
+                    note: None,
+                },
+            )
+            .unwrap();
+            ledger::create_env(
+                &conn,
+                pid,
+                &ledger::EnvInput {
+                    env: "prod".to_owned(),
+                    name: "串码环境".to_owned(),
+                    url: None,
+                    port: None,
+                    note: None,
+                },
+            )
+            .unwrap();
+            ledger::create_note(
+                &conn,
+                pid,
+                &ledger::NoteInput {
+                    title: "串码备注".to_owned(),
+                    body: Some("串码正文".to_owned()),
+                    tag: None,
+                },
+            )
+            .unwrap();
+        }
+        crate::workspace::switch(&conn, crate::workspace::DEFAULT_ID).unwrap();
+
+        let hits = field_hits(&conn, "串码").unwrap();
+        assert!(
+            hits.iter().all(|h| h.project_id == a),
+            "有别的区的行漏进当前区：{:?}",
+            hits.iter().map(|h| (h.source, h.project_id.clone())).collect::<Vec<_>>()
+        );
+        // 每段都要**有**命中，否则「全在同一区」会因为某段压根没数据而假绿。
+        assert_eq!(
+            sources(&hits),
+            vec!["env", "note", "daily", "todo", "expiry"],
+            "九段里这五段各该留一条活动区命中：{:?}",
+            sources(&hits)
+        );
+
+        // 项目段单独验一次（`seed_project` 的 code 两边同为 `P-2026-009`）：
+        let by_code = field_hits(&conn, "P-2026-009").unwrap();
+        assert_eq!(by_code.len(), 1, "两个区各一条同码项目，过滤后只能剩活动区那一条");
+        assert!(by_code.iter().all(|h| h.project_id == a), "项目段没带区谓词：{:?}", sources(&by_code));
     }
 }

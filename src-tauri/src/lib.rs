@@ -550,7 +550,13 @@ fn index_overview(state: State<'_, AppState>) -> AppResult<IndexOverview> {
     let (opts, targets, counts, has_fts) = {
         let conn = db(&state)?;
         let opts = index_scan::ScanOptions::load(&conn)?;
-        let targets = index_job::targets(&conn, None)?;
+        // 呈现层按区收窄，worker 不动：`targets` 全库取回来后用一次集合过滤（spec §4.1），
+        // 过滤排在 status_counts 之前，别为看不见的项目白跑一轮 per-项目查询。
+        let active = workspace::active_project_ids(&conn)?;
+        let targets = index_job::targets(&conn, None)?
+            .into_iter()
+            .filter(|t| active.contains(&t.project_id))
+            .collect::<Vec<_>>();
         // 与 targets 同序收集，出锁后用 zip 配对，不另存一个 project_id 做查表。
         let mut counts = Vec::with_capacity(targets.len());
         for t in &targets {
@@ -865,6 +871,8 @@ fn ledger_export(
     backup::guard_destination(&state.data_dir, std::path::Path::new(&input.path))?;
     // 锁序 conn→mk，与 ledger_reveal / backup_import 同向；反序会与导入失败臂成环（Task 5 评审 I-1）。
     let conn = db(&state)?;
+    // 区守卫排在取 mk 之前：跨区项目不许导出（也不该为它弹解锁）。
+    workspace::ensure_active_project(&conn, &input.project_id)?;
     let mk_guard = if input.include_secrets {
         Some(unlocked_mk(&state)?)
     } else {
@@ -1310,6 +1318,40 @@ mod tests {
         assert!(
             ddl.contains("CHECK (kind IN ('维保','域名','证书','其他'))"),
             "V7 的 CHECK 词表与 Rust/前端两份不一致（注意 SQL 里是单引号、无空格）"
+        );
+    }
+
+    /// M15：`ledger_export` 的区守卫必须**恰好一次**且早于取数；`index_overview` 的区过滤必须
+    /// 排在 `status_counts` 循环之前。needle 一律 `concat!` 拼 —— 写成字面量会把本测试自己数进去
+    /// （坑 33，与上面 `backup_export` / `ledger_export` 两条同款）。
+    #[test]
+    fn workspace_guards_are_wired_before_the_work_in_command_bodies() {
+        let src = include_str!("lib.rs");
+
+        let lstart = src
+            .find(concat!("fn ledger_", "export("))
+            .expect("ledger_export 必须还在 lib.rs 里");
+        let lbody = &src[lstart..lstart + src[lstart..].find("\n}").expect("函数体收尾")];
+        let lguard = concat!("workspace::ensure_active_", "project(");
+        assert_eq!(lbody.matches(lguard).count(), 1, "命令层必须恰好调用一次区守卫");
+        assert!(
+            lbody
+                .find(lguard)
+                .unwrap()
+                < lbody.find(concat!("ledger_export::", "collect(")).unwrap(),
+            "区守卫必须早于取数：跨区项目连导出的门都不该进"
+        );
+
+        let ostart = src
+            .find(concat!("fn index_", "overview("))
+            .expect("index_overview 必须还在 lib.rs 里");
+        let obody = &src[ostart..ostart + src[ostart..].find("\n}").expect("函数体收尾")];
+        let ofilter = concat!("workspace::active_", "project_ids(");
+        let counts = concat!("index_store::status_", "counts(");
+        assert_eq!(obody.matches(ofilter).count(), 1, "总览的候选集合只该取一次活动区");
+        assert!(
+            obody.find(ofilter).unwrap() < obody.find(counts).unwrap(),
+            "区过滤要排在 status_counts 之前：别区的项目不该白跑一轮 per-项目查询"
         );
     }
 }
