@@ -66,9 +66,9 @@
 | 3 | +3（`project.rs`） | 387 | — | 71 |
 | 4 | +7（`project.rs` 5 + `project_audit.rs` 2；其中 M3/M6 两条由 Task 4 评审补上） | 394 | — | 71 |
 | 5 | +7（四模块 4 + `ledger.rs` 1 + 目录 1 + 日报导入 1） | 401 | — | 71 |
-| 6 | +3（`search.rs` 1 + `index_store.rs` 1 + 命令层 1） | 404 | — | 71 |
-| 7 | — | 404 | +4 | 75 |
-| 8 | — | 404 | 0（UI 无测试先例） | 75 |
+| 6 | +4（`search.rs` 1 + `index_store.rs` 1 + `doc_preview.rs` 1 + 命令层 1） | 405 | — | 71 |
+| 7 | — | 405 | +4 | 75 |
+| 8 | — | 405 | 0（UI 无测试先例） | 75 |
 
 改名不增数：Task 1 把既有 `v10_schema_meta_reaches_target_version_ten` 改名为 `v11_..._eleven`，条数不变。**如果实现者在本格数出的实数与上表不符，以运行为准并把差异写进账本，不要顺着表改测试。**
 
@@ -1898,8 +1898,9 @@ git commit -m "feat(m15): 待办/里程碑/到期/日报/台账/目录读写全�
 **Files:**
 - Modify: `src-tauri/src/search.rs:125-141`（`collect`）、`:159-330`（九段 SQL 与 `field_hits` 头部）
 - Modify: `src-tauri/src/index_store.rs:232`（`list_docs`）、`:207`（`indexed_project_count`）、`:283`（`SELECT_SQL`）与 `run_select`（`:322`）
-- Modify: `src-tauri/src/doc_preview.rs:72-84`（`row_for_preview`）
+- Modify: `src-tauri/src/doc_preview.rs:72-84`（`row_for_preview` + 一条跨区测试）
 - Modify: `src-tauri/src/lib.rs:501`（`index_overview` 持锁段）、`:818`（`ledger_export`）
+- Modify: `src-tauri/src/workspace.rs`（删 `active_project_ids` 的 dead_code 豁免）
 
 **Interfaces:**
 - Consumes: Task 2 的 `workspace::active_id`/`ensure_active_project`/`active_project_ids`。
@@ -2071,6 +2072,24 @@ Expected: PASS。
 
 `row_for_preview`（`:72`）：SQL 加 `AND p.workspace_id = ?2`，实参改 `params![doc_id, crate::workspace::active_id(conn)?]`（跨区 `doc_id` 走它现有的那条 `unavailable` 文案，**不新增错误码**）。
 
+`doc_preview.rs` 的 `mod tests` 末尾加一条（spec §十 T-17 的 `doc_preview` 分句，计划原网格漏了）：
+
+```rust
+    /// 跨区 doc_id 必须走既有 `preview_unavailable`（spec §十 T-17）：不新增码，也不泄露路径。
+    #[test]
+    fn row_for_preview_refuses_a_foreign_workspace_doc() {
+        let c = conn();
+        let id = seed_row(&c, "C:/x/跨区.docx", DocOutcome::Ok("正文".into()));
+        let b = crate::workspace::create(&c, "客户乙").unwrap();
+        c.execute("UPDATE projects SET workspace_id = ?1 WHERE id = 'p1'", params![b.id])
+            .unwrap();
+        assert_eq!(row_for_preview(&c, &id).unwrap_err().code, "preview_unavailable");
+    }
+```
+
+Run: `cd src-tauri && cargo test -j 1 --lib doc_preview::tests::row_for_preview_refuses`
+Expected: PASS（去谓词即红）。
+
 `index_overview`（`lib.rs:501`）的持锁段改成：
 
 ```rust
@@ -2098,6 +2117,8 @@ Expected: PASS。
     // 区守卫排在取 mk 之前：跨区项目不许导出（也不该为它弹解锁）。
     workspace::ensure_active_project(&conn, &input.project_id)?;
 ```
+
+> **本步收掉 `active_project_ids` 的 dead_code 豁免**（Global Constraints 第 3 条）：`index_overview` 是本分支里它的首个生产调用点。删完现跑 `cargo clippy -j 1 --lib -- -D warnings` 必须 exit 0；本格收工豁免读数应为 **1**（只剩 `db.rs`）。
 
 - [ ] **Step 5: 命令层接线测试（`lib.rs` 已有的 `include_str!` 形制，不是伪代码）**
 
@@ -2146,12 +2167,12 @@ Expected: PASS。如果 `find("\n}")` 截到的函数体比预期短（`index_ov
 - [ ] **Step 6: 全量回归**
 
 Run: `cd src-tauri && cargo test -j 1 --lib`
-Expected: `404 passed; 0 failed`（401 + 3）。**这一格最容易红既有测试**：`search.rs` 有四十来条既有测试走 `field_hits`，`index_store.rs` 也是。它们的项目全在默认区 = 活动区，所以红 = 谓词写错位置（例如把 `?3` 绑到 `LIMIT` 之前、或 `run_select` 少传一个实参导致 `params!` 索引错位）。按红的位置改实现，**不许**为了让既有测试绿而放宽谓词。
+Expected: `405 passed; 0 failed`（401 + 4；doc_preview 那条是预检补的 T-17 分句）。**这一格最容易红既有测试**：`search.rs` 有四十来条既有测试走 `field_hits`，`index_store.rs` 也是。它们的项目全在默认区 = 活动区，所以红 = 谓词写错位置（例如把 `?3` 绑到 `LIMIT` 之前、或 `run_select` 少传一个实参导致 `params!` 索引错位）。按红的位置改实现，**不许**为了让既有测试绿而放宽谓词。
 
 - [ ] **Step 7: 提交**
 
 ```bash
-git add src-tauri/src/search.rs src-tauri/src/index_store.rs src-tauri/src/doc_preview.rs src-tauri/src/lib.rs
+git add src-tauri/src/search.rs src-tauri/src/index_store.rs src-tauri/src/doc_preview.rs src-tauri/src/lib.rs src-tauri/src/workspace.rs
 git commit -m "feat(m15): 检索九段、正文命中与首屏谓词、索引总览与台账导出全部按活动区过滤"
 ```
 
@@ -2826,7 +2847,7 @@ git diff --stat master..HEAD -- src-tauri/Cargo.lock src-tauri/Cargo.toml packag
 git rev-list --merges --count --all
 ```
 
-Expected 读数（**期望值不是断言，跑出来不符就报差异并查成因**）：cargo `404 passed`、node `tests 75 / pass 75 / fail 0`、`npm run build` `error TS` 0、`TARGET_VERSION 11`、命令 **75**、async **7**、豁免 **1**（`db.rs`）、`Cargo.lock` **616**、collect **9**、依赖 diff **空**、merge commit **0**。
+Expected 读数（**期望值不是断言，跑出来不符就报差异并查成因**）：cargo `405 passed`、node `tests 75 / pass 75 / fail 0`、`npm run build` `error TS` 0、`TARGET_VERSION 11`、命令 **75**、async **7**、豁免 **1**（`db.rs`）、`Cargo.lock` **616**、collect **9**、依赖 diff **空**、merge commit **0**。
 `grep -c ... | grep -v ":0"` 这类管道会把 `$?` 吞掉：**退出码一律单独 `echo "exit=$?"` 取**（本仓前科：管道 tail 吞掉退出码，把红报成绿）。
 
 - [ ] **Step 2: 十一处变异，逐处下靶 → 跑指定测试 → 记退出码 → 还原**
