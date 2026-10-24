@@ -1678,7 +1678,7 @@ git commit -m "feat(m15): 根项目换区整棵子树随迁 + 活动区跟随，
 ## Task 5: 关联表的读写守卫（待办 / 里程碑 / 到期 / 日报 / 台账 / 目录）
 
 **Files:**
-- Modify: `src-tauri/src/todo.rs:122-210`、`src-tauri/src/milestone.rs:75-168`、`src-tauri/src/expiry.rs:83-181`、`src-tauri/src/daily_report.rs:96-180` + `:529` + `:542`、`src-tauri/src/ledger.rs:194-235` + 五个 `update_*`、`src-tauri/src/project.rs:440/470/500`
+- Modify: `src-tauri/src/todo.rs:122-210`、`src-tauri/src/milestone.rs:75-168`、`src-tauri/src/expiry.rs:83-181`、`src-tauri/src/daily_report.rs:96-180` + `:529` + `:542`、`src-tauri/src/ledger.rs:194-235` + 五个 `update_*`、`src-tauri/src/project.rs:440/470/500`、`src-tauri/src/workspace.rs`（删 `ensure_active_row` 与 `ensure_active_project` 两处 dead_code 豁免）
 
 **Interfaces:**
 - Consumes: Task 2 的 `workspace::active_id`/`ensure_active_project`/`ensure_active_row`。
@@ -1721,6 +1721,8 @@ fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
 Run: `cd src-tauri && cargo test -j 1 --lib todo::`
 Expected: 既有 todo 测试全绿（它们的项目都在默认区 = 活动区，守卫不该挡）；红的就是改错了。
 
+> 本步落地后 `ensure_active_row` 有了生产调用点：删掉 `src-tauri/src/workspace.rs` 里它的 dead_code 豁免（Global Constraints 第 3 条），豁免读数 4→3。
+
 - [ ] **Step 2: `milestone.rs` / `expiry.rs` —— 同形状**
 
 `milestone.rs`：`project_exists`（`:75`）、`list`（`:92`，JOIN 加 `AND p.workspace_id = ?2`）同 Step 1；`get`（`:110`）、`update`（`:145`）、`delete`（`:160`）首行加 `ensure_active_row(conn, "milestones", id)?;`。
@@ -1742,7 +1744,7 @@ fn load_projects(conn: &Connection) -> AppResult<Vec<ProjectRow>> {
     let mut stmt = conn.prepare(
         "SELECT id, code, name FROM projects WHERE deleted_at IS NULL AND workspace_id = ?1",
     )?;
-    let rows = stmt.query_map([workspace], |r| {
+    let rows = stmt.query_map(params![workspace], |r| {
 ```
 
 ```rust
@@ -1754,7 +1756,7 @@ fn existing_keys(conn: &Connection) -> AppResult<HashSet<(String, String, String
            JOIN projects p ON p.id = d.project_id
           WHERE d.deleted_at IS NULL AND p.workspace_id = ?1",
     )?;
-    let rows = stmt.query_map([workspace], |r| {
+    let rows = stmt.query_map(params![workspace], |r| {
 ```
 
 - [ ] **Step 4: `ledger.rs` —— 九处**
@@ -1773,7 +1775,7 @@ fn soft_delete(conn: &Connection, table: &'static str, id: &str) -> AppResult<()
     crate::workspace::ensure_active_row(conn, "ledger_envs", id)?;
 ```
 
-`list`（`:235`）与 `reveal`（`:194`）入口各一句：
+`list`（`:235`）入口一句 `ensure_active_project`；`reveal`（`:194`）**没有 `project_id` 参数**，入口用 `ensure_active_row`（`table` 由 `secret_column` 给出）：
 
 ```rust
     crate::workspace::ensure_active_project(conn, project_id)?;
@@ -1784,7 +1786,7 @@ fn soft_delete(conn: &Connection, table: &'static str, id: &str) -> AppResult<()
     crate::workspace::ensure_active_row(conn, table, id)?;
 ```
 
-> **本步收掉 `ensure_active_project` 的 dead_code 豁免**（Global Constraints 第 1 条）：`list` 与 `reveal` 是本分支里它的首个生产调用点（Task 3 报告已实测 Task 3 内无调用点）。删完现跑 `cargo clippy -j 1 --lib -- -D warnings` 必须 exit 0；本步收工后豁免读数应为 **2**（`db.rs` + `active_project_ids`）。
+> **本步收掉 `ensure_active_project` 的 dead_code 豁免**（Global Constraints 第 1 条）：`ledger::list`（以及 Step 5 的三个目录 mutator）是本分支里它的首批生产调用点（Task 3 报告已实测 Task 3 内无调用点）。删完现跑 `cargo clippy -j 1 --lib -- -D warnings` 必须 exit 0；本步收工后豁免读数应为 **2**（`db.rs` + `active_project_ids`）。
 >
 > `secret_column` 回的是 `(&'static str, &'static str, &'static str)`（`ledger.rs:156`），直接能喂给守卫。
 
@@ -1876,8 +1878,8 @@ fn soft_delete(conn: &Connection, table: &'static str, id: &str) -> AppResult<()
 | `directory_mutators_reject_a_foreign_project`（`project.rs`） | `DirInput { path: "C:/m15-scope/root".to_owned(), label: None, sort: None }` | `create_project` 拿项目 → `workspace::create` + 裸 SQL 挪区 → `set_root_dir`/`add_entry_dir`/`remove_dir` 三个各断 `not_found`；`remove_dir` 的 `dir_id` 传任意串（守卫排在前面，跨区时先回 `not_found`）；末断 `SELECT COUNT(*) FROM project_dirs` 为 0 |
 | `daily_report_import_only_matches_active_projects`（`daily_report.rs`） | 用 `write_xlsx` 现造一份两行表：一行的项目编号落在默认区、另一行落在别区（**两个项目要各自 `switch` 到对应区再 `create_project`**，跨区 create 会被守卫拒；断言阶段活动区是默认区） | `preview` 的 `ok == 1`、`rejected` 里出现别区那行的 `line`；`apply` 回 `invalid_input` 且 `SELECT COUNT(*) FROM daily_reports` 不增。表体沿用该模块既有 `.xlsx` 夹具写法（`export_row`（`:974`）与 `write_xlsx` 都在树里），**不为这条新造导出/导入往返工具** |
 
-Run: `cd src-tauri && cargo test -j 1 --lib todo:: milestone:: expiry:: daily_report:: ledger:: project::`
-Expected: 全绿（cargo 单 target 一次只接一个筛选词，所以分六次跑；或跑一次 `cargo test -j 1 --lib` 全量看这七条新名）。
+Run: `cd src-tauri && cargo test -j 1 --lib`（`cargo test` 只接一个筛选词；要按模块看就分六次跑，别把六个词并列）
+Expected: 全绿，`401 passed`；七条新名各自出现。
 
 - [ ] **Step 7: 全量 + 提交**
 
@@ -1885,7 +1887,7 @@ Run: `cd src-tauri && cargo test -j 1 --lib`
 Expected: `401 passed; 0 failed`（394 + 7）。
 
 ```bash
-git add src-tauri/src/todo.rs src-tauri/src/milestone.rs src-tauri/src/expiry.rs src-tauri/src/daily_report.rs src-tauri/src/ledger.rs src-tauri/src/project.rs
+git add src-tauri/src/todo.rs src-tauri/src/milestone.rs src-tauri/src/expiry.rs src-tauri/src/daily_report.rs src-tauri/src/ledger.rs src-tauri/src/project.rs src-tauri/src/workspace.rs
 git commit -m "feat(m15): 待办/里程碑/到期/日报/台账/目录读写全部按活动区强制守卫"
 ```
 
