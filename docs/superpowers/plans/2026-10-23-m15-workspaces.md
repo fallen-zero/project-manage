@@ -1210,9 +1210,10 @@ git commit -m "feat(m15): 项目列表/详情按活动区过滤，create 恒落�
 ## Task 4: 换区与子树随迁 + 活动区跟随 + 操作日志联动
 
 **Files:**
-- Modify: `src-tauri/src/project.rs:199-232`（`update_project`）、新增 `collect_subtree`
+- Modify: `src-tauri/src/project.rs:199-232`（`update_project`）；Step 0 探针 OK 时用一条 `WITH RECURSIVE … UPDATE`，**不新增** `collect_subtree`（本次实测 3.50.4 / bundled 3.53.2 均 OK）
 - Modify: `src-tauri/src/project_audit.rs:92-186`（三处 changes）、`:210-226`（`record_create` 签名）、`:228-297`（`list` 与 `project_options` 的区过滤）
 - Modify: `src-tauri/src/project.rs:194`（`record_create` 调用点）
+- Modify: `src-tauri/src/workspace.rs:72-80`（删 `name_of` 的 dead_code 豁免 —— Global Constraints 第 2 条要求本格回收，Files 原清单漏了本行，执行后追认）
 
 **Interfaces:**
 - Consumes: Task 2 的 `workspace::exists`/`set_active`/`name_of`/`active_id`；Task 3 的 `validate_parent(…, workspace)` 四参签名、`Project.workspace_id`。
