@@ -12,6 +12,7 @@ mod ledger;
 mod ledger_export;
 mod legacy_office;
 mod milestone;
+mod note_asset;
 mod ocr;
 mod project;
 mod project_audit;
@@ -478,6 +479,29 @@ fn ledger_note_update(state: State<'_, AppState>, id: String, input: NoteInput) 
 fn ledger_note_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
     let conn = db(&state)?;
     ledger::delete_note(&conn, &id)
+}
+
+/// 备注截图三条命令（M16-b spec §四）：同步、函数体不写 await 点。
+/// 图片不经文件系统，备份里跟着整库快照走，所以 async 标记那扇门保持 7 条不动。
+#[tauri::command]
+fn note_asset_list(
+    state: State<'_, AppState>,
+    note_id: String,
+) -> AppResult<Vec<note_asset::NoteAsset>> {
+    let conn = db(&state)?;
+    note_asset::list(&conn, &note_id)
+}
+
+#[tauri::command]
+fn note_asset_save(state: State<'_, AppState>, note_id: String, data_url: String) -> AppResult<()> {
+    let conn = db(&state)?;
+    note_asset::save(&conn, &note_id, &data_url)
+}
+
+#[tauri::command]
+fn note_asset_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    let conn = db(&state)?;
+    note_asset::delete(&conn, &id)
 }
 
 /// 起一轮索引。线程壳与 `app.emit` 的连通性只能由真机验证（Task 12），
@@ -1104,6 +1128,9 @@ pub fn run() {
             ledger_note_create,
             ledger_note_update,
             ledger_note_delete,
+            note_asset_list,
+            note_asset_save,
+            note_asset_delete,
             index_start,
             index_cancel,
             index_overview,
@@ -1171,7 +1198,7 @@ mod tests {
             .unwrap();
         // 提 pub(crate) 是给 M8 的验包判据用的，这条顺带改成直接引用它 ——
         // 原来写字面 4 的那两句注释（「lib.rs 够不着」）已经不成立。
-        assert_eq!(ver, crate::db::TARGET_VERSION, "= db.rs 的 TARGET_VERSION，链头已随 M16-a V12 走到 12");
+        assert_eq!(ver, crate::db::TARGET_VERSION, "= db.rs 的 TARGET_VERSION，链头随迁移常量走");
     }
 
     /// 第 42 条命令必须是**零参数**的（spec §四：这条命令能启动外部安装器，

@@ -54,6 +54,9 @@ rust_xlsxwriter = "0.99.1"
 # 而技术方案 §6.2 明写 SHA-256。这个 crate 已在 Cargo.lock（lopdf/tauri-codegen/wry 拉 0.10.9，
 # lzma-rust2 拉 0.11.0），提为直接依赖不新增下载、不新增编译单元；自己实现哈希是红线。
 sha2 = "0.11"
+# M16-b：备注截图的 data URL 编解码。0.22.1 已在 Cargo.lock（传递依赖），提为直接依赖不新增
+# `[[package]]`、不新增编译单元；手写 base64 是红线。
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3.27.0"

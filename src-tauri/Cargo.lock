@@ -3602,6 +3602,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "argon2",
+ "base64 0.22.1",
  "calamine",
  "chardetng",
  "encoding_rs",
