@@ -1,5 +1,7 @@
 # 交接文档 —— 项目资料管理（写给一个完全没有上下文的新对话）
 
+**2026-10-26 快照（M16-b）**：**M16-b 图文笔记与截图：代码 + 9 处变异 + 真机 C-1…C-8 ALL-PASS，在分支 `feat/m16b-note-images`（终态 `44a0100`），尚未合入 `master`**；门禁 cargo **426** / node **75** / 命令 **82** / async 7 / `TARGET_VERSION` **13** / 豁免 1 / `Cargo.lock` 616 / collect 9；备份 schema **13**；证据在 `.superpowers/sdd/2026-10-26-m16b-note-images/`（git-ignored，收口前别清）。旧 M16-a 快照保留在下。
+
 **2026-10-24 快照（M16-a）**：**M16-a 项目版本台账 + 子文件选择器：代码 + 5 处变异 + 真机 C-1…C-4 全完，C-5 原生文件框人工待点，**已 fast-forward 合入 `master`（合并点 `ee5713f`）**（分支 `feat/m16a-project-versions`）；门禁 cargo **415** / node **75** / 命令 **79** / async 7 / `TARGET_VERSION` **12** / 豁免 1 / `Cargo.lock` 616 / collect 9；证据在 `.superpowers/sdd/2026-10-24-m16a-project-versions/`（git-ignored，收口前别清）。旧 M15 快照保留在下。
 
 **2026-10-24 快照**：**M15 多工作区代码 + 12 处变异 + 真机 12 格全完，已 fast-forward 合入 `master`（合并点 `9db1903`）**（分支 `feat/m15-workspaces`；`master` 已推 `origin`，远端 sha 现取 `git ls-remote --heads origin master`）；门禁 cargo **405** / node **75** / 命令 **75** / async 7 / `TARGET_VERSION` **11** / 豁免 1 / `Cargo.lock` 616 / collect 9；真机 12 格 ALL-PASS、真实目录前后 `sha256=200456e1f9ca` 一致。**功能分支已推 `origin`（本地代理 `127.0.0.1:7897` 的 TLS 握手坏了，推送走 `git -c http.proxy= -c https.proxy= push` 绕过；远端 sha 现取 `git ls-remote --heads origin feat/m15-workspaces`）。** 证据在 `.superpowers/sdd/2026-10-23-m15-workspaces/`（git-ignored，收口前别清）。旧快照（M14）保留在下方。
@@ -102,19 +104,21 @@
 
 ## 3. 当前卡在哪
 
-**M16-a 收口点（2026-10-24，本文当前最该先读的一段）**：**M16-a 项目版本台账 + 子文件选择器：代码 + 5 处变异 + 真机 C-1…C-4 全完，C-5 原生文件框人工待点，已 fast-forward 合入 `master`（合并点 `ee5713f`）**（分支 `feat/m16a-project-versions`；Task 1–5 complete）。门禁：cargo **415** / node **75/75/0** / `error TS` 0 / 两条 clippy exit 0 / build lib exit 0；结构门 **命令 79 / async 7 / `TARGET_VERSION: i64 = 12` / 豁免 1 / `Cargo.lock` 616 / collect 9**；依赖 diff 空、merge 0。5 处变异全部具名打红（101）并逐字节还原；真机 **C-1…C-4 ALL-PASS**，C-5 原生「选择文件」框只能人点（已自动补证取消 no-op 与文件路径入口/UI）。真实目录 before/after `sha256=200456e1f9ca` 一致、配置原字节还原。**下一格 M16-b（图文笔记/截图 + 附件进备份）。** 证据在 `.superpowers/sdd/2026-10-24-m16a-project-versions/`（git-ignored，收口前别清）。
+**M16-b 收口点（2026-10-26，本文当前最该先读的一段）**：**M16-b 图文笔记与截图：代码 + 9 处变异 + 真机 C-1…C-8 ALL-PASS，分支 `feat/m16b-note-images` 上 Task 1–5 complete，尚未合入 `master`**（提交 `208e9a2` → `f742e93` → `44a0100`）。门禁：cargo **426** / node **75/75/0** / `error TS` 0 / 两条 clippy exit 0 / build lib exit 0；结构门 **命令 82 / async 7 / `TARGET_VERSION: i64 = 13` / 豁免 1 / `Cargo.lock` 616 / collect 9**；依赖仅 4 行插入（`base64 = "0.22"` 直接依赖，`[[package]]` 仍 616）、`package.json` diff 空、merge 0。9 处变异全部具名打红（101）并逐字节还原；真机 **C-1…C-8 ALL-PASS**（沙盒 `dev.zero.pfm.m16btest` + CDP **9191** —— 计划写的 9333 落在 Windows 排除段 9281–9380、永不监听）；真实目录 before/after 逐字一致（`diff` 0、`ledger.db size=241664 sha256=200456e1f9ca…`）、`tauri.conf.json` 原字节还原。**下一格待需求方指定**（M16 三项已全部落地）。证据在 `.superpowers/sdd/2026-10-26-m16b-note-images/`（git-ignored，收口前别清）。
+
+**M16-a 收口点（2026-10-24，已收口）**：项目版本台账 + 子文件选择器，5 处变异 + 真机 C-1…C-4 全完、C-5 原生文件框人工待点，**已 fast-forward 合入 `master`（合并点 `ee5713f`）**；门禁 415 / 75 / 79·7·12·1·616·9。证据在 `.superpowers/sdd/2026-10-24-m16a-project-versions/`。旧快照（M15）保留在下。
 
 **M15 收口点（2026-10-24，本文当前最该先读的一段）**：**M15 多工作区代码 + 12 处变异 + 真机 12 格全完，已 fast-forward 合入 `master`（合并点 `9db1903`）**（分支 `feat/m15-workspaces`，代码终态 `e73f351`；Task 1–10 complete）。门禁：cargo **405 passed** / node **75/75/0** / `npm run build` **0 TS** / 两条 clippy exit 0 / build lib exit 0；结构门 **命令 75 / async 7 / `TARGET_VERSION: i64 = 11` / 豁免 1 / `Cargo.lock` 616 / collect 9**；依赖 diff 空、merge commit 0。12 处变异全部具名打红（101）并逐字节还原；真机 12 格 ALL-PASS（沙盒 `dev.zero.pfm.m15test` + CDP 9333）；真实目录 `ledger.db size=241664 sha256_16=200456e1f9ca` 跑前/跑后一致、`tauri.conf.json` 原字节还原。**下一格候选：`docs/思维导图.md` §四.3 已清空，需与需求方重新取题。** 证据在 `.superpowers/sdd/2026-10-23-m15-workspaces/{progress.md,mutation-evidence.txt,real-machine-readings.md,spec-plan-mapping.md,m15-cdp.mjs,m15-cdp.stdout.txt,m15-backup.zip,task-8-review.md,recheck-8-report.md}`（git-ignored，收口前别清）。
 
 **M14 收口点（2026-10-23，本文当前最该先读的一段）**：**M14 操作日志已 fast-forward 合入 `master`（合并点 `e707b7c`）**，终审 With fixes（0C/1I/7M）→ BEGIN IMMEDIATE 修复已落地并经限定复审；合并后在 `master` 树上复跑整套门全绿。Task 1–6 complete；门禁 cargo **372**（含终审补的回滚测试）/ node **71** / 命令 **70** / async 7 / `TARGET_VERSION 10` / 豁免 1 / `Cargo.lock` 616 / collect 9；十一处变异全红并还原；真机 12 格 ALL-PASS。日志页 `/audit`、项目写事务、`audit_list`（70）与备份 schema 10 已落地；真实数据目录本轮隔离跑前后 `sha256=200456e1f9ca` 一致、配置原字节还原（`git diff --exit-code` 0），无新事故。下一格候选是 **多工作区**（见 §4-B）。证据在 `.superpowers/sdd/2026-10-23-m14-audit-log/{progress.md,real-machine-readings.md,mutation-evidence.txt,spec-plan-mapping.md,m14-cdp.mjs,m14-cdp.stdout.txt,m14-backup.zip,final-review.md,final-fix-report.md}`（git-ignored，收口前别清）。未验：UI「加载更多」未点亮（日志量 <200）、极大量日志性能、页面无 jsdom 自动化网。
 
-**终态（这一节是本文最重要的三行）**：**M0–M16-a 已全部合入 `master`（M16-a 合并点 `ee5713f`，fast-forward；M15 合并点 `9db1903`）**（现取 `git rev-parse --short master`）；`master` 已推 `origin`（远端与本地 sha 现取 `git ls-remote --heads origin master`）；**待办无**。M16-a 在 `master` 树上的实跑读数（合并点 `ee5713f`）：cargo **415 passed**、node **75/75/0**、`npm run build` **0 错**、结构门 **79 / async 7 / `TARGET_VERSION: i64 = 12` / 豁免 1 / `Cargo.lock` 616 / collect 9**、依赖 diff **空**、merge commit **0**。工作树只有未跟踪的 `Python/` 与 git-ignored 证据目录（**都不 stage、不删**）。**这些数一定漂，用 §4-A 那串命令现跑一遍再信。**
+**终态（这一节是本文最重要的三行）**：**M0–M16-a 已全部合入 `master`（M16-a 合并点 `ee5713f`，fast-forward；M15 合并点 `9db1903`）**（现取 `git rev-parse --short master`）；**M16-b 已在 `feat/m16b-note-images` 上做完（`44a0100`）、尚未合并**（现取 `git rev-parse --short feat/m16b-note-images`）；`master` 已推 `origin`（远端与本地 sha 现取 `git ls-remote --heads origin master`）；**待办无**。M16-b 在分支终态树上的实跑读数：cargo **426 passed**、node **75/75/0**、`npm run build` **0 错**、结构门 **82 / async 7 / `TARGET_VERSION: i64 = 13` / 豁免 1 / `Cargo.lock` 616 / collect 9**、依赖 4 行插入、merge commit **0**。工作树只有未跟踪的 `Python/` 与 git-ignored 证据目录（**都不 stage、不删**）。**这些数一定漂，用 §4-A 那串命令现跑一遍再信。**
 
 **M15 的 findings 与修复裁定**：Task 1–8 逐格评审/修复/复审全文在 `.superpowers/sdd/2026-10-23-m15-workspaces/{progress.md,task-N-review.md,recheck-*.md}`；Task 8 首轮 **Needs fixes（0C/1I/5M）** 的 Important 是「改区保存后没刷新工作区 store、顶栏停旧区」，已修并经限定复审 Accepted。Task 9 的 12 靶、真机 12 格、映射与 7 条有名缺口见同目录 `mutation-evidence.txt` / `real-machine-readings.md` / `spec-plan-mapping.md`。
 
 **M11-a / M11-b / M12 / M13 / M14 的 findings 与修复裁定**：前四格全文在各自账本；M14 的 Task 1–6 评审/修复、Task 5 真机/变异、Task 6 活文档在 `.superpowers/sdd/2026-10-23-m14-audit-log/progress.md`；终审 **With fixes（0C/1I/7M）** 的 Important（DEFERRED 读后写撞 BUSY_SNAPSHOT）已由 `e707b7c` 改为 BEGIN IMMEDIATE 并经限定复审 ADDRESSED。详见同目录 `final-review.md` / `final-fix-report.md`。
 
-**下一步动作**：M16-a 已 fast-forward 合入 `master`（合并点 `ee5713f`），并在 `master` 树复跑 §4-A 整套门全绿；C-5 原生文件框仍需人点一次。下一格是 M16-b（图文笔记/截图 + 附件进备份）。**别重派 M16-a Task 1–3 的实现者**——提交在 `git log` 里、结论在账本里。
+**下一步动作**：M16-b 已在 `feat/m16b-note-images` 上做完（`44a0100`），**待需求方当次批准后** `git checkout master && git merge --ff-only feat/m16b-note-images`，再在 `master` 树复跑 §4-A 整套门；**下一格里程碑待需求方指定**（`docs/思维导图.md` 的 M16 三项 —— 版本台账、截图、子文件选择器 —— 已全部落地）。**别重派 M16-b Task 1–3 的实现者**——提交在 `git log` 里、结论在账本里。
 
 **卡住的两件事，没有一件是代码问题**：
 
@@ -127,33 +131,33 @@
 
 **M14 的门禁清单（在 `feat/m14-audit-log` 的 HEAD 上跑过；收口时在合并后的 `master` 树上重跑）**：cargo **372**、node **71**、命令 **70**、async 7、`TARGET_VERSION: i64 = 10`、豁免 1、`Cargo.lock` 616、collect 9、依赖 diff 空、merge commit 0；数命令数的 `sed` 范围式用 `/^\s*\])/` 版。**这些数会漂，下面这串现跑为准。**
 
-**A（收口 / 合并用的门禁清单 —— M16-a 已在 `master` 合并点 `ee5713f` 上复跑过）**。M16-a 的**终态期望串**是 `命令 79 / async 7 / TARGET_VERSION 12 / 豁免 1 / Cargo.lock 616 / collect 9 / cargo 415 / node 75`（另有 `cargo build -j 1 --lib` exit=0、依赖 diff 空、merge commit 0）。**任何一格收口都用这串现跑，别信写死的数**：
+**A（收口 / 合并用的门禁清单 —— M16-b 在 `feat/m16b-note-images` 的终态树 `44a0100` 上跑过）**。M16-b 的**终态期望串**是 `命令 82 / async 7 / TARGET_VERSION 13 / 豁免 1 / Cargo.lock 616 / collect 9 / cargo 426 / node 75`（另有 `cargo build -j 1 --lib` exit=0、依赖 4 行插入且 `[[package]]` 仍 616、merge commit 0）。**任何一格收口都用这串现跑，别信写死的数**：
 
 ```
-git rev-parse --abbrev-ref HEAD                              # 合并前在 feat/m13-project-hierarchy；收口时在 master
+git rev-parse --abbrev-ref HEAD                              # 合并前在 feat/m16b-note-images；收口时在 master
 git status --porcelain                                       # 期望只有 ?? Python/
 git log --oneline master..HEAD                               # 分支上已有什么（与账本逐条对上，别重派已完成的格）
 git rev-list --merges --count --all                          # 期望 0
-cd src-tauri && cargo test -j 1 --lib                        # 415 passed / exit=0（M15 405 → M16-a +10）
+cd src-tauri && cargo test -j 1 --lib                        # 426 passed / exit=0（M16-a 415 → M16-b +11）
 cargo clippy --lib -- -D warnings; cargo clippy --all-targets --all-features -- -D warnings   # 两个都期望 exit=0、0 warning
 cargo build -j 1 --lib                                       # exit=0
-cd .. && node --test "tests/**/*.test.ts"                    # tests 75 / pass 75 / fail 0（71→75 = workspace-view 4；在仓库根跑）
+cd .. && node --test "tests/**/*.test.ts"                    # tests 75 / pass 75 / fail 0（M16-b 不动前端纯函数；在仓库根跑）
 npm run build                                                # exit=0，且 grep -c "error TS" 为 0
-sed -n '/generate_handler/,/^\s*\])/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"   # 79（M16-a 新增四条 version_*）；结束式必须是 `^\s*\]`：旧的 `/^      \]/` 对不上收尾行 `        ])`，范围跑到 EOF
-grep -c 'tauri::command(async)' src-tauri/src/lib.rs         # 7（M14 无新 async 命令；也别在注释里写这个字面量，门是原始 grep）
-grep -oE 'TARGET_VERSION: [a-z0-9]+ = [0-9]+' src-tauri/src/db.rs   # 12（M16-a 走 V12）
+sed -n '/generate_handler/,/^\s*\])/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"   # 82（M16-b 新增三条 note_asset_*）；结束式必须是 `^\s*\]`：旧的 `/^      \]/` 对不上收尾行 `        ])`，范围跑到 EOF
+grep -c 'tauri::command(async)' src-tauri/src/lib.rs         # 7（M16-b 三条新命令全是同步；也别在注释里写这个字面量，门是原始 grep）
+grep -oE 'TARGET_VERSION: [a-z0-9]+ = [0-9]+' src-tauri/src/db.rs   # 13（M16-b 走 V13）
 grep -c 'hits.append(&mut collect(' src-tauri/src/search.rs  # 9（本批未动检索）
-grep -rn "allow(dead_code)" src-tauri/src/ | wc -l           # 1（仍只有 db.rs:30，M14 没开新豁免）
+grep -rn "allow(dead_code)" src-tauri/src/ | wc -l           # 1（仍只有 db.rs:30，M16-b 没开新豁免）
 grep -c '^\[\[package\]\]' src-tauri/Cargo.lock              # 616
-git diff --stat origin/master..HEAD -- src-tauri/Cargo.toml src-tauri/Cargo.lock package.json   # 必须空输出（本批零新依赖）
-git ls-remote --heads origin | grep -E "master|m14"          # 现取；origin/master 应与本地逐字一致（功能分支仍在远端）
+git diff --stat origin/master..HEAD -- src-tauri/Cargo.toml src-tauri/Cargo.lock package.json   # 非空：4 insertions（base64 = "0.22" 直接依赖 + 根包依赖清单一行）；[[package]] 条数仍 616
+git ls-remote --heads origin | grep -E "master|m16b"         # 现取；origin/master 应与本地逐字一致（功能分支仍在远端）
 ```
 
 **执行这一串时的两个本机坑（本轮真踩过）**：① cargo/clippy 前要 `cd src-tauri`，而 **cwd 在多次工具调用之间会残留** —— 本轮第一次批量跑就因 `cd: src-tauri: No such file or directory` 让一条 clippy 根本没执行、`exit=1` 是 `cd` 的退出码（坑 4）；② `cd ..` 之后所有仓库根路径都按仓库根算。**合并本身**要另外核的两条例行是 `git merge-base --is-ancestor master <功能分支>; echo $?` 期望 **0**、`git rev-list --count master..<功能分支>` 看领先几笔，然后 `git checkout master && git merge --ff-only <功能分支>`；合完**在 `master` 的树上**复跑上面整套门，别拿分支读数交差。
 
 **M8.1 这一格没有真机验证**（§2 末），需要人手的那四格一条也没被这次合并兑掉（见 §3 末「只剩需求方能做的四格」）。
 
-**B（M16-a 收口后的候选增强）**：M11-a / M11-b / M12 / M13 / M14 / M15 都已合入 `master`，M16-a 项目版本台账 + 子文件选择器已做并合入 `master`（ee5713f）。下一格是 **M16-b：图文笔记/截图 + `note_assets` + 附件进备份**（`docs/思维导图.md:32` 仍未实现）；开工前先回原文（坑 34），并沿用本仓的 `brainstorming → spec → writing-plans → SDD → 终审 → 合并` 流程。**下面「已勘察完的事实」那几条是 M9 当轮的历史记录，保留不改。**
+**B（M16-b 收口后的候选增强）**：M11-a / M11-b / M12 / M13 / M14 / M15 都已合入 `master`，M16-a 项目版本台账 + 子文件选择器已做并合入 `master`（ee5713f），**M16-b 图文笔记/截图（V13 `note_assets` BLOB + 三条命令）已做完（分支 `feat/m16b-note-images`，`44a0100`），待批准合并** —— `docs/思维导图.md` 的 M16 三项（版本台账、截图、子文件选择器）到此全部落地，**下一格里程碑待需求方指定**；开工前先回原文（坑 34），并沿用本仓的 `brainstorming → spec → writing-plans → SDD → 终审 → 合并` 流程。**下面「已勘察完的事实」那几条是 M9 当轮的历史记录，保留不改。**
 
 已勘察完的事实（下一个对话不必重读，但建议复核）：
 
