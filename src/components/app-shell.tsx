@@ -1,6 +1,9 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link, Outlet } from "@tanstack/react-router";
+import { Settings } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { SettingsDialog } from "@/components/settings-dialog";
 import { VaultControl } from "@/components/vault-dialog";
 import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 import { useAppStore } from "@/stores/app-store";
@@ -18,6 +21,7 @@ const nav = [
 ];
 
 export function AppShell() {
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const { status, error, loading, refresh } = useAppStore();
   const refreshVault = useVaultStore((s) => s.refresh);
   const refreshWorkspaces = useWorkspacesStore((s) => s.refresh);
@@ -45,6 +49,15 @@ export function AppShell() {
         ))}
         <div className="ml-auto flex items-center gap-2">
           <WorkspaceSwitcher />
+          <Button
+            variant="ghost"
+            size="icon"
+            title="设置"
+            aria-label="设置"
+            onClick={() => setSettingsOpen(true)}
+          >
+            <Settings className="size-4" />
+          </Button>
           <VaultControl />
         </div>
       </header>
@@ -75,6 +88,8 @@ export function AppShell() {
           </>
         )}
       </footer>
+
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </div>
   );
 }

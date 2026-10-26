@@ -1,5 +1,7 @@
 # 交接文档 —— 项目资料管理（写给一个完全没有上下文的新对话）
 
+**2026-10-26 增量（设置 / 开机自启）**：设置弹窗新增「开机自启」（HKCU Run，Windows 用户级；值名「项目资料管理系统」）；`productName` / `mainBinaryName` 改为「项目资料管理系统」，`tauri build --debug --no-bundle` 产出 `target\debug\项目资料管理系统.exe`；命令 82→**84**、cargo **427**，async 7 / TARGET 13 / 豁免 1 / `Cargo.lock` 616 / collect 9 不变；真机开关 ON/OFF + 注册表读写 ALL-PASS（证据 `.superpowers/sdd/2026-10-26-autostart/`，git-ignored）。**
+
 **2026-10-26 快照（M16-b）**：**M16-b 图文笔记与截图：代码 + 9 处变异 + 真机 C-1…C-8 ALL-PASS，已 fast-forward 合入 `master`（合并点 `24703d0`；代码提交 `208e9a2` → `f742e93` → `44a0100`，文档提交 `3cb1a87` → `1b20d88` → `24703d0`）**；门禁 cargo **426** / node **75** / 命令 **82** / async 7 / `TARGET_VERSION` **13** / 豁免 1 / `Cargo.lock` 616 / collect 9；备份 schema **13**；证据在 `.superpowers/sdd/2026-10-26-m16b-note-images/`（git-ignored，收口前别清）。旧 M16-a 快照保留在下。
 
 **2026-10-24 快照（M16-a）**：**M16-a 项目版本台账 + 子文件选择器：代码 + 5 处变异 + 真机 C-1…C-4 全完，C-5 原生文件框人工待点，**已 fast-forward 合入 `master`（合并点 `ee5713f`）**（分支 `feat/m16a-project-versions`）；门禁 cargo **415** / node **75** / 命令 **79** / async 7 / `TARGET_VERSION` **12** / 豁免 1 / `Cargo.lock` 616 / collect 9；证据在 `.superpowers/sdd/2026-10-24-m16a-project-versions/`（git-ignored，收口前别清）。旧 M15 快照保留在下。
@@ -131,7 +133,7 @@
 
 **M14 的门禁清单（在 `feat/m14-audit-log` 的 HEAD 上跑过；收口时在合并后的 `master` 树上重跑）**：cargo **372**、node **71**、命令 **70**、async 7、`TARGET_VERSION: i64 = 10`、豁免 1、`Cargo.lock` 616、collect 9、依赖 diff 空、merge commit 0；数命令数的 `sed` 范围式用 `/^\s*\])/` 版。**这些数会漂，下面这串现跑为准。**
 
-**A（收口 / 合并用的门禁清单 —— M16-b 在合并点 `24703d0` 的 `master` 树上复跑过）**。M16-b 的**终态期望串**是 `命令 82 / async 7 / TARGET_VERSION 13 / 豁免 1 / Cargo.lock 616 / collect 9 / cargo 426 / node 75`（另有 `cargo build -j 1 --lib` exit=0、依赖 4 行插入且 `[[package]]` 仍 616、merge commit 0）。**任何一格收口都用这串现跑，别信写死的数**：
+**A（收口 / 合并用的门禁清单 —— 当前 `master` 在 M16-b 合并点 `24703d0` 之后加了开机自启，已现跑过）**。当前的**终态期望串**是 `命令 84 / async 7 / TARGET_VERSION 13 / 豁免 1 / Cargo.lock 616 / collect 9 / cargo 427 / node 75`（另有 `cargo build -j 1 --lib` exit=0、依赖 4 行插入且 `[[package]]` 仍 616、merge commit 0）。**任何一格收口都用这串现跑，别信写死的数**：
 
 ```
 git rev-parse --abbrev-ref HEAD                              # 合并前在 feat/m16b-note-images；收口时在 master
@@ -143,8 +145,8 @@ cargo clippy --lib -- -D warnings; cargo clippy --all-targets --all-features -- 
 cargo build -j 1 --lib                                       # exit=0
 cd .. && node --test "tests/**/*.test.ts"                    # tests 75 / pass 75 / fail 0（M16-b 不动前端纯函数；在仓库根跑）
 npm run build                                                # exit=0，且 grep -c "error TS" 为 0
-sed -n '/generate_handler/,/^\s*\])/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"   # 82（M16-b 新增三条 note_asset_*）；结束式必须是 `^\s*\]`：旧的 `/^      \]/` 对不上收尾行 `        ])`，范围跑到 EOF
-grep -c 'tauri::command(async)' src-tauri/src/lib.rs         # 7（M16-b 三条新命令全是同步；也别在注释里写这个字面量，门是原始 grep）
+sed -n '/generate_handler/,/^\s*\])/p' src-tauri/src/lib.rs | grep -cE "^ +[a-z_]+,?$"   # 84（M16-b 三条 note_asset_* + 开机自启两条）；结束式必须是 `^\s*\]`：旧的 `/^      \]/` 对不上收尾行 `        ])`，范围跑到 EOF
+grep -c 'tauri::command(async)' src-tauri/src/lib.rs         # 7（M16-b 三条 + 开机自启两条全是同步；也别在注释里写这个字面量，门是原始 grep）
 grep -oE 'TARGET_VERSION: [a-z0-9]+ = [0-9]+' src-tauri/src/db.rs   # 13（M16-b 走 V13）
 grep -c 'hits.append(&mut collect(' src-tauri/src/search.rs  # 9（本批未动检索）
 grep -rn "allow(dead_code)" src-tauri/src/ | wc -l           # 1（仍只有 db.rs:30，M16-b 没开新豁免）

@@ -281,3 +281,7 @@ export const openLibreOfficeDownloadPage = () =>
 // 意图（格式/明文/落点）都由前端收集，取数与写盘全在后端；`path` 来自保存对话框的当场选择。
 export const exportLedger = (input: LedgerExportInput) =>
   invoke<LedgerExportSummary>("ledger_export", { input });
+
+// —— 开机自启（设置）——
+export const autostartGet = () => invoke<boolean>("autostart_get");
+export const autostartSet = (enabled: boolean) => invoke<void>("autostart_set", { enabled });

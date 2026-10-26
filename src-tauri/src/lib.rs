@@ -1,3 +1,4 @@
+mod autostart;
 mod backup;
 mod daily_report;
 mod db;
@@ -213,6 +214,17 @@ fn workspace_delete(state: State<'_, AppState>, id: String) -> AppResult<()> {
 fn workspace_switch(state: State<'_, AppState>, id: String) -> AppResult<String> {
     let conn = db(&state)?;
     workspace::switch(&conn, &id)
+}
+
+/// 开机自启两条命令（Windows 用户级 Run 键）。同步：只写注册表，不碰连接池。
+#[tauri::command]
+fn autostart_get() -> AppResult<bool> {
+    autostart::is_enabled()
+}
+
+#[tauri::command]
+fn autostart_set(enabled: bool) -> AppResult<()> {
+    autostart::set_enabled(enabled)
 }
 
 #[tauri::command]
@@ -1175,7 +1187,9 @@ pub fn run() {
             workspace_create,
             workspace_rename,
             workspace_delete,
-            workspace_switch
+            workspace_switch,
+            autostart_get,
+            autostart_set
         ])
         .run(tauri::generate_context!())
         .expect("Tauri 应用启动失败");
