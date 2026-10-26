@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { indexDocs, searchDocs } from "@/lib/api";
+import { indexDocs, installLibreOffice, openLibreOfficeDownloadPage, searchDocs } from "@/lib/api";
 import { toAppError, type AppErrorShape } from "@/lib/ipc";
 import { isTerminal, useIndexJobStore } from "@/stores/index-job";
 import type { DocHit, DocRow, IndexProgress } from "@/types/index";
@@ -45,6 +45,7 @@ const STATUS_FILTERS: { value: string; label: string }[] = [
   { value: "ok", label: "ok（已入索引）" },
   { value: "skipped", label: "skipped（跳过）" },
   { value: "failed", label: "failed（失败）" },
+  { value: "missing", label: "missing（磁盘上已不存在）" },
 ];
 
 function fmtBytes(n: number): string {
@@ -70,6 +71,14 @@ export function IndexStatusPage() {
   const [docsBusy, setDocsBusy] = useState(false);
   const [docsError, setDocsError] = useState<AppErrorShape | null>(null);
   const [docsReload, setDocsReload] = useState(0);
+
+  // 一键安装 LibreOffice 的两格本地 state。刻意不复用索引作业 store 的 `error`：`load()` 的成功路径写的是
+  // `set({ overview, error: null })`（src/stores/index-job.ts:24，下面两处 start 的长注释正是为这个写的），
+  // 一个总览往返就把安装提示擦成 null，而这条提示必须活过那一趟。
+  // `installBusy` 只跟着这一次 IPC：命令 fire-and-forget，返回 true 仅代表「winget 窗口已弹出」，
+  // 装没装完界面并不知道 ⇒ 按钮按下去时置忙（防连点起 N 个安装窗口），回来即复位，绝不写「安装成功」。
+  const [installBusy, setInstallBusy] = useState(false);
+  const [installError, setInstallError] = useState<AppErrorShape | null>(null);
 
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<DocHit[]>([]);
@@ -125,6 +134,13 @@ export function IndexStatusPage() {
       setLastRunning({ projectName: progress.projectName, current: progress.current });
     }
   }, [progress]);
+
+  // 终审 F1：sofficeAvailable 一旦转真，装失败的红字就当场失效 —— 错误框渲染在状态条件之外，
+  // 不清就会留下「已启用本机 LibreOffice 转换」与「启动安装失败」同屏，后者成了屏幕上的谎话。
+  // 与本页惯例一致：只清这一格本地 state，不碰索引作业 store 的 error（那条有它自己的擦除路径）。
+  useEffect(() => {
+    if (overview?.sofficeAvailable) setInstallError(null);
+  }, [overview?.sofficeAvailable]);
 
   // 选中项目后取文件行；status 走参数（Rust 侧不拼 SQL）。
   useEffect(() => {
@@ -360,7 +376,7 @@ export function IndexStatusPage() {
       {/* 另一条错误来源：上一轮作业失败的原因串（刷新后唯一还留下的证据），没有 code，整段念。 */}
       {overview?.lastError && (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          <div className="font-medium">上一轮索引失败</div>
+          <div className="font-medium">上一轮索引未正常完成</div>
           <div className="mt-0.5 break-all" title={overview.lastError}>
             {overview.lastError}
           </div>
@@ -384,8 +400,53 @@ export function IndexStatusPage() {
             ))}
           </div>
           <p className="text-muted-foreground">
-            清单之外的类型（图片、.doc/.ppt、压缩包）不会建行：图片等归 M6 OCR，.doc/.ppt 归 M7。
+            清单之外的类型（压缩包等）不会建行。旧版 Office 与图片的支持情况见下面两条状态。
           </p>
+          {overview?.ocrAvailable ? (
+            <p className="text-xs text-muted-foreground">图片（png/jpg/jpeg/webp/bmp）已启用本机 OCR。</p>
+          ) : (
+            <p className="text-xs text-muted-foreground">图片 OCR 未启用：本机未安装可用的 Windows 文字识别语言包，图片暂不索引。</p>
+          )}
+          {overview?.sofficeAvailable ? (
+            <p className="text-xs text-muted-foreground">旧版 Office（.doc/.ppt）已启用本机 LibreOffice 转换。</p>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="text-xs text-muted-foreground">
+                未检测到 LibreOffice：.doc/.ppt 暂不索引。装一次即可，装完不用重启，下一轮自动开始建行。
+              </p>
+              <Button size="sm" variant="outline" disabled={installBusy} onClick={() => {
+                setInstallBusy(true);
+                // 与本页 docsError / searchError 同一惯例：新一轮尝试先把上一条失败擦掉。
+                // 不擦就会留下「上一条失败提示 + 这一次其实已经弹了 winget 窗口」同屏，那句提示变成谎话。
+                setInstallError(null);
+                // 这一条必须自己带 finally：命令是 fire-and-forget，返回 true 只代表「窗口已弹出」，
+                // 装完没装完界面不知道，所以按钮复位只跟着这一次 IPC 的**整条链**，不假装反映安装进度。
+                // 终审 F1：退路那一路必须 return 进链 —— 不接链时 finally 跟着第一条 IPC 就复位，
+                // 上一次点击的 openUrl 迟到 reject 会在下一次点击清空错误之后把红字写回来（M4 M-8 同型）。
+                void installLibreOffice()
+                  .then((r) => {
+                    if (!r.startedViaWinget) {
+                      return openLibreOfficeDownloadPage().catch(() =>
+                        setInstallError({ code: "unknown", message: "已探到本机没有 winget，也没能打开下载页，请手动访问 libreoffice.org", hint: null }),
+                      );
+                    }
+                  })
+                  .catch((e) => setInstallError(toAppError(e)))
+                  .finally(() => setInstallBusy(false));
+              }}>
+                {installBusy ? "正在启动…" : "安装 LibreOffice"}
+              </Button>
+            </div>
+          )}
+          {installError && (
+            <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              <div className="font-medium">启动安装失败</div>
+              <div className="mt-0.5 break-all" title={`${installError.message}${installError.hint ? `（${installError.hint}）` : ""}`}>
+                {installError.message}
+                {installError.hint ? `（${installError.hint}）` : ""}
+              </div>
+            </div>
+          )}
           <div className="flex flex-wrap gap-x-4 gap-y-1">
             <span>
               单文件上限：
@@ -416,8 +477,8 @@ export function IndexStatusPage() {
         <CardHeader>
           <CardTitle>按项目的索引状态</CardTitle>
           <CardDescription>
-            点一行看它的文件清单。计数只念 ok / skipped / failed 三档：另外两档在本阶段压根没有写入方，
-            摆两个 0 上去会被读成「都处理完了」，所以不给它们占栏位。
+            点一行看它的文件清单。计数念 ok / skipped / failed / missing 四档：pending 在本阶段没有写入方，
+            摆一个 0 上去会被读成「都处理完了」，所以不给它占栏位。
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-1.5">
@@ -460,6 +521,7 @@ export function IndexStatusPage() {
                     <span>ok {p.ok}</span>
                     <span>skipped {p.skipped}</span>
                     <span className={p.failed > 0 ? "text-destructive" : ""}>failed {p.failed}</span>
+                    <span className={p.missing > 0 ? "text-destructive" : ""}>missing {p.missing}</span>
                   </span>
                 </span>
               </Button>
@@ -515,6 +577,11 @@ export function IndexStatusPage() {
                         <Badge
                           variant={
                             r.status === "ok" ? "secondary" : r.status === "failed" ? "destructive" : "outline"
+                          }
+                          title={
+                            r.status === "missing"
+                              ? "该文件在磁盘上已不存在，正文已退出检索；文件放回后重跑一轮索引会自动回填这一行"
+                              : undefined
                           }
                         >
                           {r.status}
@@ -652,7 +719,7 @@ export function IndexStatusPage() {
           )}
           {!searchError && searched && hits.length === 0 && (
             <p className="text-xs text-muted-foreground">
-              没有命中。先确认上面「支持类型」里有没有它，再看项目表里它的行是 ok 还是 skipped。
+              没有命中。先确认上面「支持类型」里有没有它，再看项目表里它的行是 ok、skipped 还是 missing。
             </p>
           )}
           {hits.length > 0 && (

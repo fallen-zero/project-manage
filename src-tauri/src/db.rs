@@ -43,23 +43,10 @@ pub fn open_in_memory() -> AppResult<Connection> {
 /// 只有内存库允许没有 WAL：它不承载任何用户数据。
 fn after_open(conn: &Connection, durable: bool) -> AppResult<()> {
     if durable {
+        // 请求 WAL 之后必须读回来判（pragma_update 的 Ok 不代表真落到 WAL）。拆出去的那半段
+        // 见 assert_wal —— 本行的 side effect 留在 after_open，判据留在 assert_wal，M8 只调判据。
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
-        let mode: String = conn
-            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
-            .map_err(|e| {
-                AppError::new(
-                    "db_pragma_failed",
-                    &format!("读取 journal_mode 失败：{e}"),
-                    Some("确认数据目录可写、ledger.db 未损坏（必要时从备份恢复），或把数据目录换到本地磁盘"),
-                )
-            })?;
-        if !mode.eq_ignore_ascii_case("wal") {
-            return Err(AppError::new(
-                "db_pragma_failed",
-                &format!("无法把数据库切换为 WAL 模式（当前为 {mode}）"),
-                Some("数据库所在路径不支持 WAL（网络盘或被安全软件拦截常见），请把数据目录换到本地磁盘"),
-            ));
-        }
+        assert_wal(conn)?;
     } else {
         // 内存库的 journal_mode 只能是 MEMORY/OFF，这次请求会被 SQLite 直接忽略，拿不到 WAL 是无害的。
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
@@ -69,6 +56,31 @@ fn after_open(conn: &Connection, durable: bool) -> AppResult<()> {
     pragma(conn, "foreign_keys", "ON")?;
     pragma(conn, "busy_timeout", "5000")?;
     migrate(conn)
+}
+
+/// 现读 `PRAGMA journal_mode` 并断它等于 wal。M0 那条「不信 `pragma_update` 的 Ok、必须读回」
+/// 硬门的读回半段；从 `after_open` 拆出来是给 M8 导入收尾复用的 —— `Connection::restore` 灌的是
+/// **已打开**的连接，根本不经过 `after_open`，不现读一次就留下「库内容整库换过、WAL 从没在这份
+/// 内容上被断过」的状态（spec §七 那条判据）。错误码与措辞一字不改，`durable_open_really_runs_in_wal`
+/// 与 `side_file_unopenable_pins_the_readback_invariant` 钉的就是这两条错误的形状。
+pub fn assert_wal(conn: &Connection) -> AppResult<()> {
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .map_err(|e| {
+            AppError::new(
+                "db_pragma_failed",
+                &format!("读取 journal_mode 失败：{e}"),
+                Some("确认数据目录可写、ledger.db 未损坏（必要时从备份恢复），或把数据目录换到本地磁盘"),
+            )
+        })?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(AppError::new(
+            "db_pragma_failed",
+            &format!("无法把数据库切换为 WAL 模式（当前为 {mode}）"),
+            Some("数据库所在路径不支持 WAL（网络盘或被安全软件拦截常见），请把数据目录换到本地磁盘"),
+        ));
+    }
+    Ok(())
 }
 
 fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
@@ -82,9 +94,11 @@ fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
 }
 
 /// 线性版本迁移：一个版本一段 DDL，只追加不改历史，便于备份包跨版本恢复。
-const TARGET_VERSION: i64 = 4;
+/// 提 `pub(crate)` 是给 M8 的验包判据比：包里的库比本机新就该拒（`backup::read_package`）。
+pub(crate) const TARGET_VERSION: i64 = 13;
 
-fn migrate(conn: &Connection) -> AppResult<()> {
+/// `pub(crate)` 是 M8 加的：`backup_import` 灌完包内库要能重放迁移（包里可能是旧版本）。
+pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_meta (
              version    INTEGER NOT NULL,
@@ -106,6 +120,15 @@ fn migrate(conn: &Connection) -> AppResult<()> {
             2 => V2,
             3 => V3,
             4 => V4,
+            5 => V5,
+            6 => V6,
+            7 => V7,
+            8 => V8,
+            9 => V9,
+            10 => V10,
+            11 => V11,
+            12 => V12,
+            13 => V13,
             _ => "",
         };
         apply_version(conn, target, ddl)?;
@@ -312,9 +335,196 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
     ('index_max_files_per_project', '50000');
 ";
 
+/// v5：待办清单 + 项目里程碑（M9，spec §三）。
+/// 三处是「照需求写」而不是「照方便写」，别顺手改：
+/// 1. `stage` 的五个词是 `思维导图.md:35-36` 原文（立项/评审/联调/上线/验收）。它与
+///    `projects.status` 那八段**是两套词**、共有「立项」「上线」两个同形词而语义不同（spec D4）：
+///    status 是「项目当前在哪」，stage 是「过程节点」。别统一，别让一个下拉喂两个字段。
+/// 2. `done` 用 INTEGER + CHECK 而不是裸布尔约定：SQLite 没有布尔列，而 CHECK 挡住「直写库的人」，
+///    serde 侧仍然出 `bool`（`rusqlite` 的 `bool` ToSql/FromSql 走 0/1）。
+/// 3. 日期列**只由写入侧保证形状**（`todo::is_iso_date`），SQL 里不做任何日期解释：
+///    `strftime('now')` 是 UTC，用它比日期会把本机「今天到期」算错一天（spec D1）。
+const V5: &str = "
+CREATE TABLE todos (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    title      TEXT NOT NULL,
+    due_date   TEXT,
+    done       INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0,1)),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT
+);
+
+CREATE TABLE milestones (
+    id         TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    stage      TEXT NOT NULL CHECK (stage IN ('立项','评审','联调','上线','验收')),
+    plan_date  TEXT,
+    note       TEXT NOT NULL DEFAULT '',
+    done       INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0,1)),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at TEXT
+);
+
+CREATE INDEX ix_todo_project ON todos(project_id);
+CREATE INDEX ix_milestone_project ON milestones(project_id);
+";
+
+/// V6 = 日报表（M10 spec §五.1）。三条口径延续 V5 的注释：
+/// 1. 软删沿用 `deleted_at`；`ON DELETE CASCADE` 因项目是软删（`project.rs` 的 UPDATE）而永不触发，
+///    所以「跨项目读要自带 p.deleted_at IS NULL」这条规矩照旧适用于本表。
+/// 2. `hours` 用 REAL 且**不加 CHECK**：表由本程序唯一写入，`0<h<=24` 与两位小数的判据在 Rust 侧
+///    （`daily_report::check_hours`）。CHECK 违例冒出来是 `db_failed`，会把「校验失败」伪装成库故障。
+/// 3. `report_date` 的形状与必填**只由写入侧保证**（`todo::req_date`）：SQL 里不做任何日期解释，
+///    `strftime`/`date` 是 UTC，用它比较会把本机日期算错（M9 D7 同一个理由，spec D9 沿用）。
+const V6: &str = "
+CREATE TABLE daily_reports (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    report_date TEXT NOT NULL,
+    content     TEXT NOT NULL,
+    hours       REAL NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at  TEXT
+);
+
+CREATE INDEX ix_daily_report_project ON daily_reports(project_id);
+";
+
+/// V7 = 到期事项表（M11-a spec §四）。四条口径延续 V5/V6 的注释：
+/// 1. 软删沿用 `deleted_at`；`ON DELETE CASCADE` 因项目是软删（`project.rs` 的 UPDATE）而永不触发，
+///    所以「跨项目读要自带 p.deleted_at IS NULL」这条规矩照旧适用于本表（Task 2/3 各落一次）。
+/// 2. `kind` 这里留 CHECK 只是**直写库的最后闸门**：命令路径的合法值判据在 `expiry::check_kind`，
+///    因为 CHECK 违例冒出来是 `db_failed`，会把「你选的种类不在词表里」伪装成库故障（V5 的 stage 同形）。
+/// 3. `expire_date` **必填但不加形状 CHECK**：形状与空白由写入侧的 `todo::req_date` 判（D2 的语义是
+///    「这一行的有效期到 X」，没 X 就没意义）；SQL 里不做任何日期解释（`strftime`/`date` 是 UTC）。
+/// 4. **零回填**：老项目的维保/域名/证书信息不由迁移猜，由用户自己录（延续 M9 为 V5 立的规矩）。
+const V7: &str = "
+CREATE TABLE project_expiries (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL CHECK (kind IN ('维保','域名','证书','其他')),
+    label       TEXT NOT NULL,
+    expire_date TEXT NOT NULL,
+    note        TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at  TEXT
+);
+
+CREATE INDEX ix_expiry_project ON project_expiries(project_id);
+";
+
+/// v8：项目模板（M12 spec §三）。只存项目基础信息；模板名 UNIQUE；tags 是 JSON 数组；
+/// **硬删除，没有 deleted_at**（配置型快捷方式，不是业务记录）。零回填。
+const V8: &str = "
+CREATE TABLE project_templates (
+    id                TEXT PRIMARY KEY,
+    name              TEXT NOT NULL UNIQUE,
+    code              TEXT,
+    manager           TEXT,
+    customer          TEXT,
+    contact_name      TEXT,
+    contact_phone     TEXT,
+    contract_no       TEXT,
+    contract_period   TEXT,
+    delivery_deadline TEXT,
+    status            TEXT NOT NULL DEFAULT '立项'
+                      CHECK (status IN ('立项','需求','开发','测试','预发','上线','运维','归档')),
+    tags              TEXT NOT NULL DEFAULT '[]',
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+";
+
+/// v9：父子项目关联（M13 spec §三）。单父树；不建外键、不级联，环与父项有效性
+/// 由 `project::validate_parent` 在命令层判。**零回填**：存量项目保持顶层。
+const V9: &str = "
+ALTER TABLE projects ADD COLUMN parent_id TEXT;
+CREATE INDEX idx_projects_parent_id ON projects(parent_id);
+";
+
+/// v10：项目信息修改操作日志（M14 spec §三）。只追加、无外键、无软删、永不清理；
+/// 项目软删后日志仍保留，project_id 只是快照关联。
+const V10: &str = "
+CREATE TABLE project_audit_logs (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL,
+    project_name TEXT NOT NULL,
+    action       TEXT NOT NULL CHECK (action IN ('create','update','delete')),
+    changes      TEXT NOT NULL DEFAULT '[]',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX ix_audit_created ON project_audit_logs(created_at);
+CREATE INDEX ix_audit_project ON project_audit_logs(project_id, created_at);
+";
+
+/// v11：多工作区（M15 spec §三）。一张 `workspaces` + `projects.workspace_id` + 一个当前区设置行。
+/// 顺序是刻意的：先建表并种默认区，再给 projects 加带 DEFAULT 的列 —— 这样「存量项目回填到默认区」
+/// 由 SQLite 的 `ADD COLUMN` 语义天然完成，迁移里不写一句 UPDATE。
+/// `settings` 用 `INSERT OR IGNORE`：它是 V1 就有的表，键位可能已被备份导入带进来，冲突必须静默跳过。
+/// `workspaces` 用裸 `INSERT`：表刚建出来必然为空，写 `OR IGNORE` 反而会把「默认区被人为删过」吞掉。
+const V11: &str = "
+CREATE TABLE workspaces (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+INSERT INTO workspaces (id, name) VALUES ('default', '默认工作区');
+
+ALTER TABLE projects ADD COLUMN workspace_id TEXT NOT NULL DEFAULT 'default';
+
+CREATE INDEX ix_project_workspace ON projects(workspace_id);
+
+INSERT OR IGNORE INTO settings (key, value) VALUES ('active_workspace_id', 'default');
+";
+
+/// v12：项目版本台账（M16-a spec §三）。一行一次上线；软删；同项目版本号唯一（软删不占号）。
+const V12: &str = "
+CREATE TABLE project_versions (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    version     TEXT NOT NULL,
+    released_at TEXT NOT NULL,
+    content     TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    deleted_at  TEXT
+);
+
+CREATE INDEX ix_project_version_project ON project_versions(project_id, released_at);
+
+CREATE UNIQUE INDEX ux_project_version_project_version
+    ON project_versions(project_id, version)
+    WHERE deleted_at IS NULL;
+";
+
+/// v13：备注截图（M16-b spec §三）。图片字节直接存库（BLOB），无附件目录、无软删；
+/// 软删备注靠宿主行的 `deleted_at` 挡读，硬删备注由 FK 级联清图。
+const V13: &str = "
+CREATE TABLE note_assets (
+    id         TEXT PRIMARY KEY,
+    note_id    TEXT NOT NULL REFERENCES ledger_notes(id) ON DELETE CASCADE,
+    mime       TEXT NOT NULL,
+    size       INTEGER NOT NULL,
+    data       BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX ix_note_asset_note ON note_assets(note_id, created_at);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 测试体按简报走 `db::` 全路径调用（与 M8 `backup_import` 实际调用 `db::assert_wal` 的形状一致），
+    // 而 edition 2021 下模块自身不进入子模块作用域，故显式把 `crate::db` 引进来。
+    use crate::db;
     use rusqlite::params;
 
     /// index_docs.project_id 有 REFERENCES projects(id) 外键，而 after_open 里
@@ -415,6 +625,10 @@ mod tests {
         );
         assert_eq!(read("index_max_file_bytes"), "20971520", "spec 定的单文件 20 MB");
         assert_eq!(read("index_max_files_per_project"), "50000");
+        // 引用 TARGET_VERSION 而非写字面数字：本断言钉的是「迁移链真的跑到了链头并写下版本号」，
+        // 写死数字会在每次加版本时假红（与 lib.rs 的 `bootstrap_data...` 同一形制）。链头**具体等于几**
+        // 由本文件下方那条 `..._schema_meta_reaches_target_version_...` 钉死（每加一版就改名：v5_→v6_→v7_），
+        // 这里既不写死版本号、也不写死行号，只给可 grep 的名字形状；这里不与之重复。
         assert_eq!(
             conn.query_row(
                 "SELECT COALESCE(MAX(version),0) FROM schema_meta",
@@ -422,7 +636,7 @@ mod tests {
                 |r| r.get::<_, i64>(0)
             )
             .unwrap(),
-            4
+            TARGET_VERSION
         );
     }
 
@@ -501,5 +715,820 @@ mod tests {
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
         assert_eq!(mode.to_lowercase(), "memory");
+    }
+
+    /// 拆分前后同红同绿：`assert_wal` 只对**读回**负责。这里刻意不用 `open` 那条路径（它自己会
+    /// 先 `pragma_update`），而是把一份已 WAL 的文件库改回 DELETE 模式再喂给 `assert_wal` ——
+    /// 于是这条测试钉的是「读回不是 wal 就必须红」，而不是「open 之后一般是 wal」。
+    /// M8 的 `backup_import` 在 `restore` 之后现读它（`restore` 绕过 `after_open`，spec §七），
+    /// 这条门没有测试就等于 spec §十一.8 那条风险没人守。
+    #[test]
+    fn assert_wal_rejects_a_db_that_fell_out_of_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::open(dir.path()).unwrap();
+        // 先证正对照：刚 open 完必须过（否则下一条断言可能是恒红）。
+        db::assert_wal(&conn).expect("open 之后 assert_wal 必须过");
+        conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
+        let err = db::assert_wal(&conn).expect_err("掉回 DELETE 必须红，否则 M8 的导入收尾门什么都没钉住");
+        assert_eq!(err.code, "db_pragma_failed");
+        // 读回的模式是 SQLite 原样给的（本机实测为小写 delete），所以这里大小写不敏感地断「错误里
+        // 念出了实际读到的模式」—— 与 assert_wal 用 eq_ignore_ascii_case 同一个理由，别改成硬编码小写。
+        assert!(
+            err.message.to_uppercase().contains("DELETE"),
+            "错误里要念出实际读到的模式：{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn the_three_20mb_defaults_are_one_number() {
+        // M5 终审发现的「四个家」：种子值 / get 默认串 / parse 回退值 三处各写一遍 20 MB，
+        // 没有一致性断言 ⇒ 改一处就悄悄漂。本任务把后两处收敛到 index_scan 的一个 pub const，
+        // 本断言钉「种子 == 那个 const」。
+        let conn = open_in_memory().unwrap();
+        let seeded: String = conn
+            .query_row("SELECT value FROM settings WHERE key = 'index_max_file_bytes'", [], |r| r.get(0))
+            .unwrap();
+        let seeded: u64 = seeded.parse().unwrap();
+        assert_eq!(
+            seeded,
+            crate::index_scan::DEFAULT_MAX_FILE_BYTES,
+            "settings 种子值与 ScanOptions 的默认上限必须是同一个数"
+        );
+    }
+
+    /// V5 必须真把两张表和两个索引建出来（`CREATE TABLE` 没写 `IF NOT EXISTS`，
+    /// 所以「对象建了一半、schema_meta 停在旧版本」这个失败形状在事务保护下不会发生，
+    /// 但建了表漏了索引是看得见的，这里一起钉）。
+    #[test]
+    fn v5_creates_todo_and_milestone_tables_and_indexes() {
+        let conn = open_in_memory().unwrap();
+        let names: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                  WHERE name IN ('todos','milestones','ix_todo_project','ix_milestone_project')
+                  ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            names,
+            vec![
+                "ix_milestone_project",
+                "ix_todo_project",
+                "milestones",
+                "todos"
+            ],
+            "V5 的四个对象必须全在：{names:?}"
+        );
+    }
+
+    #[test]
+    fn v13_schema_meta_reaches_target_version_thirteen() {
+        let conn = open_in_memory().unwrap();
+        let ver: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, 13, "迁移必须跑到 13");
+        assert_eq!(TARGET_VERSION, 13, "= 上一条，两处别各写各的");
+    }
+
+    /// V13 必须建出截图表、索引，且表上没有软删列（硬删口径，spec §三）。
+    #[test]
+    fn v13_note_assets_table_and_index_exist() {
+        let conn = open_in_memory().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('note_assets') ORDER BY cid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(
+            cols.join(","),
+            "id,note_id,mime,size,data,created_at",
+            "V13 的列集合/顺序变了要同步 note_asset.rs 的 SELECT"
+        );
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='index' AND name='ix_note_asset_note'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "ix_note_asset_note 必须存在");
+        let soft: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('note_assets') WHERE name='deleted_at'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(soft, 0, "截图是硬删，不该有 deleted_at");
+    }
+
+    /// V10 必须建出日志表与两条显式索引。
+    #[test]
+    fn v10_project_audit_logs_table_and_indexes_exist() {
+        let conn = open_in_memory().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('project_audit_logs') ORDER BY cid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(
+            cols.join(","),
+            "id,project_id,project_name,action,changes,created_at",
+            "V10 的列集合/顺序变了要同步 project_audit.rs 的 SELECT"
+        );
+        let idx: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                  WHERE type = 'index' AND tbl_name = 'project_audit_logs' AND sql IS NOT NULL
+                  ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(idx, vec!["ix_audit_created", "ix_audit_project"], "V10 索引不对：{idx:?}");
+    }
+
+    /// V10 零回填：新建库跑完迁移后日志表必须为空。
+    #[test]
+    fn v10_backfills_nothing() {
+        let conn = open_in_memory().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_audit_logs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "V10 不许写任何业务行");
+    }
+
+    /// V11 必须建出 `workspaces`（三列、顺序固定）并给 `projects` 加 `workspace_id` 列。
+    /// 列顺序变了要同步 `workspace.rs` 的 SELECT；本仓的形制是用这条断言把线格式钉住。
+    #[test]
+    fn v11_workspaces_table_and_projects_column_exist() {
+        let conn = open_in_memory().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('workspaces') ORDER BY cid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(cols.join(","), "id,name,created_at", "V11 的 workspaces 列集合/顺序不对：{cols:?}");
+
+        let pcols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('projects')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert!(
+            pcols.iter().any(|c| c == "workspace_id"),
+            "V11 必须给 projects 加 workspace_id 列：{pcols:?}"
+        );
+    }
+
+    /// V9 必须给 projects 加 parent_id 列，并且只建这一条显式索引。
+    /// `sqlite_autoindex_*`（sql 为 NULL）不算：TEXT 主键每张表都有。
+    #[test]
+    fn v9_projects_parent_id_and_index_exist() {
+        let conn = open_in_memory().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('projects')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert!(cols.iter().any(|c| c == "parent_id"), "V9 必须加 parent_id 列：{cols:?}");
+
+        let idx: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                  WHERE type = 'index' AND tbl_name = 'projects' AND sql IS NOT NULL
+                  ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(
+            idx,
+            vec!["idx_projects_parent_id", "ix_project_workspace"],
+            "projects 上的显式索引只有这两条：{idx:?}"
+        );
+    }
+
+    /// V9 零回填：先手工把库建到 V8、落一条存量项目，再跑 V9；
+    /// 存量行必须保持 `parent_id IS NULL`（迁移里只有 DDL，不猜归属）。
+    #[test]
+    fn v9_parent_id_is_added_null_for_existing_projects() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta (version INTEGER NOT NULL, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for (target, ddl) in [
+            (1, V1),
+            (2, V2),
+            (3, V3),
+            (4, V4),
+            (5, V5),
+            (6, V6),
+            (7, V7),
+            (8, V8),
+        ] {
+            apply_version(&conn, target, ddl).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO projects (id, name) VALUES ('p-old', '存量项目')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_id FROM projects WHERE id = 'p-old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent, None, "V9 零回填：存量项目必须保持顶层");
+        let ver: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        // 这里只钉「迁移确实跑到了链头」；链头的具体数字由 v11_schema_meta... 那支负责。
+        assert_eq!(ver, TARGET_VERSION);
+    }
+
+    /// V8 必须把模板表与 name 唯一索引建出来，且迁移不带任何模板行（零回填）。
+    #[test]
+    fn v8_project_templates_table_and_unique_name_exist() {
+        let conn = open_in_memory().unwrap();
+        let table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'project_templates'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(table, 1, "V8 必须建 project_templates");
+        let mut stmt = conn.prepare("PRAGMA index_list('project_templates')").unwrap();
+        let indexes: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(1)?, r.get(3)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        // `id TEXT PRIMARY KEY` 也会生成一条 origin='pk' 的唯一索引；只认 origin='u' 的约束，
+        // 再用 index_info 精确断它落在 name 上 —— 直接数「唯一索引恰好 1 条」会恒红（实测 2 条）。
+        let unique = indexes
+            .iter()
+            .find(|(_, origin)| origin == "u")
+            .expect("name 必须有 UNIQUE 约束");
+        let mut cols = conn
+            .prepare(&format!("PRAGMA index_info('{}')", unique.0))
+            .unwrap();
+        let names: Vec<String> = cols
+            .query_map([], |r| r.get(2))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(names, vec!["name"], "UNIQUE 约束必须落在 name 上");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_templates", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "V8 零回填：老库迁移后模板表必须为空");
+    }
+
+    /// D4：`stage` 是 CHECK 枚举。这五个词是需求原文那五个（思维导图.md:35-36），
+    /// 词表外的值必须被挡；报错文本要确认是 CHECK 而不是别的约束。
+    #[test]
+    fn v5_milestone_stage_check_refuses_words_outside_the_five() {
+        let conn = open_in_memory().unwrap();
+        seed_project(&conn, "p-stage");
+        for stage in ["立项", "评审", "联调", "上线", "验收"] {
+            conn.execute(
+                "INSERT INTO milestones (id, project_id, stage) VALUES (?1, 'p-stage', ?2)",
+                params![format!("m-{stage}"), stage],
+            )
+            .unwrap_or_else(|e| panic!("五段词表里的「{stage}」必须插得进去：{e}"));
+        }
+        let err = conn
+            .execute(
+                "INSERT INTO milestones (id, project_id, stage) VALUES ('m-bad', 'p-stage', '初验')",
+                [],
+            )
+            .expect_err("词表外的阶段名必须被 CHECK 拒掉");
+        assert!(
+            err.to_string().contains("CHECK constraint failed"),
+            "要的是 CHECK 那条错，实际：{err}"
+        );
+    }
+
+    /// D5：`done` 只吃 0/1。写 2 必须报错 —— 否则「布尔」只是约定。
+    #[test]
+    fn v5_done_column_check_refuses_values_other_than_zero_and_one() {
+        let conn = open_in_memory().unwrap();
+        seed_project(&conn, "p-done");
+        // 两张表的列集不同（todos 无 stage、milestones 无 title），各写各的 INSERT 才只撞到
+        // done 那一条 CHECK；共用一支含全部列的 INSERT 会先报「no such column」而绕开 CHECK。
+        let cases = [
+            (
+                "todos",
+                "INSERT INTO todos (id, project_id, title, done) VALUES ('x', 'p-done', 't', 2)",
+            ),
+            (
+                "milestones",
+                "INSERT INTO milestones (id, project_id, stage, done) VALUES ('x', 'p-done', '立项', 2)",
+            ),
+        ];
+        for (table, sql) in cases {
+            let err = conn
+                .execute(sql, [])
+                .expect_err("两张表的 done 都不许收 2");
+            assert!(
+                err.to_string().contains("CHECK constraint failed"),
+                "{table} 的 done 要的是 CHECK，实际：{err}"
+            );
+        }
+    }
+
+    /// D8 的前提事实：`PRAGMA foreign_keys=ON` 真的在挡外键。
+    /// 这条不是装饰 —— 它是「软删项目不会被 CASCADE 删掉子行」的另一半证明
+    /// （另一半在 T2/T3 的 cross_project 测试里：行还在、只是读不到）。
+    #[test]
+    fn v5_both_new_tables_enforce_the_project_foreign_key() {
+        let conn = open_in_memory().unwrap();
+        let err = conn
+            .execute(
+                "INSERT INTO todos (id, project_id, title) VALUES ('t-x', 'no-such-project', '甲')",
+                [],
+            )
+            .expect_err("不存在的项目必须挡住");
+        assert!(
+            err.to_string().contains("FOREIGN KEY constraint failed"),
+            "要的是 FK 那条错，实际：{err}"
+        );
+        let err2 = conn
+            .execute(
+                "INSERT INTO milestones (id, project_id, stage) VALUES ('m-x', 'no-such-project', '立项')",
+                [],
+            )
+            .expect_err("milestones 同理");
+        assert!(
+            err2.to_string().contains("FOREIGN KEY constraint failed"),
+            "要的是 FK 那条错，实际：{err2}"
+        );
+    }
+
+    /// 默认值是线格式的一部分：日期列可空、done 默认 0、note 默认空串。
+    #[test]
+    fn v5_dates_default_to_null_and_done_defaults_to_zero() {
+        let conn = open_in_memory().unwrap();
+        seed_project(&conn, "p-def");
+        conn.execute(
+            "INSERT INTO todos (id, project_id, title) VALUES ('t-1', 'p-def', '只填标题')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO milestones (id, project_id, stage) VALUES ('m-1', 'p-def', '立项')",
+            [],
+        )
+        .unwrap();
+        let (due, done): (Option<String>, i64) = conn
+            .query_row(
+                "SELECT due_date, done FROM todos WHERE id = 't-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(due, None, "due_date 不填就是 NULL，不是空串");
+        assert_eq!(done, 0, "新行默认未完成");
+        let (plan, note, mdone): (Option<String>, String, i64) = conn
+            .query_row(
+                "SELECT plan_date, note, done FROM milestones WHERE id = 'm-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(plan, None, "plan_date 不填就是 NULL");
+        assert_eq!(note, "", "里程碑 note 默认空串（需求原文把它当可选项，不是必填）");
+        assert_eq!(mdone, 0);
+    }
+
+    /// 列集合与顺序一起钉：顺序漂了 `SELECT_COLUMNS`（Task 2）会静默错位读，
+    /// 而改名会同时打掉 `src/types/daily-report.ts` 与 xlsx 表头两处。
+    #[test]
+    fn v6_creates_daily_reports_with_documented_columns() {
+        let conn = db::open_in_memory().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('daily_reports') ORDER BY cid")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(
+            cols.join(","),
+            "id,project_id,report_date,content,hours,created_at,updated_at,deleted_at",
+            "V6 的列集合/顺序变了要同步 daily_report.rs 的 SELECT_COLUMNS 与 xlsx 表头"
+        );
+    }
+
+    /// 这一格钉的是**为什么必填日期必须走 `req_date` 而不是 `norm_date`**（spec §五.2）：
+    /// 缺列/NULL 走到 SQL 才有约束来挡，而那一挡冒出来是 SQLite 的 NOT NULL，不是我们的 invalid_input。
+    #[test]
+    fn v6_report_date_not_null_is_enforced_at_sqlite_layer() {
+        let conn = db::open_in_memory().unwrap();
+        seed_project(&conn, "p1");
+        let err = conn
+            .execute(
+                "INSERT INTO daily_reports (id, project_id, content, hours) VALUES ('d1','p1','甲',1.0)",
+                [],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("NOT NULL"),
+            "预期是 NOT NULL 挡住（而不是 CHECK 或外键），实际：{err}"
+        );
+    }
+
+    /// 本轮新立的规矩：**V6 零回填**（延续 M9 为 V5 立的那条）。迁移里不许塞业务行。
+    #[test]
+    fn v6_backfills_nothing() {
+        let conn = db::open_in_memory().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM daily_reports", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "新建库跑完迁移后本表必须是空的");
+    }
+
+    #[test]
+    fn v7_creates_project_expiries_with_documented_columns() {
+        let conn = db::open_in_memory().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('project_expiries') ORDER BY cid")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(
+            cols.join(","),
+            "id,project_id,kind,label,expire_date,note,created_at,updated_at,deleted_at",
+            "V7 的列集合/顺序变了要同步 expiry.rs 的 SELECT_COLUMNS"
+        );
+        // `sql IS NOT NULL` 不是洁癖：TEXT 主键会让 SQLite 自带一支 `sqlite_autoindex_*`（`sql` 为 NULL），
+        // 每张表都有（daily_reports 同理）。不排掉它，下面那句「索引必须恰好只有 ix_expiry_project」
+        // 在任何正确 DDL 下都恒红；排掉后它钉的才是**本迁移自己写下的索引**：多建一条日期索引
+        // （spec §四 明令不建）就会红，漏建 ix_expiry_project 也会红。
+        let idx: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'project_expiries' AND sql IS NOT NULL ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(idx, vec!["ix_expiry_project"], "只建项目维度的索引，**没有日期索引**（spec §四）：{idx:?}");
+    }
+
+    /// D2 的 SQL 层兜底：`expire_date` NOT NULL 真的挡得住直写库。
+    /// 这条钉的是「为什么必填日期走 `req_date` 而不是 `norm_date`」的同一条理由（延续 v6 那格）。
+    #[test]
+    fn v7_expire_date_not_null_is_enforced_at_sqlite_layer() {
+        let conn = db::open_in_memory().unwrap();
+        seed_project(&conn, "p1");
+        let err = conn
+            .execute(
+                "INSERT INTO project_expiries (id, project_id, kind, label) VALUES ('x1','p1','域名','a.gov.cn')",
+                [],
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("NOT NULL"),
+            "预期是 NOT NULL 挡住（而不是 CHECK 或外键），实际：{err}"
+        );
+    }
+
+    /// 四类词表外的值必须被 SQL 的 CHECK 挡住：这是绕过命令直写库的那条路的最后一道闸门。
+    /// 报错要确认是 CHECK 而不是别的约束（延续 `v5_milestone_stage_check_...` 的判法）。
+    #[test]
+    fn v7_kind_check_refuses_words_outside_the_four() {
+        let conn = db::open_in_memory().unwrap();
+        seed_project(&conn, "p-kind");
+        for kind in ["维保", "域名", "证书", "其他"] {
+            conn.execute(
+                "INSERT INTO project_expiries (id, project_id, kind, label, expire_date)
+                  VALUES (?1, 'p-kind', ?2, '一行', '2027-01-31')",
+                rusqlite::params![format!("e-{kind}"), kind],
+            )
+            .unwrap_or_else(|e| panic!("四类词表里的「{kind}」必须插得进去：{e}"));
+        }
+        let err = conn
+            .execute(
+                "INSERT INTO project_expiries (id, project_id, kind, label, expire_date)
+                  VALUES ('e-bad', 'p-kind', '备案', '一行', '2027-01-31')",
+                [],
+            )
+            .expect_err("词表外的种类名必须被 CHECK 拒掉（需求原文只有三类，「其他」是 D7 加的那一格）");
+        assert!(
+            err.to_string().contains("CHECK constraint failed"),
+            "要的是 CHECK 那条错，实际：{err}"
+        );
+    }
+
+    #[test]
+    fn v7_backfills_nothing() {
+        let conn = db::open_in_memory().unwrap();
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_expiries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "新建库跑完迁移后本表必须是空的（迁移里不许塞业务行）");
+    }
+
+    /// V11 的回填不是 UPDATE：先把库手工建到 V10、落一个带标签的存量项目，再跑 `migrate`。
+    /// 存量行必须由 `ADD COLUMN … DEFAULT 'default'` 自动落进默认区，其余列一个字节都不许变
+    /// （spec §三 第 1 条 + D2「升级后打开应用看到的必须和升级前一模一样」）。
+    /// 这一条同时是「旧备份包导入」那半段的判据：`backup.rs:556` 导入收尾调的就是这个 `migrate`。
+    #[test]
+    fn v11_backfills_existing_projects_into_default() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta (version INTEGER NOT NULL, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for (target, ddl) in [
+            (1, V1),
+            (2, V2),
+            (3, V3),
+            (4, V4),
+            (5, V5),
+            (6, V6),
+            (7, V7),
+            (8, V8),
+            (9, V9),
+            (10, V10),
+        ] {
+            apply_version(&conn, target, ddl).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO projects (id, name, customer) VALUES ('p-old', '存量项目', '甲客户')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO project_tags (id, project_id, tag) VALUES ('t-old', 'p-old', '政务')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let ws: String = conn
+            .query_row("SELECT workspace_id FROM projects WHERE id = 'p-old'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ws, "default", "存量项目必须回填进默认区");
+        let bits: String = conn
+            .query_row(
+                "SELECT name || '/' || customer FROM projects WHERE id = 'p-old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bits, "存量项目/甲客户", "V11 只许动 workspace_id 一列");
+        let tag: String = conn
+            .query_row("SELECT tag FROM project_tags WHERE id = 't-old'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tag, "政务", "标签行不该被迁移碰");
+        let ver: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, TARGET_VERSION);
+    }
+
+    /// V11 必须种出「有且仅有一行默认区」+「`active_workspace_id = default`」。
+    /// 这两行是 §四 `active_id` 与 §五 三道删除守卫的地基：默认区被种成别的名字，
+    /// 顶栏就会多出一个空区；设置行没种上，首屏就走进 `active_id` 的兜底分支（那是兜底不是主路径）。
+    #[test]
+    fn v11_seeds_default_workspace_and_active_setting() {
+        let conn = open_in_memory().unwrap();
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT id, name FROM workspaces ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![("default".to_owned(), "默认工作区".to_owned())],
+            "V11 只该种默认区：{rows:?}"
+        );
+        let value: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'active_workspace_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, "default", "当前区必须种成默认区");
+    }
+
+    /// V11 一句 DDL 失败时，前面已经建好的 `workspaces` 与加好的列必须一起退回去，
+    /// `schema_meta` 也不许登记 11（否则下次开机跳过 V11，留下半拉库起不来 —— `db.rs:136-144`
+    /// 那段注释写的就是这个坑）。判据形状沿用 `apply_version` 那条 dup-CREATE 探针。
+    #[test]
+    fn v11_is_atomic_when_a_later_statement_fails() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta (version INTEGER NOT NULL, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for (target, ddl) in [
+            (1, V1),
+            (2, V2),
+            (3, V3),
+            (4, V4),
+            (5, V5),
+            (6, V6),
+            (7, V7),
+            (8, V8),
+            (9, V9),
+            (10, V10),
+        ] {
+            apply_version(&conn, target, ddl).unwrap();
+        }
+        let broken = format!("{V11}\nCREATE TABLE v11_probe(x);\nCREATE TABLE v11_probe(x);");
+
+        assert!(apply_version(&conn, 11, &broken).is_err(), "重复建表必须报错");
+
+        let tables: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'workspaces'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tables, 0, "V11 半途失败必须连已经建好的 workspaces 一起回滚");
+        let cols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = 'workspace_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cols, 0, "加到一半的列也必须退回去");
+        let ver: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, 10, "失败的版本一律不许登记 schema_meta");
+    }
+
+    /// V12 必须建出 project_versions 的八列与两条具名索引；唯一索引必须带 partial 条件。
+    #[test]
+    fn v12_project_versions_table_and_indexes_exist() {
+        let conn = open_in_memory().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('project_versions') ORDER BY cid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(
+            cols.join(","),
+            "id,project_id,version,released_at,content,created_at,updated_at,deleted_at",
+            "V12 的 project_versions 列集合/顺序不对：{cols:?}"
+        );
+        let idx: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                  WHERE type='index' AND tbl_name='project_versions' AND sql IS NOT NULL
+                  ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(
+            idx,
+            vec!["ix_project_version_project", "ux_project_version_project_version"],
+            "V12 的具名索引不对：{idx:?}"
+        );
+        let ux: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='ux_project_version_project_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(ux.contains("WHERE deleted_at IS NULL"), "唯一索引必须是 partial：{ux}");
+    }
+
+    /// V12 零回填：库停在 V11 时先落项目与标签，跑 migrate 后版本表必须 0 行，
+    /// 其余业务字段一个字节都不许变。
+    #[test]
+    fn v12_backfills_nothing() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta (version INTEGER NOT NULL, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for (target, ddl) in [
+            (1, V1), (2, V2), (3, V3), (4, V4), (5, V5),
+            (6, V6), (7, V7), (8, V8), (9, V9), (10, V10), (11, V11),
+        ] {
+            apply_version(&conn, target, ddl).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO projects (id, name, customer) VALUES ('p-old', '存量项目', '甲客户')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO project_tags (id, project_id, tag) VALUES ('t-old', 'p-old', '政务')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_versions", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "V12 不许回填任何版本行");
+        let bits: String = conn
+            .query_row(
+                "SELECT name || '/' || customer FROM projects WHERE id = 'p-old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bits, "存量项目/甲客户", "V12 只建表，不许碰存量项目");
+        let tag: String = conn
+            .query_row("SELECT tag FROM project_tags WHERE id = 't-old'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tag, "政务");
+        let ver: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, TARGET_VERSION);
+    }
+
+    /// V13 只建表：存量备注一字不动，截图表 0 行（spec §三）。
+    #[test]
+    fn v13_backfills_nothing() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta (version INTEGER NOT NULL, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for (target, ddl) in [
+            (1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6),
+            (7, V7), (8, V8), (9, V9), (10, V10), (11, V11), (12, V12),
+        ] {
+            apply_version(&conn, target, ddl).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO projects (id, name) VALUES ('p-old', '存量项目')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ledger_notes (id, project_id, title, body)
+             VALUES ('n-old', 'p-old', '旧备注', '旧正文')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM note_assets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "V13 不许回填任何截图行");
+        let note: String = conn
+            .query_row(
+                "SELECT title || '/' || body FROM ledger_notes WHERE id = 'n-old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(note, "旧备注/旧正文", "V13 只建表，不许碰存量备注");
+        let ver: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, TARGET_VERSION);
     }
 }

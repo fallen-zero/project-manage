@@ -49,6 +49,17 @@ export interface Note {
   tag: string | null;
 }
 
+export type NoteAssetMime = "image/png" | "image/jpeg" | "image/webp";
+
+export interface NoteAsset {
+  id: string;
+  noteId: string;
+  mime: NoteAssetMime;
+  size: number;
+  createdAt: string;
+  dataUrl: string;
+}
+
 export interface Ledger {
   envs: LedgerEnv[];
   credentials: Credential[];
@@ -126,3 +137,18 @@ export const LINK_LABELS: Record<LinkKind, string> = {
 
 // 表单里的空串一律按「没有内容」处理，避免把 "  " 存进库。
 export const blank = (v: string): string | null => (v.trim() === "" ? null : v.trim());
+
+// M11-b 台账导出（spec §四）：命令形参与回执，字段与 Rust 侧 camelCase 一一对应。
+export interface LedgerExportInput {
+  projectId: string;
+  format: "xlsx" | "md";
+  includeSecrets: boolean;
+  path: string;
+}
+
+export interface LedgerExportSummary {
+  path: string;
+  sheets: number;
+  rows: number;
+  includedSecrets: boolean;
+}

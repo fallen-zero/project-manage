@@ -8,11 +8,22 @@ use rusqlite::Connection;
 use crate::error::AppResult;
 use crate::extract::kind_of;
 
+/// 单文件上限的**单一真源**（M5.5 清账#1）。`ScanOptions::load` 的两处默认（行缺失回退、
+/// 解析失败回退）都引它，`db.rs` 的种子值必须等于它 —— 由 `db::tests::the_three_20mb_defaults_are_one_number` 钉。
+pub const DEFAULT_MAX_FILE_BYTES: u64 = 20_971_520;
+
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
     pub exclude_dirs: Vec<String>,
     pub max_file_bytes: u64,
     pub max_files_per_project: i64,
+    /// 本机 Windows OCR 是否可用（M6 D4）。`load` 只给保守默认 true，真实探测值由
+    /// `index_job` 的 worker 在 `ocr::ocr_available()` 填进来；false 时图片在扫描门视同未支持类型。
+    pub ocr_available: bool,
+    /// 本机有没有 LibreOffice 可用（M7 D6）。`load` 只给保守默认 true，真实探测值由
+    /// `index_job` 的 worker 每轮现探后填进来（D5：**不记忆化**，换来「一键装完不用重启」）；
+    /// false 时 `.doc`/`.ppt` 在扫描门视同未支持类型。
+    pub soffice_available: bool,
 }
 
 impl ScanOptions {
@@ -29,7 +40,8 @@ impl ScanOptions {
         // 数字解析失败仍退默认值：M3 没有写这三行的入口（Task 11 只读展示），
         // 要把它做成 Err 得连设置写入口与校验一起动，不在本任务范围。
         let list = get("index_exclude_dirs", "node_modules,dist,build,target,__pycache__,.git")?;
-        let bytes = get("index_max_file_bytes", "20971520")?;
+        let default_bytes = DEFAULT_MAX_FILE_BYTES.to_string();
+        let bytes = get("index_max_file_bytes", &default_bytes)?;
         let cap = get("index_max_files_per_project", "50000")?;
         Ok(ScanOptions {
             exclude_dirs: list
@@ -37,8 +49,15 @@ impl ScanOptions {
                 .map(|s| s.trim().to_owned())
                 .filter(|s| !s.is_empty())
                 .collect(),
-            max_file_bytes: bytes.parse().unwrap_or(20_971_520),
+            max_file_bytes: bytes.parse().unwrap_or(DEFAULT_MAX_FILE_BYTES),
             max_files_per_project: cap.parse().unwrap_or(50_000),
+            // 默认「可用」：load 拿不到探测值（不该为此依赖 ocr 模块）；生产里真实值由 `index_job`
+            // 的 worker 线程体在调 `run_pass` 之前用 `ocr::ocr_available()` 覆盖（run_pass 只吃 &ScanOptions、不 load）。
+            // M7：`soffice_available` 同一形状（默认 true 是惰性兜底，worker 每轮现探覆盖）。这两个默认值
+            // 由 `load_defaults_both_capability_flags_to_true` 一条钉住 —— 谁改成 false 必须有测试变红。
+            ocr_available: true,
+            // 探测函数在 `legacy_office`，这里不依赖它（同上：load 只做保守默认）。
+            soffice_available: true,
         })
     }
 }
@@ -112,8 +131,15 @@ pub fn scan_root(root: &Path, opts: &ScanOptions) -> ScanOutcome {
                 let Some(scanned) = to_scanned(&entry) else {
                     continue;
                 };
-                if kind_of(&scanned.ext).is_none() {
-                    continue; // 未支持类型不建行，也不占配额，见测试里的说明
+                match kind_of(&scanned.ext) {
+                    None => continue, // 未支持类型不建行，也不占配额，见测试里的说明
+                    // D4：无 OCR 时图片同未支持 —— 不建行不占配额（降级门在这一处而非 run_pass）。
+                    Some(crate::extract::DocKind::Image) if !opts.ocr_available => continue,
+                    // M7 D6：无 LibreOffice 时旧格式同未支持。**全仓只有这一处**该判据（spec §五.3），
+                    // 出现第二处就会造出「UI 说支持、扫描又挡一遍」的双口径。
+                    Some(crate::extract::DocKind::LegacyWord) | Some(crate::extract::DocKind::LegacySlides)
+                        if !opts.soffice_available => continue,
+                    _ => {}
                 }
                 // 配额必须打在「分大小两桶之前」：超限文件同样会各落一行 skipped，同样撑表。
                 // 放在 oversize 分支之后，上限对「全是超限大文件的项目」根本不生效 ——
@@ -145,6 +171,8 @@ mod tests {
             exclude_dirs: exclude.iter().map(|s| s.to_string()).collect(),
             max_file_bytes: MAX,
             max_files_per_project: 50000,
+            ocr_available: true,
+            soffice_available: true,
         }
     }
 
@@ -162,7 +190,7 @@ mod tests {
         touch(dir, "交付/Node_Modules/index.js", b"z");        // 大小写不同，也要排除
         touch(dir, "dist/bundle.js", b"w");                     // 排除目录本身
         touch(dir, "readme.txt", b"hello");
-        touch(dir, "图片/logo.png", b"\x89PNG\r\n\x1a\n");      // 支持清单外，不建行
+        touch(dir, "图片/logo.exe", b"MZ");                     // 可执行文件，支持清单外，不建行（M6 起 png 已支持，例子换成 exe）
         touch(dir, "报价.xlsx.zip", b"PK");                     // 压缩包，不建行
     }
 
@@ -186,7 +214,7 @@ mod tests {
         tree(dir.path());
         let out = scan_root(dir.path(), &opts(&[]));
         assert!(!out.files.is_empty(), "整棵树什么都没扫出来时，下面那条 all() 是空转的真");
-        assert!(out.files.iter().all(|f| f.ext != "png" && f.ext != "zip"), "{:?}",
+        assert!(out.files.iter().all(|f| f.ext != "exe" && f.ext != "zip"), "{:?}",
             out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
     }
 
@@ -232,6 +260,93 @@ mod tests {
         assert!(out.files.is_empty(), "全部超限不该有可抽取行：{}", out.files.len());
         assert_eq!(out.over_size.len(), 10, "超限行也要撞配额就停：收了 {}", out.over_size.len());
         assert!(out.capped, "只有超限文件的项目触顶同样要标记");
+    }
+
+    /// D4：本机没有 OCR 识别器时，图片在**扫描门**就视同未支持类型 —— 不建行、不进
+    /// files/over_size、不占配额（等同 png 未支持的老行为）。降级门在 :120 而非 run_pass：
+    /// 那里才是「未支持不建行」的单一落点（Ruling，见账本 Task 4）。
+    #[test]
+    fn images_are_not_scanned_when_ocr_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.png"), b"not-really-png").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "合同验收").unwrap();
+        let mut o = opts(&[]);
+        o.ocr_available = false;
+        let out = scan_root(dir.path(), &o);
+        assert!(out.files.iter().all(|f| f.ext != "png"), "OCR 不可用时 png 不该进 files：{:?}",
+            out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
+        assert!(out.over_size.iter().all(|f| f.ext != "png"), "也不该进超限桶（不占配额）");
+        assert!(out.files.iter().any(|f| f.ext == "txt"), "txt 不受影响");
+    }
+
+    /// OCR 可用时图片照常放行建行（这里不真跑 OCR，只验扫描层放行；真识别在 extract 阶段）。
+    #[test]
+    fn images_are_scanned_when_ocr_available() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.png"), b"x").unwrap();
+        let mut o = opts(&[]);
+        o.ocr_available = true;
+        let out = scan_root(dir.path(), &o);
+        assert!(out.files.iter().any(|f| f.ext == "png"), "可用时 png 应放行建行：{:?}",
+            out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
+    }
+
+    /// D6：探不到 LibreOffice 时，`.doc`/`.ppt` 与今天的未支持类型**完全同路**——
+    /// 不建行、不进 `over_size`、不占单项目配额。降级门只有这一处落点。
+    /// 四条断言按「变异各打红哪一条」排序，夹具 5 份 = 1 txt + 旧格式 4 份（两份 1 字节、
+    /// 两份 MAX+1 稀疏，`File::create` + `set_len` 造大文件：扫描层只读元数据，不写 21 MB
+    /// 真字节，守 -j 1 机器的内存规矩）：
+    /// ① 超限桶不含 doc/ppt —— 钉「臂必须**先于**超限分桶」：臂被挪到 `if size > max_file_bytes`
+    ///    之后时，两份 21 MB 旧格式会在触顶前落进这一桶打红这里（1 字节夹具永远进不了这桶，
+    ///    光有小文件的断言是非伪造的）；
+    /// ② `!capped` 配 `max_files_per_project = 3` —— 钉「不占配额」：旧格式一旦被计数，
+    ///    第 4 份文件就触顶打红这里；
+    /// ③ `files` 不含 doc/ppt —— 钉「不建行」；④ txt 照常入库。
+    #[test]
+    fn legacy_docs_are_not_scanned_when_soffice_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("旧报告.doc"), b"x").unwrap();
+        std::fs::write(dir.path().join("旧片子.ppt"), b"x").unwrap();
+        std::fs::write(dir.path().join("新说明.txt"), b"hello").unwrap();
+        for name in ["超大旧报告.doc", "超大旧片子.ppt"] {
+            let f = std::fs::File::create(dir.path().join(name)).unwrap();
+            f.set_len(MAX + 1).unwrap();
+        }
+        let mut o = opts(&[]);
+        o.soffice_available = false;
+        o.max_files_per_project = 3; // 5 份文件里只有 txt 该被计数：旧格式占配额即触顶
+        let out = scan_root(dir.path(), &o);
+        assert!(out.over_size.iter().all(|f| f.ext != "doc" && f.ext != "ppt"),
+            "也不该进超限桶（降级臂必须先于超限分桶）：{:?}",
+            out.over_size.iter().map(|f| &f.ext).collect::<Vec<_>>());
+        assert!(!out.capped, "旧格式不该占单项目配额（配额=3，只有 txt 该被计数）：files={} over_size={}",
+            out.files.len(), out.over_size.len());
+        assert!(out.files.iter().all(|f| f.ext != "doc" && f.ext != "ppt"),
+            "无 LibreOffice 时旧格式不该进清单：{:?}", out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
+        assert!(out.files.iter().any(|f| f.ext == "txt"), "纯文本不受影响");
+    }
+
+    /// 对照臂：可用时放行建行（扫描层只放行，真转换在抽取阶段，别在这里跑子进程）。
+    /// doc 与 ppt 都要放行 —— 两条 DocKind 共用同一臂，只断 .doc 的话 ppt 那半被删也不会红。
+    #[test]
+    fn legacy_docs_are_scanned_when_soffice_is_available() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("旧报告.doc"), b"x").unwrap();
+        std::fs::write(dir.path().join("旧片子.ppt"), b"x").unwrap();
+        let out = scan_root(dir.path(), &opts(&[])); // 测试用 opts() 默认 soffice_available=true
+        assert!(out.files.iter().any(|f| f.ext == "doc") && out.files.iter().any(|f| f.ext == "ppt"),
+            "可用时 .doc/.ppt 都应放行：{:?}", out.files.iter().map(|f| &f.ext).collect::<Vec<_>>());
+    }
+
+    /// 兑 M6 终审 Minor-6 的同形账：`load` 的两个能力默认值**必须有测试钉住**。
+    /// 默认 true 是惰性兜底（生产由 worker 覆盖成活探测值），两条消费路径从不喂给 scan_root；
+    /// 没有这一条，谁把默认改成 false 也不会有任何测试变红。
+    #[test]
+    fn load_defaults_both_capability_flags_to_true() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let o = ScanOptions::load(&conn).unwrap();
+        assert!(o.ocr_available, "load 的 OCR 默认值（生产会被 worker 覆盖）");
+        assert!(o.soffice_available, "load 的 LibreOffice 默认值（同上）");
     }
 
     /// 根目录自己的名字命中排除清单时不许剪掉整棵树：少掉 `entry.depth() > 0` 会得到

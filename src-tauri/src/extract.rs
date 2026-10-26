@@ -202,10 +202,18 @@ pub enum DocKind {
     Slides,
     Workbook,
     Pdf,
+    /// M6：位图图片，正文经 Windows 原生 OCR（`ocr::image_text`）取得。
+    Image,
+    /// M7：旧版 Office 二进制格式（Word 97-2003 / PowerPoint 97-2003），
+    /// 经本机 LibreOffice 现转 docx/pptx 后走 `office_text`（`legacy_office::legacy_text`）。
+    LegacyWord,
+    LegacySlides,
 }
 
 /// 纯文本分支的扩展名清单，`kind_of` 与下面的 `SUPPORTED` 都从它出发。
-/// .doc/.ppt 属 M7（要 LibreOffice headless）、图片属 M6（OCR），本版本不登记、不建行。
+/// 图片自 M6 起走 `DocKind::Image` 的 OCR 分支（在 `SUPPORTED` 里，但**不是**纯文本，别塞进这张表）。
+/// 旧版 .doc/.ppt 自 M7 起走 `DocKind::LegacyWord`/`LegacySlides` 的转换分支（在 `SUPPORTED` 里，
+/// 但**不是**纯文本，别塞进这张表）。
 const TEXT_EXTS: &[&str] = &[
     "txt", "md", "markdown", "csv", "json", "xml", "yml", "yaml", "ini", "conf", "sql", "java",
     "py", "js", "ts", "bat", "sh",
@@ -216,7 +224,8 @@ const TEXT_EXTS: &[&str] = &[
 /// 钉住——清单里出现 `kind_of` 分派不到的扩展名会直接红。
 const SUPPORTED: &[&str] = &[
     "txt", "md", "markdown", "csv", "json", "xml", "yml", "yaml", "ini", "conf", "sql", "java",
-    "py", "js", "ts", "bat", "sh", "docx", "pptx", "xlsx", "xls", "pdf",
+    "py", "js", "ts", "bat", "sh", "docx", "pptx", "xlsx", "xls", "pdf", "png", "jpg", "jpeg",
+    "webp", "bmp", "doc", "ppt",
 ];
 
 pub fn supported_exts() -> &'static [&'static str] {
@@ -233,6 +242,9 @@ pub fn kind_of(ext: &str) -> Option<DocKind> {
             "pptx" => Some(DocKind::Slides),
             "xlsx" | "xls" => Some(DocKind::Workbook),
             "pdf" => Some(DocKind::Pdf),
+            "png" | "jpg" | "jpeg" | "webp" | "bmp" => Some(DocKind::Image),
+            "doc" => Some(DocKind::LegacyWord),
+            "ppt" => Some(DocKind::LegacySlides),
             _ => None,
         }
     }
@@ -298,10 +310,17 @@ pub fn extract_text(path: &Path) -> AppResult<String> {
         Some(DocKind::Slides) => office_text(path, true),
         Some(DocKind::Workbook) => sheet_text(path),
         Some(DocKind::Pdf) => pdf_text(path),
+        // M6：图片直接透传 `image_text` 自己的 AppResult，这层不吞错（D5 靠「Ok(\"\") vs Err」
+        // 区分空图与识别失败，run_pass 既有 arm 分别落 skipped(empty_text)/failed）。
+        Some(DocKind::Image) => crate::ocr::image_text(path),
+        // M7：旧格式先经本机 LibreOffice 现转 docx/pptx 再走既有 office_text；
+        // Ok("") 是合法结果（转换成功的空文档），由 run_pass 落 skipped(empty_text)，不许在这层改判。
+        Some(DocKind::LegacyWord) => crate::legacy_office::legacy_text(path, false),
+        Some(DocKind::LegacySlides) => crate::legacy_office::legacy_text(path, true),
         None => Err(fail(
             "extract_unsupported",
             &format!("不支持的文件类型 .{ext}"),
-            "M3 只索引文本/Office/PDF；图片属 M6 OCR，.doc/.ppt 属 M7",
+            "文本/Office（含 .doc/.ppt）/PDF/图片都已接入；压缩包等类型仍不索引",
         )),
     }
 }
@@ -505,10 +524,39 @@ mod tests {
         let e = extract_text(&dir.path().join("lib.dll")).unwrap_err();
         assert_eq!(e.code, "extract_unsupported");
 
+        // M6 起 png 已分派到 Image 走 OCR，不再报「不支持」。半截假 PNG（只有签名没有 IHDR）
+        // 在真机落 Err(extract_failed)（解码失败，同 ocr::image_text_rejects_non_image_bytes）；
+        // 无 OCR 语言包的盒子也落 Err。这里只钉「路由变了」这个可证伪事实：码名不许是 extract_unsupported。
         let png = dir.path().join("截图.PNG");
         std::fs::write(&png, b"\x89PNG\r\n\x1a\n").unwrap();
-        let e = extract_text(&png).unwrap_err();
-        assert_eq!(e.code, "extract_unsupported", "图片属 M6 OCR，本版本明确不支持");
+        let e = match extract_text(&png) {
+            Ok(t) => panic!("半截假 PNG 不该识别成功，实得 {:?}", t.chars().count()),
+            Err(e) => e,
+        };
+        assert_ne!(e.code, "extract_unsupported", "图片已接 OCR，不许再报不支持：{}", e.code);
+    }
+
+    /// M6：5 个图片扩展名必须**同时**满足两件事——`kind_of` 分派到 `DocKind::Image`（抽取侧）、
+    /// 出现在 `supported_exts()` 里（UI 承诺侧）。这正是 `supported_exts_list_matches_the_dispatch_table`
+    /// 双向查的那一格，图片新加，所以点名测一遍。
+    #[test]
+    fn png_kind_of_routes_to_image_and_supported_list_includes_image_exts() {
+        for e in ["png", "jpg", "jpeg", "webp", "bmp"] {
+            assert!(matches!(kind_of(e), Some(DocKind::Image)), "{e} 应分派到 Image");
+            assert!(supported_exts().contains(&e), "{e} 应在 SUPPORTED 清单");
+        }
+    }
+
+    /// M7：`.doc`/`.ppt` 必须**同时**满足两件事——`kind_of` 分派到两个新 variant（抽取侧）、
+    /// 且出现在 `supported_exts()`（UI 承诺侧）。与 M6 的 `png_kind_of…` 同形。
+    #[test]
+    fn legacy_office_exts_dispatch_and_are_listed() {
+        assert!(matches!(kind_of("doc"), Some(DocKind::LegacyWord)), ".doc 应分派到 LegacyWord");
+        assert!(matches!(kind_of("ppt"), Some(DocKind::LegacySlides)), ".ppt 应分派到 LegacySlides");
+        assert!(matches!(kind_of("DOC"), Some(DocKind::LegacyWord)), "大小写不敏感");
+        for e in ["doc", "ppt"] {
+            assert!(supported_exts().contains(&e), "{e} 应在 UI 清单");
+        }
     }
 
     /// 分派表和 supported_exts() 必须同源，而且**两个方向都要查**：

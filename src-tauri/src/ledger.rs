@@ -12,6 +12,11 @@ use crate::vault::{self, MasterKey};
 
 const ENVS: [&str; 4] = ["dev", "test", "pre", "prod"];
 
+/// 环境的展示顺序（dev→test→pre→prod）。**唯一一处**：台账列表与台账导出共用它，
+/// 别再各抄一遍 —— 两处漂开的症状是「界面上 dev 在第一个、导出的文件里不是」。
+pub(crate) const ENV_ORDER_SQL: &str =
+    "CASE env WHEN 'dev' THEN 0 WHEN 'test' THEN 1 WHEN 'pre' THEN 2 ELSE 3 END";
+
 fn invalid(msg: &str) -> AppError {
     AppError::new("invalid_input", msg, Some("检查表单必填项"))
 }
@@ -188,6 +193,8 @@ type CipherCells = (Option<Vec<u8>>, Option<Vec<u8>>);
 /// 按需解密一个敏感字段。AAD 用「行 id + 字段名」，与写入时一致。
 pub fn reveal(conn: &Connection, mk: &MasterKey, kind: &str, id: &str, field: &str) -> AppResult<String> {
     let (table, col_name, cipher_col) = secret_column(kind, field)?;
+    // 行守卫排在解密之前：别区的密文一个字节也不许拆（软删行同样按「记录不存在」报，spec §四）。
+    crate::workspace::ensure_active_row(conn, table, id)?;
     let sql = format!(
         "SELECT {cipher_col}, {} FROM {table} WHERE id = ?1 AND deleted_at IS NULL",
         nonce_column(cipher_col)
@@ -204,7 +211,8 @@ pub fn reveal(conn: &Connection, mk: &MasterKey, kind: &str, id: &str, field: &s
     Ok(value)
 }
 
-fn soft_delete(conn: &Connection, table: &str, id: &str) -> AppResult<()> {
+fn soft_delete(conn: &Connection, table: &'static str, id: &str) -> AppResult<()> {
+    crate::workspace::ensure_active_row(conn, table, id)?;
     let changed = conn.execute(
         &format!("UPDATE {table} SET deleted_at = datetime('now') WHERE id = ?1 AND deleted_at IS NULL"),
         [id],
@@ -217,8 +225,9 @@ fn soft_delete(conn: &Connection, table: &str, id: &str) -> AppResult<()> {
 
 fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
     let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM projects WHERE id = ?1 AND deleted_at IS NULL",
-        [project_id],
+        "SELECT COUNT(*) FROM projects
+          WHERE id = ?1 AND deleted_at IS NULL AND workspace_id = ?2",
+        params![project_id, crate::workspace::active_id(conn)?],
         |r| r.get(0),
     )?;
     if n == 0 {
@@ -228,11 +237,12 @@ fn project_exists(conn: &Connection, project_id: &str) -> AppResult<()> {
 }
 
 pub fn list(conn: &Connection, project_id: &str) -> AppResult<Ledger> {
+    crate::workspace::ensure_active_project(conn, project_id)?;
     let mut envs = Vec::new();
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, env, name, url, port, note FROM ledger_envs
-         WHERE project_id = ?1 AND deleted_at IS NULL ORDER BY CASE env WHEN 'dev' THEN 0 WHEN 'test' THEN 1 WHEN 'pre' THEN 2 ELSE 3 END",
-    )?;
+         WHERE project_id = ?1 AND deleted_at IS NULL ORDER BY {ENV_ORDER_SQL}, created_at"
+    ))?;
     let rows = stmt.query_map([project_id], |r| {
         Ok(Env {
             id: r.get(0)?,
@@ -369,6 +379,7 @@ pub fn create_env(conn: &Connection, project_id: &str, input: &EnvInput) -> AppR
 }
 
 pub fn update_env(conn: &Connection, id: &str, input: &EnvInput) -> AppResult<()> {
+    crate::workspace::ensure_active_row(conn, "ledger_envs", id)?;
     if input.name.trim().is_empty() || !ENVS.contains(&input.env.as_str()) {
         return Err(invalid("环境名称或取值不合法"));
     }
@@ -462,6 +473,7 @@ pub fn update_credential(
     id: &str,
     input: &CredentialInput,
 ) -> AppResult<()> {
+    crate::workspace::ensure_active_row(conn, "ledger_credentials", id)?;
     if input.title.trim().is_empty() {
         return Err(invalid("凭据标题不能为空"));
     }
@@ -544,6 +556,7 @@ pub fn update_server(
     id: &str,
     input: &ServerInput,
 ) -> AppResult<()> {
+    crate::workspace::ensure_active_row(conn, "ledger_servers", id)?;
     if input.name.trim().is_empty() {
         return Err(invalid("服务器名称不能为空"));
     }
@@ -594,6 +607,7 @@ fn normalize_link_kind(kind: &str) -> String {
 }
 
 pub fn update_link(conn: &Connection, id: &str, input: &LinkInput) -> AppResult<()> {
+    crate::workspace::ensure_active_row(conn, "ledger_links", id)?;
     if input.title.trim().is_empty() || input.url.trim().is_empty() {
         return Err(invalid("链接标题与地址都不能为空"));
     }
@@ -642,6 +656,7 @@ pub fn create_note(conn: &Connection, project_id: &str, input: &NoteInput) -> Ap
 }
 
 pub fn update_note(conn: &Connection, id: &str, input: &NoteInput) -> AppResult<()> {
+    crate::workspace::ensure_active_row(conn, "ledger_notes", id)?;
     if input.title.trim().is_empty() {
         return Err(invalid("备注标题不能为空"));
     }
@@ -694,6 +709,8 @@ mod tests {
                 delivery_deadline: None,
                 status: "立项".to_owned(),
                 tags: vec![],
+                parent_id: None,
+                workspace_id: None,
             },
         )
         .unwrap()
@@ -879,7 +896,9 @@ mod tests {
         delete_credential(&conn, &c.id).unwrap();
 
         assert!(list(&conn, &pid).unwrap().credentials.is_empty());
-        assert_eq!(reveal(&conn, &mk, "credential", &c.id, "password").unwrap_err().code, "invalid_input");
+        // M15 起 reveal 入口先走行守卫：软删行与跨区行、不存在的行同码（spec §四）。
+        // 「这一列没登记过」那一支仍是 invalid_input（行在、密文不在）。
+        assert_eq!(reveal(&conn, &mk, "credential", &c.id, "password").unwrap_err().code, "not_found");
         // 再删一次是「记录不存在」，不是静默成功。
         assert_eq!(delete_credential(&conn, &c.id).unwrap_err().code, "not_found");
     }
@@ -937,5 +956,69 @@ mod tests {
             ..cred_input("x", None, Some(PW))
         };
         assert!(create_credential(&conn, &mk, &pid, &bad).is_err());
+    }
+
+    /// 台账的读与写都只认活动区（M15 spec §4.1 / §4.2）：跨区与不存在同走 not_found。
+    #[test]
+    fn ledger_read_and_write_paths_are_scoped() {
+        let (conn, pid, mk) = fixture();
+        let env = create_env(&conn, &pid, &env_input("prod", "生产门户")).unwrap();
+        // 四个 update_* 各插一张表名不同的字面量守卫，逐一给证据（soft_delete 是共享函数，delete_env 一条即覆盖五个）。
+        let cred = create_credential(&conn, &mk, &pid, &cred_input("审批后台", Some(USER), Some(PW))).unwrap();
+        let srv = create_server(&conn, &mk, &pid, &server_input("应用节点 1", Some(USER))).unwrap();
+        let link = create_link(&conn, &pid, &link_input("jira", "迭代看板")).unwrap();
+        let note = create_note(
+            &conn,
+            &pid,
+            &NoteInput {
+                title: "坑点".to_owned(),
+                body: Some("验证码接口有 IP 白名单".to_owned()),
+                tag: None,
+            },
+        )
+        .unwrap();
+        let b = crate::workspace::create(&conn, "客户乙").unwrap();
+        conn.execute(
+            "UPDATE projects SET workspace_id = ?1 WHERE id = ?2",
+            params![b.id, pid],
+        )
+        .unwrap();
+
+        assert_eq!(list(&conn, &pid).unwrap_err().code, "not_found");
+        assert_eq!(
+            update_env(&conn, &env.id, &env_input("prod", "改坏了")).unwrap_err().code,
+            "not_found"
+        );
+        let name: String = conn
+            .query_row("SELECT name FROM ledger_envs WHERE id = ?1", [&env.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(name, "生产门户", "被拒的更新一个字都不许改");
+        assert_eq!(
+            update_credential(&conn, &mk, &cred.id, &cred_input("改", None, Some(PW2))).unwrap_err().code,
+            "not_found"
+        );
+        assert_eq!(
+            update_server(&conn, &mk, &srv.id, &server_input("改", Some(USER))).unwrap_err().code,
+            "not_found"
+        );
+        assert_eq!(
+            update_link(&conn, &link.id, &link_input("wiki", "改")).unwrap_err().code,
+            "not_found"
+        );
+        assert_eq!(
+            update_note(&conn, &note.id, &NoteInput { title: "改".to_owned(), body: None, tag: None })
+                .unwrap_err()
+                .code,
+            "not_found"
+        );
+        assert_eq!(delete_env(&conn, &env.id).unwrap_err().code, "not_found");
+        assert_eq!(
+            create_env(&conn, &pid, &env_input("dev", "别区挂环境")).unwrap_err().code,
+            "not_found"
+        );
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ledger_envs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "被拒的登记一条都不许多，跨区的行也没被删");
     }
 }
