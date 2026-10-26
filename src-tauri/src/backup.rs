@@ -20,7 +20,7 @@ pub const MANIFEST_ENTRY: &str = "manifest.json";
 /// D6 的代价不粉饰：库里只封四列 `*_cipher`，其余全是明文列，一个没加密的包 ≈ 一份内网入口清单。
 /// 界面念的是这一句，manifest 里存的也是这一句 —— 一份文本，两处出（别抄两遍再漂）。
 pub fn warn_plaintext_columns() -> &'static str {
-    "包内非 *_cipher 列为明文：项目名/编号/负责人/客户/联系人/合同号（含项目模板的同类字段）、工作区名称、服务器 ip 与堡垒机、各类 url、各表 note、待办内容、里程碑备注、日报内容、到期事项名称与备注、版本号与上线内容、项目修改日志的字段旧值/新值（含联系人、联系方式）。"
+    "包内非 *_cipher 列为明文：项目名/编号/负责人/客户/联系人/合同号（含项目模板的同类字段）、工作区名称、服务器 ip 与堡垒机、各类 url、各表 note、待办内容、里程碑备注、日报内容、到期事项名称与备注、版本号与上线内容、备注图片（二进制，截图内容未加密）、项目修改日志的字段旧值/新值（含联系人、联系方式）。"
 }
 
 /// manifest 里的一条文件记录 `{name,size,sha256}`：`size`/`sha256` 都打在条目的**原始字节**上。
@@ -677,6 +677,8 @@ mod tests {
         assert!(warn.contains("项目模板"), "漏了项目模板的明文列：{warn}");
         assert!(warn.contains("项目修改日志"), "漏了项目修改日志的旧值/新值：{warn}");
         assert!(warn.contains("版本号与上线内容"), "漏了版本台账的明文：{warn}");
+        // M16-b：截图是明文二进制，库与包都不加密。
+        assert!(warn.contains("备注图片（二进制"), "漏了备注图片的明文：{warn}");
     }
 
     /// 计数从库里现数，且必须与 V2/V3 建的表**逐张对上**。
@@ -868,7 +870,7 @@ mod tests {
         let dst = dir.path().join("templates.zip");
         let sum = export(&live, &dst).unwrap();
         assert_eq!(sum.schema_version, crate::db::TARGET_VERSION);
-        assert_eq!(sum.schema_version, 12, "M16-a 起包内 schema 必须是 12");
+        assert_eq!(sum.schema_version, 13, "M16-b 起包内 schema 必须是 13");
         assert_eq!(sum.counts.projects, 0);
         let (_unpacked, got) = unpack_db(&dst);
         let n: i64 = got
@@ -895,7 +897,7 @@ mod tests {
         let dst = dir.path().join("audit.zip");
         let sum = export(&live, &dst).unwrap();
         assert_eq!(sum.schema_version, crate::db::TARGET_VERSION);
-        assert_eq!(sum.schema_version, 12);
+        assert_eq!(sum.schema_version, 13);
         assert_eq!(sum.counts.projects, 0);
         let (_unpacked, got) = unpack_db(&dst);
         let n: i64 = got
@@ -918,7 +920,7 @@ mod tests {
         let dst = dir.path().join("workspaces.zip");
         let sum = export(&live, &dst).unwrap();
         assert_eq!(sum.schema_version, crate::db::TARGET_VERSION);
-        assert_eq!(sum.schema_version, 12, "M16-a 起包内 schema 必须是 12");
+        assert_eq!(sum.schema_version, 13, "M16-b 起包内 schema 必须是 13");
 
         let (_unpacked, got) = unpack_db(&dst);
         let names: Vec<String> = got
@@ -1532,7 +1534,7 @@ mod tests {
         let dst = dir.path().join("versions.zip");
         let sum = export(&live, &dst).unwrap();
         assert_eq!(sum.schema_version, crate::db::TARGET_VERSION);
-        assert_eq!(sum.schema_version, 12, "M16-a 起包内 schema 必须是 12");
+        assert_eq!(sum.schema_version, 13, "M16-b 起包内 schema 必须是 13");
         assert_eq!(sum.counts.projects, 1);
         assert_eq!(
             serde_json::to_value(sum.counts).unwrap().as_object().unwrap().len(),
@@ -1548,5 +1550,49 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, ("1.0.0".to_owned(), "2026-01-01".to_owned()));
+    }
+
+    /// M16-b 的备份半边：截图字节随整库快照进包，Counts 仍是七张表。
+    #[test]
+    fn backup_package_carries_note_assets_without_counting_them() {
+        let live = crate::db::open_in_memory().unwrap();
+        live.execute("INSERT INTO projects (id, name) VALUES ('p1', '甲项目')", [])
+            .unwrap();
+        live.execute(
+            "INSERT INTO ledger_notes (id, project_id, title, body)
+             VALUES ('n1', 'p1', '截图备注', '')",
+            [],
+        )
+        .unwrap();
+        let bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
+        live.execute(
+            "INSERT INTO note_assets (id, note_id, mime, size, data)
+             VALUES ('a1', 'n1', 'image/png', ?1, ?2)",
+            rusqlite::params![bytes.len() as i64, bytes.clone()],
+        )
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let dst = dir.path().join("assets.zip");
+        let sum = export(&live, &dst).unwrap();
+        assert_eq!(sum.schema_version, crate::db::TARGET_VERSION);
+        assert_eq!(sum.schema_version, 13, "M16-b 起包内 schema 必须是 13");
+        assert_eq!(
+            serde_json::to_value(sum.counts).unwrap().as_object().unwrap().len(),
+            7,
+            "note_assets 是新表，不进 Counts"
+        );
+
+        let (_unpacked, got) = unpack_db(&dst);
+        let (mime, size, data): (String, i64, Vec<u8>) = got
+            .query_row(
+                "SELECT mime, size, data FROM note_assets WHERE id = 'a1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(size, bytes.len() as i64);
+        assert_eq!(data, bytes, "截图字节必须原样随包");
     }
 }

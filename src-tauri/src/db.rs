@@ -95,7 +95,7 @@ fn pragma(conn: &Connection, name: &str, value: &str) -> AppResult<()> {
 
 /// 线性版本迁移：一个版本一段 DDL，只追加不改历史，便于备份包跨版本恢复。
 /// 提 `pub(crate)` 是给 M8 的验包判据比：包里的库比本机新就该拒（`backup::read_package`）。
-pub(crate) const TARGET_VERSION: i64 = 12;
+pub(crate) const TARGET_VERSION: i64 = 13;
 
 /// `pub(crate)` 是 M8 加的：`backup_import` 灌完包内库要能重放迁移（包里可能是旧版本）。
 pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
@@ -128,6 +128,7 @@ pub(crate) fn migrate(conn: &Connection) -> AppResult<()> {
             10 => V10,
             11 => V11,
             12 => V12,
+            13 => V13,
             _ => "",
         };
         apply_version(conn, target, ddl)?;
@@ -503,6 +504,21 @@ CREATE UNIQUE INDEX ux_project_version_project_version
     WHERE deleted_at IS NULL;
 ";
 
+/// v13：备注截图（M16-b spec §三）。图片字节直接存库（BLOB），无附件目录、无软删；
+/// 软删备注靠宿主行的 `deleted_at` 挡读，硬删备注由 FK 级联清图。
+const V13: &str = "
+CREATE TABLE note_assets (
+    id         TEXT PRIMARY KEY,
+    note_id    TEXT NOT NULL REFERENCES ledger_notes(id) ON DELETE CASCADE,
+    mime       TEXT NOT NULL,
+    size       INTEGER NOT NULL,
+    data       BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX ix_note_asset_note ON note_assets(note_id, created_at);
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -771,13 +787,48 @@ mod tests {
     }
 
     #[test]
-    fn v12_schema_meta_reaches_target_version_twelve() {
+    fn v13_schema_meta_reaches_target_version_thirteen() {
         let conn = open_in_memory().unwrap();
         let ver: i64 = conn
             .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, 12, "迁移必须跑到 12");
-        assert_eq!(TARGET_VERSION, 12, "= 上一条，两处别各写各的");
+        assert_eq!(ver, 13, "迁移必须跑到 13");
+        assert_eq!(TARGET_VERSION, 13, "= 上一条，两处别各写各的");
+    }
+
+    /// V13 必须建出截图表、索引，且表上没有软删列（硬删口径，spec §三）。
+    #[test]
+    fn v13_note_assets_table_and_index_exist() {
+        let conn = open_in_memory().unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('note_assets') ORDER BY cid")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|x| x.unwrap())
+            .collect();
+        assert_eq!(
+            cols.join(","),
+            "id,note_id,mime,size,data,created_at",
+            "V13 的列集合/顺序变了要同步 note_asset.rs 的 SELECT"
+        );
+        let idx: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='index' AND name='ix_note_asset_note'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, 1, "ix_note_asset_note 必须存在");
+        let soft: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('note_assets') WHERE name='deleted_at'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(soft, 0, "截图是硬删，不该有 deleted_at");
     }
 
     /// V10 必须建出日志表与两条显式索引。
@@ -1429,6 +1480,52 @@ mod tests {
             .query_row("SELECT tag FROM project_tags WHERE id = 't-old'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(tag, "政务");
+        let ver: i64 = conn
+            .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, TARGET_VERSION);
+    }
+
+    /// V13 只建表：存量备注一字不动，截图表 0 行（spec §三）。
+    #[test]
+    fn v13_backfills_nothing() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_meta (version INTEGER NOT NULL, applied_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        for (target, ddl) in [
+            (1, V1), (2, V2), (3, V3), (4, V4), (5, V5), (6, V6),
+            (7, V7), (8, V8), (9, V9), (10, V10), (11, V11), (12, V12),
+        ] {
+            apply_version(&conn, target, ddl).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO projects (id, name) VALUES ('p-old', '存量项目')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ledger_notes (id, project_id, title, body)
+             VALUES ('n-old', 'p-old', '旧备注', '旧正文')",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).unwrap();
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM note_assets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "V13 不许回填任何截图行");
+        let note: String = conn
+            .query_row(
+                "SELECT title || '/' || body FROM ledger_notes WHERE id = 'n-old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(note, "旧备注/旧正文", "V13 只建表，不许碰存量备注");
         let ver: i64 = conn
             .query_row("SELECT COALESCE(MAX(version),0) FROM schema_meta", [], |r| r.get(0))
             .unwrap();
