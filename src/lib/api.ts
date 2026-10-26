@@ -15,6 +15,7 @@ import type {
   LedgerExportInput,
   LedgerExportSummary,
   LinkInput,
+  NoteAsset,
   NoteInput,
   SecretField,
   SecretKind,
@@ -241,6 +242,12 @@ export const createNote = (projectId: string, input: NoteInput) =>
   invoke<Ledger["notes"][number]>("ledger_note_create", { projectId, input });
 export const updateNote = (id: string, input: NoteInput) => invoke<void>("ledger_note_update", { id, input });
 export const deleteNote = (id: string) => invoke<void>("ledger_note_delete", { id });
+
+export const listNoteAssets = (noteId: string) =>
+  invoke<NoteAsset[]>("note_asset_list", { noteId });
+export const saveNoteAsset = (noteId: string, dataUrl: string) =>
+  invoke<void>("note_asset_save", { noteId, dataUrl });
+export const deleteNoteAsset = (id: string) => invoke<void>("note_asset_delete", { id });
 
 // —— M3 全文索引：5 个命令 + 1 个进度事件（Task 10 的 aff828d）——
 // 形参按 camelCase 传，Tauri 会自动映射到 Rust 的 snake_case 形参（removeDir/ledgerList/vaultInit 已是先例）。

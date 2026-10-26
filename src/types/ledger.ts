@@ -49,6 +49,17 @@ export interface Note {
   tag: string | null;
 }
 
+export type NoteAssetMime = "image/png" | "image/jpeg" | "image/webp";
+
+export interface NoteAsset {
+  id: string;
+  noteId: string;
+  mime: NoteAssetMime;
+  size: number;
+  createdAt: string;
+  dataUrl: string;
+}
+
 export interface Ledger {
   envs: LedgerEnv[];
   credentials: Credential[];

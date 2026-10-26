@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type ClipboardEvent, type ReactNode } from "react";
 import { Copy, Eye, EyeOff, Pencil, Plus, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -19,7 +19,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { copyText, ledgerReveal } from "@/lib/api";
+import { copyText, deleteNoteAsset, ledgerReveal, listNoteAssets, saveNoteAsset } from "@/lib/api";
 import { toAppError, type AppErrorShape } from "@/lib/ipc";
 import { useLedgerStore, type Entity, type EntityInputs } from "@/stores/ledger";
 import { useVaultUnlocked } from "@/stores/vault";
@@ -34,6 +34,7 @@ import {
   type Link,
   type LinkKind,
   type Note,
+  type NoteAsset,
   type SecretField,
   type SecretKind,
   type Server,
@@ -153,6 +154,7 @@ export function LedgerPanel({ projectId }: { projectId: string }) {
   const { data, loading, saving, error, load, clear } = useLedgerStore();
   const unlocked = useVaultUnlocked();
   const [editing, setEditing] = useState<{ entity: Entity; id: string | null } | null>(null);
+  const [assetsTick, setAssetsTick] = useState(0);
 
   useEffect(() => {
     void load(projectId);
@@ -193,7 +195,12 @@ export function LedgerPanel({ projectId }: { projectId: string }) {
         onEdit={(id) => setEditing({ entity: "servers", id })}
       />
       <LinksSection items={data.links} onAdd={() => setEditing({ entity: "links", id: null })} onEdit={(id) => setEditing({ entity: "links", id })} />
-      <NotesSection items={data.notes} onAdd={() => setEditing({ entity: "notes", id: null })} onEdit={(id) => setEditing({ entity: "notes", id })} />
+      <NotesSection
+        items={data.notes}
+        reloadKey={assetsTick}
+        onAdd={() => setEditing({ entity: "notes", id: null })}
+        onEdit={(id) => setEditing({ entity: "notes", id })}
+      />
 
       {editing && (
         <LedgerFormDialog
@@ -201,6 +208,7 @@ export function LedgerPanel({ projectId }: { projectId: string }) {
           id={editing.id}
           envs={data.envs}
           saving={saving}
+          onAssetsChanged={() => setAssetsTick((v) => v + 1)}
           onClose={() => setEditing(null)}
         />
       )}
@@ -412,7 +420,17 @@ function LinksSection({
   );
 }
 
-function NotesSection({ items, onAdd, onEdit }: { items: Note[]; onAdd: () => void; onEdit: (id: string) => void }) {
+function NotesSection({
+  items,
+  reloadKey,
+  onAdd,
+  onEdit,
+}: {
+  items: Note[];
+  reloadKey: number;
+  onAdd: () => void;
+  onEdit: (id: string) => void;
+}) {
   const { drop } = useLedgerStore();
   return (
     <div className="grid gap-1.5">
@@ -420,14 +438,62 @@ function NotesSection({ items, onAdd, onEdit }: { items: Note[]; onAdd: () => vo
       {items.length === 0 ? (
         <Empty text="接口坑点、遗留问题、需求变更这类「当时知道、三个月后想不起来」的事。" />
       ) : (
-        items.map((n) => <NoteRow key={n.id} note={n} onEdit={() => onEdit(n.id)} onDelete={() => void drop("notes", n.id)} />)
+        items.map((n) => (
+          <NoteRow
+            key={n.id}
+            note={n}
+            reloadKey={reloadKey}
+            onEdit={() => onEdit(n.id)}
+            onDelete={() => void drop("notes", n.id)}
+          />
+        ))
       )}
     </div>
   );
 }
 
-function NoteRow({ note, onEdit, onDelete }: { note: Note; onEdit: () => void; onDelete: () => void }) {
+function NoteRow({
+  note,
+  reloadKey,
+  onEdit,
+  onDelete,
+}: {
+  note: Note;
+  reloadKey: number;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
   const [open, setOpen] = useState(false);
+  const [assets, setAssets] = useState<NoteAsset[]>([]);
+  const [assetsError, setAssetsError] = useState<AppErrorShape | null>(null);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    void listNoteAssets(note.id)
+      .then((rows) => {
+        if (!alive) return;
+        setAssets(rows);
+        setAssetsError(null);
+      })
+      .catch((e) => {
+        if (alive) setAssetsError(toAppError(e));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open, note.id, reloadKey, tick]);
+
+  const removeAsset = async (id: string) => {
+    try {
+      await deleteNoteAsset(id);
+      setTick((v) => v + 1);
+    } catch (e) {
+      setAssetsError(toAppError(e));
+    }
+  };
+
   return (
     <div className="rounded-md border bg-background px-2 py-1.5 text-sm">
       <div className="flex items-center gap-2">
@@ -442,8 +508,42 @@ function NoteRow({ note, onEdit, onDelete }: { note: Note; onEdit: () => void; o
           <Trash2 className="size-4" />
         </Button>
       </div>
-      {open && note.body && (
-        <p className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">{note.body}</p>
+      {open && (
+        <div className="mt-2 grid gap-2">
+          {note.body && (
+            <p className="whitespace-pre-wrap text-xs text-muted-foreground">{note.body}</p>
+          )}
+          {assetsError && (
+            <p className="text-xs text-destructive" title={assetsError.hint ?? undefined}>
+              {assetsError.message}
+            </p>
+          )}
+          {assets.length === 0 ? (
+            <p className="text-xs text-muted-foreground">还没有截图。编辑这条备注时可粘贴截图。</p>
+          ) : (
+            <div className="grid grid-cols-4 gap-2">
+              {assets.map((a) => (
+                <div key={a.id} className="relative w-16">
+                  <img
+                    src={a.dataUrl}
+                    alt="备注图片"
+                    title={`${Math.round(a.size / 1024)} KB`}
+                    className="h-16 w-16 rounded border object-cover"
+                  />
+                  <Button
+                    variant="secondary"
+                    size="icon"
+                    className="absolute -right-1 -top-1 size-5"
+                    title="删除截图"
+                    onClick={() => void removeAsset(a.id)}
+                  >
+                    <Trash2 className="size-3" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -567,18 +667,22 @@ function LedgerFormDialog({
   id,
   envs,
   saving,
+  onAssetsChanged,
   onClose,
 }: {
   entity: Entity;
   id: string | null;
   envs: LedgerEnv[];
   saving: boolean;
+  onAssetsChanged: () => void;
   onClose: () => void;
 }) {
   const spec = FORMS[entity];
   const { data, add, patch } = useLedgerStore();
   const [form, setForm] = useState<Form>(() => initialForm(entity, id, data));
   const [error, setError] = useState<AppErrorShape | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
   const isEdit = id !== null;
 
   useEffect(() => {
@@ -607,6 +711,38 @@ function LedgerFormDialog({
 
   const patch_ = (key: string, value: string) => setForm((f) => ({ ...f, [key]: value }));
 
+  const uploadPasted = async (e: ClipboardEvent<HTMLDivElement>) => {
+    if (entity !== "notes" || !isEdit || uploading) return;
+    const files = Array.from(e.clipboardData.items)
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (files.length === 0) return;
+    e.preventDefault();
+    setNotice(null);
+    setError(null);
+    setUploading(true);
+    let added = 0;
+    for (const file of files) {
+      if (!NOTE_IMAGE_TYPES.includes(file.type)) {
+        setError({ code: "invalid_input", message: "只支持 PNG / JPEG / WebP 截图", hint: null });
+        break;
+      }
+      try {
+        await saveNoteAsset(id as string, await readAsDataUrl(file));
+        added += 1;
+      } catch (err) {
+        setError(toAppError(err));
+        break;
+      }
+    }
+    setUploading(false);
+    if (added > 0) {
+      onAssetsChanged();
+      setNotice(`已添加 ${added} 张截图，可在备注展开处查看`);
+    }
+  };
+
   const submit = async () => {
     setError(null);
     const missing = spec.fields.find((f) => f.required && !form[f.key]?.trim());
@@ -629,13 +765,18 @@ function LedgerFormDialog({
             {spec.title}
           </DialogTitle>
           <DialogDescription>
-            {entity === "credentials" || entity === "servers"
-              ? "账号与密码会加密后入库，明文只在解锁后按需解出单个字段。"
-              : "这些字段是明文列，会被全文检索捞到；密码请填在加密字段里。"}
+            {entity === "notes" && !isEdit
+              ? "截图请先保存备注，再在编辑时粘贴。正文是明文列，会被全文检索捞到。"
+              : entity === "credentials" || entity === "servers"
+                ? "账号与密码会加密后入库，明文只在解锁后按需解出单个字段。"
+                : "这些字段是明文列，会被全文检索捞到；密码请填在加密字段里。"}
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-3">
+        <div
+          className="grid gap-3"
+          onPaste={entity === "notes" && isEdit ? (e) => void uploadPasted(e) : undefined}
+        >
           {spec.fields.map((f) => (
             <div key={f.key} className="grid gap-1.5">
               <Label className="text-xs text-muted-foreground">
@@ -707,6 +848,8 @@ function LedgerFormDialog({
             {error.hint ? `（${error.hint}）` : ""}
           </p>
         )}
+        {notice && <p className="text-sm text-emerald-700">{notice}</p>}
+        {uploading && <p className="text-xs text-muted-foreground">图片保存中…</p>}
 
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
@@ -719,6 +862,17 @@ function LedgerFormDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+const NOTE_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
+
+function readAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("读取剪贴板图片失败"));
+    reader.readAsDataURL(file);
+  });
 }
 
 function initialForm(entity: Entity, id: string | null, data: Ledger): Form {
